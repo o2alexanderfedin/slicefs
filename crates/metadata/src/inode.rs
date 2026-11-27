@@ -249,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_intern_and_load_roundtrip() {
         use crate::store_io::StoreIo;
         use tempfile::TempDir;

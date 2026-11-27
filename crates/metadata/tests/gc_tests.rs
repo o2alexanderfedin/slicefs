@@ -1,6 +1,6 @@
 //! Tests for the GC engine, segment compaction, and background GC thread.
 
-#![allow(unused_imports)]
+#![allow(unused_imports, reason = "HashSet and GarbageCollector are not used by the current tests")]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -344,7 +344,7 @@ fn test_snapshot_roots_includes_all_anchors() {
         "snapshot root must be in snapshot_roots()"
     );
     assert!(
-        roots_after.len() >= 1,
+        !roots_after.is_empty(),
         "must have at least one root after snapshot"
     );
 

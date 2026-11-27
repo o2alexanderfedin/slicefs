@@ -403,8 +403,8 @@ fn test_dedup_5_copies_delete_3_verify_refcount_2() {
 
     // All must share the same digest
     let m0 = fs.meta().get_manifest(inodes[0]).unwrap();
-    for i in 1..5 {
-        let mi = fs.meta().get_manifest(inodes[i]).unwrap();
+    for (i, &ino) in inodes.iter().enumerate().take(5).skip(1) {
+        let mi = fs.meta().get_manifest(ino).unwrap();
         assert_eq!(m0, mi, "file {} must share digest with file 0", i);
     }
 
@@ -419,8 +419,8 @@ fn test_dedup_5_copies_delete_3_verify_refcount_2() {
     }
 
     // Remaining 2 files must still be readable
-    for i in 3..5 {
-        let content_read = fs.test_read(inodes[i], 0, 1024).unwrap();
+    for (i, &ino) in inodes.iter().enumerate().take(5).skip(3) {
+        let content_read = fs.test_read(ino, 0, 1024).unwrap();
         assert_eq!(content_read, content, "file {} must still be readable", i);
     }
 
@@ -691,9 +691,9 @@ fn test_error_read_nonexistent_inode() {
     let (fs, _dir) = fresh_fs();
     let result = fs.test_read(99999, 0, 100);
     // Should either return error or empty (depending on implementation)
-    match result {
-        Ok(data) => assert!(data.is_empty(), "reading non-existent inode must return empty"),
-        Err(_) => {} // Error is also acceptable
+    // An error is also acceptable.
+    if let Ok(data) = result {
+        assert!(data.is_empty(), "reading non-existent inode must return empty");
     }
 }
 
@@ -1202,7 +1202,7 @@ fn test_fsync_then_write_different_data_then_release() {
     fs.test_write(fh, 0, b"initial").unwrap();
     fs.test_fsync(ino, fh).unwrap();
 
-    // Overwrite with different data (triggers fallback to buffered)
+    // Overwrite with different data (triggers the switch to an overlay)
     fs.test_write(fh, 0, b"changed").unwrap();
     fs.test_release(ino, fh).unwrap();
 
@@ -1272,6 +1272,7 @@ fn test_crash_recovery_directory_structure_survives() {
     let store_dir = TempDir::new().unwrap();
 
     {
+        slicefs_cli::header::create(store_dir.path()).unwrap();
         std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
         let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));

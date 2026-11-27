@@ -1,0 +1,42 @@
+== gate 24-01 2026-11-26T18:52:00Z head=2534227
+== cargo test -p prolly
+test tests::unsorted_input_is_an_error ... ok
+test tests::entry_too_large_is_an_error ... ok
+test tests::malformed_node_is_an_error ... ok
+test tests::golden_root ... ok
+test tests::same_set_twice_writes_nothing ... ok
+test tests::cursor_iterates_in_order ... ok
+test tests::boundaries_ignore_value_bytes ... ok
+test tests::memory_is_bounded ... ok
+test tests::build_then_get_roundtrip ... ok
+test tests::node_size_limits ... ok
+test tests::levels_use_their_own_salt ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.95s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test_rc=0
+== cargo +stable clippy --locked -p prolly --all-targets
+clippy=0
+    Checking chunk-store v0.1.0 (<repo>/crates/chunk-store)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.61s
+== RUST_STABLE=stable scripts/safety/clippy.sh
+clippy_sh=0
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=31 tokens=132 result=ok
+== unsafe-count and the token count of crates/prolly
+UNSAFE files=31 tokens=132 result=ok
+0
+== cargo tree: who depends on prolly; what prolly depends on
+prolly 
+blake3 chunk-store prolly 
+== no change to the product crates or the format doc against a882251
+diff_rc=0
+== Cargo.lock: prolly block has no registry source line
+0
+== lines (D-18)
+     209 crates/prolly/src/lib.rs
+     195 crates/prolly/src/node.rs
+     123 crates/prolly/src/rule.rs
+     311 crates/prolly/src/tests.rs
+     414 crates/prolly/src/tree.rs
+    1252 total

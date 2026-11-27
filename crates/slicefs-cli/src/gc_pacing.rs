@@ -28,7 +28,9 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use chunk_store::sync::{Mutex, Rank};
 use std::time::{Duration, Instant};
 
 /// Above this free ratio: yield to writes.
@@ -86,14 +88,27 @@ pub fn mode_for(free: f64) -> Mode {
 /// `path`. On an error, or a file system that reports no blocks (some do on
 /// macOS), 1.0: "plenty", so a bad reading never makes the GC run more.
 pub fn free_ratio(path: &Path) -> f64 {
+    match fs_space(path) {
+        Some((free, total)) if total > 0 => (free as f64 / total as f64).clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+/// The available and total bytes of the file system that holds `path`
+/// (`statvfs`); `None` on an error or a file system that reports no blocks
+/// (some do on macOS). The GC temp space check of the chunk store
+/// (`chunk_store::Options::gc_free_space`).
+pub fn fs_space(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return 1.0 };
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c` is a valid C string and `sv` a valid out buffer.
     if unsafe { libc::statvfs(c.as_ptr(), &mut sv) } != 0 || sv.f_blocks == 0 {
-        return 1.0;
+        return None;
     }
-    (sv.f_bavail as f64 / sv.f_blocks as f64).clamp(0.0, 1.0)
+    // (f64: the field types differ between macOS and Linux; exact up to 2^53.)
+    let unit = sv.f_frsize as f64;
+    Some(((sv.f_bavail as f64 * unit) as u64, (sv.f_blocks as f64 * unit) as u64))
 }
 
 /// A reader of the free ratio (injected in tests).
@@ -156,6 +171,9 @@ pub struct WritePacer<'a> {
     clock: Box<dyn Clock + 'a>,
     cap: Duration,
     stop: &'a AtomicBool,
+    /// A leaf lock. The chunk store calls the pacer with its `gc` lock held,
+    /// so this has the store rank (a short-map rank would be taken after a
+    /// store-rank lock).
     state: Mutex<State>,
 }
 
@@ -173,12 +191,12 @@ impl<'a> WritePacer<'a> {
         let count = writes.load(Ordering::Relaxed);
         let now = clock.now();
         let state = State { count, changed: None, waited: Duration::ZERO, free: 1.0, free_at: None, period: (now, count) };
-        WritePacer { writes, free, clock, cap, stop, state: Mutex::new(state) }
+        WritePacer { writes, free, clock, cap, stop, state: Mutex::new(Rank::Store, state) }
     }
 
     /// The total time this pacer waited.
     pub fn waited(&self) -> Duration {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).waited
+        self.state.lock().waited
     }
 
     fn mode(&self, s: &mut State, now: Duration) -> Mode {
@@ -240,7 +258,7 @@ impl<'a> WritePacer<'a> {
 
 impl chunk_store::GcPacer for WritePacer<'_> {
     fn at_safe_point(&self) {
-        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = self.state.lock();
         let now = self.clock.now();
         match self.mode(&mut s, now) {
             Mode::FullSpeed => {}

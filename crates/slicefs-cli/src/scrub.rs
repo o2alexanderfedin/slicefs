@@ -84,7 +84,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
         ).into());
     }
 
-    crate::content::check_format(store_path)?;
+    crate::header::check(store_path, crate::header::Want::Read)?;
     let segs_dir = store_path.join("segments");
 
     // Load last committed root + all snapshot roots from segment replay.
@@ -106,7 +106,7 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
 
     // Step 1: Verify each root node can be read; say why not (#65).
     for root in &all_roots {
-        match (&mut io).get_node(root) {
+        match io.get_node(root) {
             Ok(_bytes) => roots_verified += 1,
             Err(e) => {
                 let hex = root.to_hex();
@@ -125,10 +125,10 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
                     Ok(objs) => {
                         for id in objs {
                             // Verified with the hasher of the object's own tag.
-                            if seen.insert(id) {
-                                if let Err(e) = cs.read(&id) {
-                                    errors.push(format!("content object {}: {e}", &id.to_hex()[..18]));
-                                }
+                            if seen.insert(id)
+                                && let Err(e) = cs.read(&id)
+                            {
+                                errors.push(format!("content object {}: {e}", &id.to_hex()[..18]));
                             }
                         }
                     }
@@ -235,6 +235,7 @@ mod tests {
 
     /// Write a valid seeded store in segment format.
     fn write_segment_store(dir: &TempDir) {
+        crate::header::create(dir.path()).unwrap();
         use metadata::wal::create_wal;
         let segs_dir = dir.path().join("segments");
         std::fs::create_dir_all(&segs_dir).unwrap();

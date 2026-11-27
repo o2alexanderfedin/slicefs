@@ -24,9 +24,11 @@
 pub mod writer;
 pub mod reader;
 pub mod compaction;
+pub mod switch;
 
 pub use writer::SegmentWriter;
 pub use reader::SegmentReader;
+pub use switch::{remove_switch_tmps, segment_file_count, write_switch_segment};
 
 use std::path::Path;
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
@@ -49,13 +51,15 @@ pub enum SegmentError {
 }
 
 /// Load all segment files from `segments_dir`, replay them, and return the last
-/// `RootUpdate` digest seen along with all `SnapshotRecord` entries.
+/// `RootUpdate` digest seen along with the last `SnapshotRecord` of each
+/// snapshot version (see [`last_per_version`]).
 ///
 /// Segment files are read in ascending order by segment_id (encoded in the filename
 /// as `segment-{id:06}.seg`). Legacy DictEntry records (type 0x01) are silently
 /// skipped: the metadata nodes in the chunk store are the data.
 /// RootUpdate records update the `last_root` tracker;
-/// SnapshotRecord entries are collected into the returned Vec.
+/// SnapshotRecord entries are collected in file order; the returned Vec has
+/// the last record of each version, in ascending version.
 ///
 /// Returns `(Option<last_root_digest>, Vec<SnapshotEntry>)`.
 pub fn load_store_from_segments(
@@ -108,21 +112,36 @@ pub fn load_store_from_segments(
         }
     }
 
-    Ok((last_root, snapshots))
+    Ok((last_root, last_per_version(snapshots)))
 }
+
+/// The last record of each snapshot version, in ascending version. `all` is
+/// in file order (segments by id, records in order), so a later record
+/// replaces an earlier one. The switch of `slicefs rehash` (a new root for a
+/// snapshot) and a crash between a commit's sync and its removal of older
+/// segments both leave two records of one version; the later one is current.
+fn last_per_version(all: Vec<SnapshotEntry>) -> Vec<SnapshotEntry> {
+    let mut by_version = std::collections::BTreeMap::new();
+    for s in all {
+        by_version.insert(s.version, s);
+    }
+    by_version.into_values().collect()
+}
+
+/// The root, the snapshots and the operation records of [`load_store_with_log`].
+type StoreWithLog = (Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>);
 
 /// Like [`load_store_from_segments`], and also return the operation records
 /// after the last `RootUpdate`, in order (the write log, #20), all in RAM.
 /// For tests and tools; a mount streams them with [`scan_store_with_log`].
-pub fn load_store_with_log(
-    segments_dir: &Path,
-) -> Result<(Option<ObjectKey>, Vec<SnapshotEntry>, Vec<Vec<u8>>), SegmentError> {
+pub fn load_store_with_log(segments_dir: &Path) -> Result<StoreWithLog, SegmentError> {
     let (root, snapshots, log) = scan_store_with_log(segments_dir)?;
     let ops = log.records().collect::<Result<Vec<_>, _>>()?;
     Ok((root, snapshots, ops))
 }
 
-/// Like [`load_store_from_segments`], and also find the write log (#20): the
+/// Like [`load_store_from_segments`] (the last record of each snapshot
+/// version), and also find the write log (#20): the
 /// operation records after the last `RootUpdate`. Pass 1 of 2: it keeps only
 /// where the log is, not its records, so memory does not grow with the log
 /// (#106). [`WriteLog::records`] is pass 2.
@@ -200,7 +219,7 @@ pub fn scan_store_with_log(
         spans.last_mut().expect("span of this segment").end_seq = end;
     }
     spans.retain(|s| s.end_seq > s.seq);
-    Ok((last_root, snapshots, WriteLog { spans, ops }))
+    Ok((last_root, last_per_version(snapshots), WriteLog { spans, ops }))
 }
 
 /// Where the write log is, from pass 1 ([`scan_store_with_log`]).

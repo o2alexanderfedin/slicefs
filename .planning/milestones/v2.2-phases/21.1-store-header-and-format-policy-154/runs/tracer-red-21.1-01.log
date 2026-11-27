@@ -1,0 +1,66 @@
+# red run at 89556f5: header core and MountOption::RO only (not committed)
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+
+running 1 test
+mount::tests::ro_compat_mount_writes_nothing --- FAILED
+
+failures:
+
+---- mount::tests::ro_compat_mount_writes_nothing stdout ----
+Chunk store: GC frees space with hole punching and compaction.
+Compression of new data: none.
+
+thread 'mount::tests::ro_compat_mount_writes_nothing' (132386174) panicked at crates/slicefs-cli/src/mount.rs:1251:9:
+the setup and the reads changed the store tree:
++ mount.lock
++ segments/segment-000002.seg
+- gc-tmp/
+- gc-tmp/bait
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    mount::tests::ro_compat_mount_writes_nothing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 359 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `-p slicefs-cli --lib`
+exit=101

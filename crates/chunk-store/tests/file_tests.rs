@@ -66,7 +66,7 @@ fn a_large_file_uses_a_manifest_tree() {
     let objs = file_objects(&s, key).unwrap();
     let nodes = objs.len() - chunk_store::chunk_ranges(&data).len();
     assert!(nodes >= 3, "a root and at least two leaves, got {nodes} nodes");
-    assert!(LEAF_ENTRIES <= 4096);
+    const { assert!(LEAF_ENTRIES <= 4096) };
     let mut r = FileReader::open(&s, key).unwrap();
     let mid = 20 << 20;
     assert_eq!(r.read(&s, mid as u64, 300_000).unwrap(), &data[mid..mid + 300_000]);

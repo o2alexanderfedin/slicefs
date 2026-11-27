@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
-use metadata::wal::{WalEntry, WalError, WalStrategy};
+use metadata::wal::{Lsn, WalEntry, WalError, WalStrategy};
 use slicefs_cli::filesystem::SliceFsFilesystem;
 use slicefs_cli::handlers::{self as h, EmptyResult};
 use slicefs_traits::metadata::MetadataStore;
@@ -22,10 +22,13 @@ struct Probe {
 struct ProbeWal(Probe);
 
 impl WalStrategy for ProbeWal {
-    fn log_mutation(&self, _e: &WalEntry) -> Result<(), WalError> {
+    fn append(&self, _e: &WalEntry) -> Result<Lsn, WalError> {
         if self.0.fail_appends.load(Ordering::SeqCst) {
             return Err(WalError::Io(std::io::Error::from_raw_os_error(libc::ENOSPC)));
         }
+        Ok(Lsn(0))
+    }
+    fn write_out(&self, _upto: Lsn) -> Result<(), WalError> {
         Ok(())
     }
     fn flush_and_sync(&self) -> Result<(), WalError> {

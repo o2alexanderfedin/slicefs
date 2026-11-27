@@ -11,8 +11,8 @@ part 2)".
 loss) after `fsync` returns does not lose it. A crash never makes the store
 unmountable.
 
-Today `fsync` syncs a WAL that gets records only at commit, so the metadata
-of a file reaches disk only at the next timer commit (30 s by default).
+Before part 1, `fsync` synced a WAL that got records only at commit, so the
+metadata of a file reached disk only at the next timer commit (30 s by default).
 
 ## Model
 
@@ -73,6 +73,9 @@ the mount with an error that names the LSN, so that nothing is lost silently.
 - `fsync` waits until `durable_lsn >= current_lsn` at the time of the call.
 - Version 1: the caller syncs. Version 2: one flusher thread; concurrent
   `fsync` calls share a sync (needs more than one FUSE thread, #22).
+  Version 2 is not built yet: there is no WAL flusher thread. The caller
+  syncs with no WAL lock held (`sync_current`), and a sync with no new
+  bytes does nothing.
 - macOS: `F_FULLFSYNC` (plain `fsync` does not flush the drive cache). This
   is configurable; measure both on the Boost tree first.
 
@@ -103,7 +106,9 @@ file into RAM.
   extend changes only the sizes and the extents. An extent grows by at most
   1/8 of its length, so its capacity stays near the written bytes.
 - Dirty limit (`DIRTY_LIMIT`, per open file): when the RAM of the extents
-  passes it, the write that passed it runs a rebase before it returns. A
+  passes it, the write that passed it runs one bounded rebase step
+  (`REBASE_STEP`, or the cost that the write added) before it returns. The
+  flusher thread (Phase 20) also steps quiet files. A
   rebase also runs at release and at unmount. A size change of a file with
   no write handle uses the same splice. A rebase stores base plus extents
   as a new root through the splice (see the chunk-store note): it cuts again
@@ -126,8 +131,9 @@ file into RAM.
   replay handle to an overlay on the root in the manifest. The `Setattr`
   records put back the zeros past `visible`.
 - GC: a rebase runs inside a FUSE callback (a write at the limit, release,
-  unmount; a size change with no write handle splices in its setattr). That
-  callback holds the commit gate shared, as every callback does, and
+  unmount; a size change with no write handle splices in its setattr), or
+  in a step of the flusher thread. That callback holds the commit gate
+  shared, as every callback does (and as the flusher step does), and
   `gc_start` takes the gate exclusively. So online GC
   cannot start while a rebase is in flight, and its mark sees the new root.
 - BUFR-03 reading: the commit gate is never held exclusively (`commit_cut`,
@@ -142,7 +148,8 @@ The Docker numbers (1 GiB and 4 GiB random writes under one memory cap) are
 in the chunk-store note, under "Splice (#98)".
 
 Follow-up issues (not in #98):
-- One memory limit for all open files. The dirty limit is per open file.
+- One memory limit for all open files (done in Phase 20: `--dirty-budget`).
+  The dirty limit is per open file.
 - The RAM of the flush-on-fsync and periodic log modes, which keep records
   in RAM until a sync, and the RAM of the pending records that replay
   loads.
@@ -156,7 +163,7 @@ bytes that are overwritten before a rebase are stored once, at the rebase.
 ## Tests
 
 1. Write, fsync, `kill -9`, remount with `--commit-interval 0`: content is
-   the same. Also for create, rename, unlink, setattr, xattr. Fails today.
+   the same. Also for create, rename, unlink, setattr, xattr.
 2. Unit test: `fsync` syncs the log (count real syncs).
 3. A torn last record (cut the file in the middle of a record, and also
    flip a byte): the mount works and has every record before it.

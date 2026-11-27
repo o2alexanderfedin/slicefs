@@ -7,7 +7,8 @@
 //!
 //! The format marker (`FORMAT`) also records the write hash of the store:
 //! the hash of the IDs of new objects, as a line `hash <name>`. A marker
-//! without that line means blake3-256.
+//! without that line means blake3-256. A line `chunks <min> <avg> <max>`
+//! records the chunk profile of the store; no such line means 4/8/32 KiB.
 //! The metadata nodes are in the same chunk store (`metadata::store_io`,
 //! step 3).
 
@@ -16,38 +17,38 @@ use std::sync::Arc;
 
 use slicefs_traits::key::ObjectKey;
 use chunk_store::file::{FileReader, FileWriter};
-use chunk_store::{hasher_by_name, hasher_names, ChunkStore, ObjectHasher, Options, DEFAULT_HASHER};
+use chunk_store::{hasher_by_name, hasher_names, ChunkProfile, ChunkStore, ObjectHasher, Options, DEFAULT_HASHER};
 
 /// Shared handle of the content store.
 pub type Content = Arc<ChunkStore>;
 
-/// Marker file of the store format with file content in packs.
-pub const FORMAT_FILE: &str = "FORMAT";
-/// The first line of the marker.
-pub const FORMAT: &str = "slicefs-store 6 (metadata and file content in packs, tagged object IDs)\n";
-/// Prefix of the marker line that records the write hash.
-const HASH_LINE: &str = "hash ";
+/// The store header (`FORMAT`, its first line and the header of a new
+/// store) is owned by `crate::header`.
+pub use crate::header::{marker, FORMAT, FORMAT_FILE};
+use crate::header::{self, Header, Line, Want};
 
-/// The marker of a store whose new objects use `hasher`.
-pub fn marker(hasher: &dyn ObjectHasher) -> String {
-    format!("{FORMAT}{HASH_LINE}{}\n", hasher.name())
-}
-
-fn read_marker(store: &Path) -> std::io::Result<Option<String>> {
-    match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+/// Refuse a path that is not an existing store (no `segments/` directory).
+/// The commands that write an existing store (gc, snapshot create and
+/// switch) call it before the header check, so that they make nothing on
+/// such a path. `seed` and `mount` make new stores and do not call it.
+pub fn require_store(store: &Path) -> Result<(), String> {
+    if store.join("segments").is_dir() {
+        return Ok(());
     }
+    Err(format!("failed to load segments: store not found at {}: no segments/ directory", store.display()))
 }
 
-/// The write hash that the marker of `store` records: blake3-256 if there is
-/// no marker or no hash line. A name this build does not know is an error.
+/// The write hash that the header of `store` records: blake3-256 if there
+/// is no header or no hash line. A name this build does not know is an
+/// error.
 pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> {
-    let Some(m) = read_marker(store)? else { return Ok(DEFAULT_HASHER) };
-    let Some(name) = m.lines().skip(1).find_map(|l| l.strip_prefix(HASH_LINE)).map(str::trim) else {
-        return Ok(DEFAULT_HASHER);
-    };
+    let h = header::read(store)?.map(|text| header::parse(store, &text)).transpose()?;
+    hasher_of(store, h.as_ref())
+}
+
+/// The write hash of the parsed header `h` of `store` (see [`write_hasher`]).
+fn hasher_of(store: &Path, h: Option<&Header>) -> std::io::Result<&'static dyn ObjectHasher> {
+    let Some(name) = h.and_then(Header::hash) else { return Ok(DEFAULT_HASHER) };
     hasher_by_name(name).ok_or_else(|| {
         std::io::Error::other(format!(
             "{} records the write hash {name:?}, which this SliceFS does not know (known: {})",
@@ -55,6 +56,40 @@ pub fn write_hasher(store: &Path) -> std::io::Result<&'static dyn ObjectHasher> 
             hasher_names()
         ))
     })
+}
+
+/// The chunk profile of the parsed header `h`: the default profile
+/// (4/8/32 KiB) if there is no header or no `chunks` line.
+pub fn profile_of(h: Option<&Header>) -> ChunkProfile {
+    h.and_then(Header::chunk_profile).unwrap_or(ChunkProfile::DEFAULT)
+}
+
+/// Check `want` (`--chunk-profile`, `None`: none given) against the profile
+/// of the parsed header `h` of `store`. The profile of a store is fixed
+/// when the store is made: another profile is an error, never a rewrite.
+pub fn check_profile(store: &Path, h: Option<&Header>, want: Option<ChunkProfile>) -> std::io::Result<()> {
+    let have = profile_of(h);
+    match want {
+        Some(want) if want != have => Err(std::io::Error::other(header::msg_profile_differs(store, have, want))),
+        _ => Ok(()),
+    }
+}
+
+/// Parse `--chunk-profile`: `MIN/AVG/MAX`, three whole numbers of KiB (for
+/// example `16/64/256`) that [`ChunkProfile::new`] accepts. Refuses a sign,
+/// a unit, a space, an empty part and an overflow of the byte size.
+pub fn parse_chunk_profile(s: &str) -> Result<ChunkProfile, String> {
+    let bad = || format!("invalid chunk profile {s:?}; use MIN/AVG/MAX in KiB, for example 16/64/256");
+    let kib = |w: &str| {
+        if w.is_empty() || !w.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        w.parse::<u32>().ok()?.checked_mul(1024)
+    };
+    let parts: Vec<&str> = s.split('/').collect();
+    let [min, avg, max] = parts[..] else { return Err(bad()) };
+    let (min, avg, max) = (kib(min).ok_or_else(bad)?, kib(avg).ok_or_else(bad)?, kib(max).ok_or_else(bad)?);
+    ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s} KiB: {reason}"))
 }
 
 /// Parse `--hash`: the name of a known hasher.
@@ -66,98 +101,132 @@ pub fn parse_hash(s: &str) -> Result<String, String> {
 
 /// Make `name` (if given) the write hash of `store`: new objects use it,
 /// objects of the old hash stay readable (each is verified by its own tag).
-/// Records it in the marker (made for a new store) and, if it changes the
-/// hash of an existing store, prints one line. Call before the store opens.
+/// Prints the line of [`check_write`] when the hash of an existing store
+/// changes. Call before the store opens.
 pub fn select_hash(store: &Path, name: Option<&str>) -> std::io::Result<()> {
-    let Some(name) = name else { return Ok(()) };
-    let new = hasher_by_name(name).ok_or_else(|| std::io::Error::other(parse_hash(name).unwrap_err()))?;
-    std::fs::create_dir_all(store)?;
-    let old = read_marker(store)?;
-    if let Some(m) = &old {
-        if !m.starts_with(FORMAT) {
-            check_format(store)?; // the message for an older format
-            return Err(std::io::Error::other(format!("{}: unknown store format {:?}", store.display(), m.trim())));
-        }
-        let current = write_hasher(store)?;
-        if current.name() == new.name() {
-            return Ok(());
-        }
-        println!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
-    }
-    write_marker(store, new)
-}
-
-/// Write the format marker durably: a synced temp file renamed over the old
-/// marker, then a sync of the directory. A power loss leaves the old marker
-/// or the new one, never an empty or torn file.
-fn write_marker(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = store.join(format!("{FORMAT_FILE}.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(marker(hasher).as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, store.join(FORMAT_FILE))?;
-    std::fs::File::open(store)?.sync_all()
-}
-
-/// Refuse a store of an older format, whose format changed without a
-/// migration. A store passes if it has the format marker, or if it has no
-/// marker and its current root node is in the chunk store (a new store, or
-/// one made by code that writes no marker, as in tests).
-/// Call this before the store is opened (mount, gc, stats, scrub).
-pub fn check_format(store: &Path) -> std::io::Result<()> {
-    let older_as = |what: &str| {
-        std::io::Error::other(format!(
-            "{} was made by an older SliceFS ({what}). The store \
-             format changed without a migration: copy the files out with the \
-             older version, then into a new store",
-            store.display()
-        ))
-    };
-    let older = || older_as("metadata in vt0/");
-    match std::fs::read_to_string(store.join(FORMAT_FILE)) {
-        Ok(s) if s.starts_with(FORMAT) => return Ok(()),
-        Ok(s) if s.starts_with("slicefs-store 5 ") => return Err(older_as("224-bit object IDs")),
-        Ok(s) if s.starts_with("slicefs-store ") => return Err(older()),
-        Ok(s) => {
-            return Err(std::io::Error::other(format!(
-                "{}: unknown store format {:?}",
-                store.display(),
-                s.trim()
-            )))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let segs = store.join("segments");
-    if !segs.is_dir() {
+    if name.is_none() {
         return Ok(());
     }
-    let Ok((Some(root), _)) = metadata::segment::load_store_from_segments(&segs) else {
-        return Ok(()); // nothing committed (or a damaged log: later steps report it)
+    if let Some(line) = check_write(store, name)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The header check of a command that writes (`Want::Write`), with the
+/// write hash `name` of `--hash` (`None`: keep the recorded one) and the
+/// default chunk profile for a new store: [`check_write_with`] with no
+/// `--chunk-profile`.
+pub fn check_write(store: &Path, name: Option<&str>) -> std::io::Result<Option<String>> {
+    check_write_with(store, name, None)
+}
+
+/// The header check of a command that writes (`Want::Write`), with the
+/// write hash `name` of `--hash` (`None`: keep the recorded one) and the
+/// chunk profile `profile` of `--chunk-profile` (`None`: the recorded one,
+/// the default for a new store). A store that this build may not write is
+/// refused, and is never rewritten. A new store gets the hash and the
+/// profile in its first header write. On an existing store, another
+/// profile is refused before any rewrite ([`check_profile`]). The hash is
+/// recorded in the header, and the line to print is returned when it
+/// changes the hash of an existing store. The rewrite changes only the hash
+/// line (it is line 2 when there was none); every other line stays in its
+/// order. A hash that needs a flag ([`header::hash_flag`]: SHA-256) gets it
+/// at the end of the lines in the same header write, so the flag is on disk
+/// before the first object of that hash. The flag stays when the hash
+/// changes back.
+pub fn check_write_with(store: &Path, name: Option<&str>, profile: Option<ChunkProfile>) -> std::io::Result<Option<String>> {
+    // The name first, so that an unknown name makes nothing; a new store
+    // gets the new hash and profile in its first header write.
+    let new = match name {
+        Some(n) => Some(hasher_by_name(n).ok_or_else(|| std::io::Error::other(parse_hash(n).unwrap_err()))?),
+        None => None,
     };
-    if open_read_only(store)?.contains(&to_id(&root)) {
-        Ok(())
-    } else {
-        Err(older())
+    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER), profile.unwrap_or(ChunkProfile::DEFAULT))?;
+    check_profile(store, opened.header.as_ref(), profile)?;
+    let Some(new) = new else { return Ok(None) };
+    let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
+    let current = hasher_of(store, Some(&h))?;
+    if current.name() == new.name() {
+        return Ok(None);
+    }
+    let line = format!("New objects use hash {} (was {}); stored objects stay readable.", new.name(), current.name());
+    match h.lines.iter_mut().find(|l| matches!(l, Line::Hash(_))) {
+        Some(l) => *l = Line::Hash(new.name().to_string()),
+        None => h.lines.insert(0, Line::Hash(new.name().to_string())),
+    }
+    add_hash_flag(&mut h, new);
+    header::write_header(store, &h)?;
+    Ok(Some(line))
+}
+
+/// Add the flag that `hasher` needs ([`header::hash_flag`]) at the end of
+/// the lines of `h`, when it is not there. True when it added the line.
+fn add_hash_flag(h: &mut Header, hasher: &dyn ObjectHasher) -> bool {
+    match header::hash_flag(hasher) {
+        Some(f) if !h.flags().any(|g| g.name == f.name) => {
+            h.lines.push(Line::Flag(f));
+            true
+        }
+        _ => false,
     }
 }
 
-/// The temp files of a full GC (`<store>/gc-tmp`; a writable open removes
-/// what a crash left).
+/// Write the flag that `hasher` needs (only the flag line; the hash line
+/// does not change). True when it wrote. Step 2 of `slicefs rehash`: the
+/// flag is on disk before the first object of `hasher`.
+pub fn ensure_hash_flag(store: &Path, hasher: &dyn ObjectHasher) -> std::io::Result<bool> {
+    let opened = header::check(store, Want::Write)?;
+    let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
+    if !add_hash_flag(&mut h, hasher) {
+        return Ok(false);
+    }
+    header::write_header(store, &h)?;
+    Ok(true)
+}
+
+/// The temp files of a GC (`<store>/gc-tmp`: the sorted keys of the mark
+/// walk, and the exact mark of a full GC; a writable open removes what a
+/// crash left).
 pub const GC_TMP_DIR: &str = "gc-tmp";
 
-/// Open the content store of `store` (creating it and the format marker if
-/// needed).
-pub fn open(store: &Path) -> std::io::Result<Content> {
-    std::fs::create_dir_all(store)?;
-    let path = store.join(FORMAT_FILE);
-    if !path.exists() {
-        write_marker(store, DEFAULT_HASHER)?;
+/// The temp files of `slicefs rehash` (`<store>/rehash-tmp`): the
+/// old-to-new map and the refcount sort files. A writable open removes what
+/// a crash left. It is not under `gc-tmp`, which a second open in one
+/// process would remove.
+pub const REHASH_TMP_DIR: &str = "rehash-tmp";
+
+/// Remove `<store>/rehash-tmp` with all its files; no such directory is no
+/// error.
+pub fn remove_rehash_tmp(store: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(store.join(REHASH_TMP_DIR)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
-    let opts = Options { hasher: write_hasher(store)?, gc_tmp_dir: Some(store.join(GC_TMP_DIR)), ..Options::default() };
+}
+
+/// Open the content store of `store` to write. The header check comes
+/// first (`Want::Write`): a new store gets its header durably before the
+/// chunk store makes `packs/`; a store that this build may not write is
+/// refused. The temp files of a crashed rehash are removed.
+pub fn open(store: &Path) -> std::io::Result<Content> {
+    open_inner(store, None)
+}
+
+/// [`open`], but new objects use `hasher`, not the write hash of the
+/// header (step 3 of `slicefs rehash`). The header does not change.
+pub fn open_with_hasher(store: &Path, hasher: &'static dyn ObjectHasher) -> std::io::Result<Content> {
+    open_inner(store, Some(hasher))
+}
+
+fn open_inner(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::io::Result<Content> {
+    let opened = header::check(store, Want::Write)?;
+    let hasher = match hasher {
+        Some(h) => h,
+        None => hasher_of(store, opened.header.as_ref())?,
+    };
+    remove_rehash_tmp(store)?;
+    let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), gc_free_space: Some(crate::gc_pacing::fs_space), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -184,9 +253,12 @@ pub fn store_io_read_only(store: &Path) -> std::io::Result<metadata::store_io::S
 }
 
 /// Open the content store of `store` for reading only: nothing on disk
-/// changes, also while a mount writes to it (for `scrub`).
+/// changes, also while a mount writes to it (for `scrub`). The header
+/// check comes first (`Want::Read`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
-    let opts = Options { read_only: true, hasher: write_hasher(store)?, ..Options::default() };
+    let opened = header::check(store, Want::Read)?;
+    let hasher = hasher_of(store, opened.header.as_ref())?;
+    let opts = Options { read_only: true, hasher, profile: profile_of(opened.header.as_ref()), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
     Ok(Arc::new(cs))
 }
@@ -209,6 +281,37 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
             }
         }
     }
+}
+
+/// Parse `--dirty-budget` and `--dirty-limit`: a whole number of bytes,
+/// with an optional binary suffix `K`, `M` or `G` (also `KiB`, `MiB`,
+/// `GiB`; any case; 1024-based). Refuses a sign, a fraction, another
+/// suffix, an overflow, and a value below `MIN_DIRTY_BYTES` (this also
+/// refuses 0).
+pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
+    use crate::filesystem::MIN_DIRTY_BYTES;
+    let bad = || format!("invalid size {s:?}; use bytes, or a whole number with K, M or G (1024-based)");
+    let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, suffix) = s.split_at(digits);
+    if num.is_empty() {
+        return Err(bad());
+    }
+    let unit: usize = match suffix.to_ascii_lowercase().as_str() {
+        "" => 1,
+        "k" | "kib" => 1 << 10,
+        "m" | "mib" => 1 << 20,
+        "g" | "gib" => 1 << 30,
+        _ => return Err(bad()),
+    };
+    let bytes = num
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .ok_or_else(|| format!("size {s:?} is too large"))?;
+    if bytes < MIN_DIRTY_BYTES {
+        return Err(format!("size {s:?} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)", MIN_DIRTY_BYTES >> 20));
+    }
+    Ok(bytes)
 }
 
 pub use metadata::store_io::{to_key, to_id};
@@ -332,35 +435,75 @@ pub(crate) mod tests {
         assert!(parse_compression("lz4").is_err());
     }
 
-    /// A committed store whose root node is not in the chunk store (as with
-    /// metadata in vt0/).
-    fn make_old_store(dir: &Path) {
-        use metadata::store::DictMetadataStore;
-        use slicefs_traits::metadata::{InodeMeta, MetadataStore};
-        std::fs::create_dir_all(dir.join("segments")).unwrap();
-        let wal = metadata::wal::create_wal(metadata::wal::WalConfig::PerOp, dir, 1).unwrap();
-        let io = Arc::new(std::sync::Mutex::new(metadata::store_io::StoreIo::open(dir).unwrap()));
-        let mut meta = DictMetadataStore::new(io);
-        meta.set_wal(wal);
-        let ino = meta.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
-        meta.link(1, "f", ino).unwrap();
-        meta.set_manifest(ino, &[ObjectKey::example(1)]).unwrap();
-        meta.commit().unwrap();
-        meta.shutdown_wal().unwrap();
-        drop(meta);
-        std::fs::remove_dir_all(dir.join("packs")).unwrap();
+    #[test]
+    fn dirty_bytes_parse_with_binary_suffixes() {
+        assert_eq!(parse_dirty_bytes("64M"), Ok(67108864));
+        assert_eq!(parse_dirty_bytes("4M"), Ok(4194304));
+        assert_eq!(parse_dirty_bytes("1G"), Ok(1073741824));
+        assert_eq!(parse_dirty_bytes("67108864"), Ok(67108864));
+        assert_eq!(parse_dirty_bytes("4MiB"), parse_dirty_bytes("4M"));
+        assert_eq!(parse_dirty_bytes("64m"), parse_dirty_bytes("64M"));
+        assert_eq!(parse_dirty_bytes("4096K"), parse_dirty_bytes("4M"));
+        assert_eq!(parse_dirty_bytes("4096kib"), Ok(4194304));
+        assert_eq!(parse_dirty_bytes("1gib"), Ok(1073741824));
     }
 
-    /// A marker of an older format is refused at once.
     #[test]
-    fn an_older_format_marker_is_refused() {
-        let d = tempfile::TempDir::new().unwrap();
-        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 4 (file content in packs)\n").unwrap();
-        let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS (metadata in vt0/)"), "{err}");
-        std::fs::write(d.path().join(FORMAT_FILE), "slicefs-store 5 (metadata and file content in packs)\n").unwrap();
-        let err = check_format(d.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS (224-bit object IDs)"), "{err}");
+    fn dirty_bytes_refuse_bad_values() {
+        for v in ["3M", "4194303"] {
+            let err = parse_dirty_bytes(v).expect_err(v);
+            assert!(err.contains("4M") && err.contains("4194304"), "{v}: the message names the minimum: {err}");
+        }
+        for v in ["0", "1.5M", "64X", "64MB", "", "M", "+4M", "-4M", " 4M", "99999999999G", "99999999999999999999999"] {
+            assert!(parse_dirty_bytes(v).is_err(), "{v:?} is refused");
+        }
+    }
+
+    #[test]
+    fn parse_chunk_profile_takes_whole_kib() {
+        assert_eq!(parse_chunk_profile("16/64/256"), Ok(ChunkProfile::new(16384, 65536, 262144).unwrap()));
+        assert_eq!(parse_chunk_profile("4/8/32"), Ok(ChunkProfile::DEFAULT));
+        for v in ["8/32/128", "32/128/512", "64/256/1024"] {
+            assert!(parse_chunk_profile(v).is_ok(), "{v}");
+        }
+    }
+
+    #[test]
+    fn parse_chunk_profile_refuses_bad_values() {
+        for v in [
+            "16/64",
+            "16/64/256/1024",
+            "16k/64/256",
+            "+16/64/256",
+            "-16/64/256",
+            " 16/64/256",
+            "16//256",
+            "12/24/48",
+            "64/16/256",
+            "0/8/32",
+            "1/2/32768",
+            "4194304/8388608/16777216",
+            "128/512/2048",
+        ] {
+            assert!(parse_chunk_profile(v).is_err(), "{v:?} is refused");
+        }
+        let err = parse_chunk_profile("16/64").unwrap_err();
+        assert!(err.contains("MIN/AVG/MAX"), "{err}");
+    }
+
+    /// A refused profile is named once, in KiB as typed, with the reason.
+    #[test]
+    fn a_refused_profile_is_named_once_in_kib() {
+        for (v, reason) in [
+            ("12/24/48", "each size must be a power of two"),
+            ("64/16/256", "min < avg < max"),
+            ("128/512/2048", "1024 KiB (1 MiB)"),
+        ] {
+            let err = parse_chunk_profile(v).unwrap_err();
+            assert_eq!(err.matches("chunk profile").count(), 1, "{err}");
+            assert!(err.starts_with(&format!("chunk profile {v} KiB: ")), "{err}");
+            assert!(err.contains(reason) && !err.contains("bytes"), "{err}");
+        }
     }
 
     /// Pseudo-random bytes (xorshift64): no FastCDC cut is at a fixed place.
@@ -403,20 +546,22 @@ pub(crate) mod tests {
         assert_eq!(to_id(&to_key(id)), id);
     }
 
+    /// [New store]: a new store gets the header at its first open; a store
+    /// with data and no header is refused by both opens, and no header is
+    /// written.
     #[test]
-    fn a_new_store_gets_the_marker_and_an_old_store_is_refused() {
+    fn a_new_store_gets_the_header_and_data_with_no_header_is_refused() {
         let d = tempfile::TempDir::new().unwrap();
         let cs = open(d.path()).unwrap();
         let k = put_all(&cs, b"hello").unwrap();
         assert_eq!(get_all(&cs, &k).unwrap(), b"hello");
-        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), marker(DEFAULT_HASHER));
         drop(cs);
-        assert!(check_format(d.path()).is_ok(), "a store with the marker passes");
-        assert!(check_format(tempfile::TempDir::new().unwrap().path()).is_ok(), "an empty store passes");
-
-        let old = tempfile::TempDir::new().unwrap();
-        make_old_store(old.path());
-        let err = check_format(old.path()).err().unwrap().to_string();
-        assert!(err.contains("older SliceFS"), "{err}");
+        assert_eq!(std::fs::read_to_string(d.path().join(FORMAT_FILE)).unwrap(), marker(DEFAULT_HASHER));
+        std::fs::remove_file(d.path().join(FORMAT_FILE)).unwrap();
+        for err in [open(d.path()).err(), open_read_only(d.path()).err()] {
+            let err = err.expect("refused").to_string();
+            assert!(err.contains("FORMAT is missing"), "{err}");
+        }
+        assert!(!d.path().join(FORMAT_FILE).exists(), "no header is written");
     }
 }

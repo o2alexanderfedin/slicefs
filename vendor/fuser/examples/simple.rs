@@ -17,8 +17,9 @@ use std::io::SeekFrom;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
-use std::os::unix::io::IntoRawFd;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -42,6 +43,7 @@ use fuser::LockOwner;
 use fuser::MountOption;
 use fuser::OpenAccMode;
 use fuser::OpenFlags;
+use fuser::Owner;
 use fuser::RenameFlags;
 use fuser::ReplyAttr;
 use fuser::ReplyCreate;
@@ -94,6 +96,17 @@ struct Args {
     #[clap(long)]
     suid: bool,
 
+    /// Allow device files on this filesystem to be opened, when run as root. Off by default,
+    /// as it is for any other filesystem: a device node the mount's own users can create is a
+    /// way to reach hardware the kernel would not otherwise let them touch
+    #[clap(long)]
+    dev: bool,
+
+    /// Allow this mount to be idmapped, which needs the kernel to make the access checks
+    /// this filesystem otherwise makes: an idmapped mount has no caller for it to check
+    #[clap(long)]
+    idmap: bool,
+
     #[clap(long, default_value_t = 1)]
     n_threads: usize,
 
@@ -103,6 +116,27 @@ struct Args {
 }
 
 const BLOCK_SIZE: u32 = 512;
+
+// Inode flags, as `chattr` sets them and `lsattr` reports them. Only these three change
+// behavior, and only Linux has the ioctls that set them - but the fields they gate are not
+// themselves Linux-only, so the constants are not gated either
+const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+const FS_APPEND_FL: u32 = 0x0000_0020;
+const FS_NOATIME_FL: u32 = 0x0000_0080;
+
+// The rest are stored and reported so that they round-trip, which only the Linux ioctls do
+#[cfg(target_os = "linux")]
+const FS_SECRM_FL: u32 = 0x0000_0001;
+#[cfg(target_os = "linux")]
+const FS_UNRM_FL: u32 = 0x0000_0002;
+#[cfg(target_os = "linux")]
+const FS_SYNC_FL: u32 = 0x0000_0008;
+#[cfg(target_os = "linux")]
+const FS_NODUMP_FL: u32 = 0x0000_0040;
+#[cfg(target_os = "linux")]
+const FS_DIRSYNC_FL: u32 = 0x0001_0000;
+#[cfg(target_os = "linux")]
+const FS_TOPDIR_FL: u32 = 0x0002_0000;
 const MAX_NAME_LENGTH: u32 = 255;
 const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
 
@@ -111,6 +145,78 @@ const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
 // is just a toy
 const FILE_HANDLE_READ_BIT: u64 = 1 << 63;
 const FILE_HANDLE_WRITE_BIT: u64 = 1 << 62;
+
+/// The flags above are the whole set this filesystem accepts. Refusing the others is what
+/// tells `chattr` that, say, compression is unavailable here
+#[cfg(target_os = "linux")]
+const SUPPORTED_FS_FLAGS: u32 = FS_SECRM_FL
+    | FS_UNRM_FL
+    | FS_SYNC_FL
+    | FS_IMMUTABLE_FL
+    | FS_APPEND_FL
+    | FS_NODUMP_FL
+    | FS_NOATIME_FL
+    | FS_DIRSYNC_FL
+    | FS_TOPDIR_FL;
+
+// The same flags in the unrelated encoding that `fsxattr` uses, which is the one `xfs_io
+// chattr` and `xfs_io lsattr` speak
+#[cfg(target_os = "linux")]
+const FS_XFLAG_IMMUTABLE: u32 = 0x0000_0008;
+#[cfg(target_os = "linux")]
+const FS_XFLAG_APPEND: u32 = 0x0000_0010;
+#[cfg(target_os = "linux")]
+const FS_XFLAG_SYNC: u32 = 0x0000_0020;
+#[cfg(target_os = "linux")]
+const FS_XFLAG_NOATIME: u32 = 0x0000_0040;
+#[cfg(target_os = "linux")]
+const FS_XFLAG_NODUMP: u32 = 0x0000_0080;
+
+/// `struct fsxattr`, of which only the leading `fsx_xflags` is meaningful here
+#[cfg(target_os = "linux")]
+const FSXATTR_SIZE: usize = 28;
+
+// The kernel turns chattr(1), lsattr(1) and their xfs_io equivalents into these four ioctls
+#[cfg(target_os = "linux")]
+const FS_IOC_GETFLAGS: u32 = nix::request_code_read!('f', 1, size_of::<libc::c_long>()) as u32;
+#[cfg(target_os = "linux")]
+const FS_IOC_SETFLAGS: u32 = nix::request_code_write!('f', 2, size_of::<libc::c_long>()) as u32;
+#[cfg(target_os = "linux")]
+const FS_IOC_FSGETXATTR: u32 = nix::request_code_read!('X', 31, FSXATTR_SIZE) as u32;
+#[cfg(target_os = "linux")]
+const FS_IOC_FSSETXATTR: u32 = nix::request_code_write!('X', 32, FSXATTR_SIZE) as u32;
+
+/// The `FS_*_FL` flags this filesystem honors, in the `fsxattr` encoding
+#[cfg(target_os = "linux")]
+const FLAG_TO_XFLAG: [(u32, u32); 5] = [
+    (FS_IMMUTABLE_FL, FS_XFLAG_IMMUTABLE),
+    (FS_APPEND_FL, FS_XFLAG_APPEND),
+    (FS_SYNC_FL, FS_XFLAG_SYNC),
+    (FS_NOATIME_FL, FS_XFLAG_NOATIME),
+    (FS_NODUMP_FL, FS_XFLAG_NODUMP),
+];
+
+#[cfg(target_os = "linux")]
+fn xflags_from_flags(flags: u32) -> u32 {
+    FLAG_TO_XFLAG
+        .iter()
+        .filter(|(flag, _)| flags & flag != 0)
+        .fold(0, |xflags, (_, xflag)| xflags | xflag)
+}
+
+/// The inverse of [`xflags_from_flags`], or `None` if a flag with no counterpart was asked for
+#[cfg(target_os = "linux")]
+fn flags_from_xflags(xflags: u32) -> Option<u32> {
+    let known = FLAG_TO_XFLAG
+        .iter()
+        .fold(0, |known, (_, xflag)| known | xflag);
+    (xflags & !known == 0).then(|| {
+        FLAG_TO_XFLAG
+            .iter()
+            .filter(|(_, xflag)| xflags & xflag != 0)
+            .fold(0, |flags, (flag, _)| flags | flag)
+    })
+}
 
 const FMODE_EXEC: i32 = 0x20;
 
@@ -121,6 +227,10 @@ enum FileKind {
     File,
     Directory,
     Symlink,
+    CharDevice,
+    BlockDevice,
+    NamedPipe,
+    Socket,
 }
 
 impl From<FileKind> for fuser::FileType {
@@ -129,6 +239,10 @@ impl From<FileKind> for fuser::FileType {
             FileKind::File => fuser::FileType::RegularFile,
             FileKind::Directory => fuser::FileType::Directory,
             FileKind::Symlink => fuser::FileType::Symlink,
+            FileKind::CharDevice => fuser::FileType::CharDevice,
+            FileKind::BlockDevice => fuser::FileType::BlockDevice,
+            FileKind::NamedPipe => fuser::FileType::NamedPipe,
+            FileKind::Socket => fuser::FileType::Socket,
         }
     }
 }
@@ -177,12 +291,116 @@ fn parse_xattr_namespace(key: &[u8]) -> Result<XattrNamespace, Errno> {
     return Err(Errno::ENOTSUP);
 }
 
-fn clear_suid_sgid(attr: &mut InodeAttributes) {
+/// Strip suid, and sgid where the kernel would, from a file the caller has just modified.
+///
+/// Two independent rules decide sgid. The killpriv rule drops it from a group-executable file,
+/// where it means setgid-on-exec rather than the old mandatory-locking mark. Separately, a
+/// caller outside the file's group drops it, which is why an unprivileged write to a root-owned
+/// setgid file clears the bit whatever its exec bits are. Either rule alone is enough, so a
+/// `02666` file loses the bit to an outside-group caller despite having no exec bits and no
+/// suid to clear alongside it.
+///
+/// The group tested is the one the file has now, not the one a chown in the same request is
+/// about to give it: chgrp'ing a setgid file to a group the caller is in still clears the bit
+/// when the caller was outside the group it is moving away from.
+fn clear_suid_sgid(attr: &mut InodeAttributes, req: &Request, privilege: Privilege) {
     attr.mode &= !libc::S_ISUID as u16;
-    // SGID is only suppose to be cleared if XGRP is set
-    if attr.mode & libc::S_IXGRP as u16 != 0 {
+
+    let sgid_exec = attr.mode & (libc::S_ISGID | libc::S_IXGRP) as u16
+        == (libc::S_ISGID | libc::S_IXGRP) as u16;
+    let outside_group = privilege.lacks_fsetid(req, attr) && caller_outside_group(req, attr.gid);
+    if sgid_exec || outside_group {
         attr.mode &= !libc::S_ISGID as u16;
     }
+}
+
+/// Whether the request already establishes that the caller lacks `CAP_FSETID`, which decides
+/// whether the outside-group half of the sgid rule applies.
+enum Privilege {
+    /// The kernel worked `CAP_FSETID` into `kill_suid_gid` itself, as `write` and `truncate`
+    /// do via `setattr_should_drop_suidgid()`. Being asked at all proves the caller lacks it,
+    /// so the capability set does not have to be read back
+    KnownLacking,
+    /// The request settles nothing: `chown` asks whatever the caller holds, and `fallocate`
+    /// and `copy_file_range` carry no signal at all. The caller has to be inspected
+    Unknown,
+}
+
+impl Privilege {
+    fn lacks_fsetid(&self, req: &Request, attr: &InodeAttributes) -> bool {
+        match self {
+            Privilege::KnownLacking => true,
+            Privilege::Unknown => !has_fsetid(req, attr),
+        }
+    }
+}
+
+/// Both killpriv capabilities make the kernel stop removing file capabilities, so they have to
+/// go on every write, chown and truncate. Unlike suid and sgid, no request flag reports this:
+/// the operation is itself the signal
+fn clear_file_capabilities(attr: &mut InodeAttributes) {
+    attr.xattrs.remove(b"security.capability".as_slice());
+}
+
+/// Drop privileges for an operation the kernel hands over without saying whether to.
+///
+/// Negotiating either killpriv capability stops the kernel removing privileges itself, but
+/// `FUSE_FALLOCATE` and `FUSE_COPY_FILE_RANGE` carry nothing like the `kill_suid_gid` argument
+/// that write, setattr, open and create get, so the filesystem has to work out for itself
+/// whether the caller holds `CAP_FSETID`, and leave suid and sgid alone if it does.
+///
+/// File capabilities go regardless, as they do on write, chown and truncate: `CAP_FSETID` covers
+/// suid and sgid only.
+///
+/// Call this only when a killpriv capability was negotiated: without one the kernel still
+/// removes privileges itself, and clearing here as well would strip bits it had decided to keep
+fn clear_privileges_unprompted(attr: &mut InodeAttributes, req: &Request) {
+    if !has_fsetid(req, attr) {
+        // The capability set has just answered the question, so do not read it a second time
+        clear_suid_sgid(attr, req, Privilege::KnownLacking);
+    }
+    clear_file_capabilities(attr);
+}
+
+/// Whether the caller may act on an inode with these attributes.
+///
+/// True without looking when there is no caller to look at. That happens only on an idmapped
+/// mount, which this filesystem allows only with `default_permissions`, so the kernel has
+/// already made this decision against ids it can map and this one cannot.
+fn may_access(req: &Request, attrs: &InodeAttributes, mask: AccessFlags) -> bool {
+    let (Some(uid), Some(gid)) = (req.uid(), req.gid()) else {
+        return true;
+    };
+    check_access(attrs.uid, attrs.gid, attrs.mode, uid, gid, mask)
+}
+
+/// Whether the caller may override an ownership rule, which an unknown caller may: the kernel
+/// has already decided, for the reason in [`may_access`]
+fn caller_is_root(req: &Request) -> bool {
+    req.uid().is_none_or(|uid| uid == 0)
+}
+
+/// Whether the caller owns an inode, which an unknown caller does, for the same reason
+fn caller_owns(req: &Request, uid: u32) -> bool {
+    req.uid().is_none_or(|caller| caller == uid)
+}
+
+/// Whether the caller is privileged enough to keep a file's setuid and setgid bits through a
+/// change to it.
+///
+/// An unknown caller is not, which is the opposite of what the checks above answer, and for a
+/// reason they do not share: `default_permissions` decides who may act, not whose privileges
+/// survive acting, so nothing has decided this on the filesystem's behalf. A privilege bit
+/// that cannot be shown to have been earned is one to drop.
+fn caller_keeps_privileges(req: &Request) -> bool {
+    req.uid().is_some_and(|uid| uid == 0)
+}
+
+/// Whether the caller is outside an inode's group, which an unknown caller is: its own groups
+/// are named in a mapping this filesystem cannot read, so being in the group cannot be shown
+fn caller_outside_group(req: &Request, gid: u32) -> bool {
+    req.gid()
+        .is_none_or(|caller| caller != gid && !get_groups(req.pid()).contains(&gid))
 }
 
 fn creation_gid(parent: &InodeAttributes, gid: u32) -> u32 {
@@ -199,40 +417,40 @@ fn xattr_access_check(
     inode_attrs: &InodeAttributes,
     request: &Request,
 ) -> Result<(), Errno> {
+    // Extended attributes are part of the inode, so both flags cover them: neither an
+    // immutable nor an append-only inode accepts a change to one
+    if access_mask != libc::R_OK {
+        inode_attrs.check_removable()?;
+    }
+
     match parse_xattr_namespace(key)? {
         XattrNamespace::Security => {
-            if access_mask != libc::R_OK && request.uid() != 0 {
+            if access_mask != libc::R_OK && !caller_is_root(request) {
                 return Err(Errno::EPERM);
             }
         }
         XattrNamespace::Trusted => {
-            if request.uid() != 0 {
+            if !caller_is_root(request) {
                 return Err(Errno::EPERM);
             }
         }
         XattrNamespace::System => {
             if key.eq(b"system.posix_acl_access") {
-                if !check_access(
-                    inode_attrs.uid,
-                    inode_attrs.gid,
-                    inode_attrs.mode,
-                    request.uid(),
-                    request.gid(),
+                if !may_access(
+                    request,
+                    inode_attrs,
                     AccessFlags::from_bits_retain(access_mask),
                 ) {
                     return Err(Errno::EPERM);
                 }
-            } else if request.uid() != 0 {
+            } else if !caller_is_root(request) {
                 return Err(Errno::EPERM);
             }
         }
         XattrNamespace::User => {
-            if !check_access(
-                inode_attrs.uid,
-                inode_attrs.gid,
-                inode_attrs.mode,
-                request.uid(),
-                request.gid(),
+            if !may_access(
+                request,
+                inode_attrs,
                 AccessFlags::from_bits_retain(access_mask),
             ) {
                 return Err(Errno::EPERM);
@@ -247,11 +465,15 @@ fn time_now() -> (i64, u32) {
     time_from_system_time(&SystemTime::now())
 }
 
+// As in a timespec, nanoseconds count forward from the whole second even when it
+// is negative: the represented time is secs + nsecs / 1e9
 fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
     if secs >= 0 {
         UNIX_EPOCH + Duration::new(secs as u64, nsecs)
+    } else if nsecs == 0 {
+        UNIX_EPOCH - Duration::new(secs.unsigned_abs(), 0)
     } else {
-        UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
+        UNIX_EPOCH - Duration::new(secs.unsigned_abs() - 1, 1_000_000_000 - nsecs)
     }
 }
 
@@ -259,10 +481,14 @@ fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
     // Convert to signed 64-bit time with epoch at 0
     match system_time.duration_since(UNIX_EPOCH) {
         Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
-        Err(before_epoch_error) => (
-            -(before_epoch_error.duration().as_secs() as i64),
-            before_epoch_error.duration().subsec_nanos(),
-        ),
+        Err(before_epoch_error) => {
+            let d = before_epoch_error.duration();
+            if d.subsec_nanos() == 0 {
+                (-(d.as_secs() as i64), 0)
+            } else {
+                (-(d.as_secs() as i64) - 1, 1_000_000_000 - d.subsec_nanos())
+            }
+        }
     }
 }
 
@@ -274,13 +500,51 @@ struct InodeAttributes {
     pub last_accessed: (i64, u32),
     pub last_modified: (i64, u32),
     pub last_metadata_changed: (i64, u32),
+    /// Time of creation, which `statx(2)` reports as `stx_btime` and nothing ever changes
+    pub created: (i64, u32),
     pub kind: FileKind,
     // Permissions and special mode bits
     pub mode: u16,
     pub hardlinks: u32,
     pub uid: u32,
     pub gid: u32,
+    /// Device number, which only a character or block device carries
+    pub rdev: u32,
+    /// Inode flags, in the `FS_*_FL` encoding that `chattr` uses
+    pub flags: u32,
     pub xattrs: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+impl InodeAttributes {
+    fn is_immutable(&self) -> bool {
+        self.flags & FS_IMMUTABLE_FL != 0
+    }
+
+    fn is_append_only(&self) -> bool {
+        self.flags & FS_APPEND_FL != 0
+    }
+
+    fn is_noatime(&self) -> bool {
+        self.flags & FS_NOATIME_FL != 0
+    }
+
+    /// Nothing writes to an immutable inode. A directory counts: adding an entry to one is a
+    /// write to the directory, so a create inside it fails before permissions are consulted
+    fn check_writable(&self) -> Result<(), Errno> {
+        if self.is_immutable() {
+            return Err(Errno::EPERM);
+        }
+        Ok(())
+    }
+
+    /// Unlinking or renaming needs this of both the entry and its parent. Append-only refuses
+    /// as well, since it exists to keep what has already been written
+    fn check_removable(&self) -> Result<(), Errno> {
+        if self.is_immutable() || self.is_append_only() {
+            return Err(Errno::EPERM);
+        }
+        Ok(())
+    }
 }
 
 impl From<InodeAttributes> for fuser::FileAttr {
@@ -295,16 +559,60 @@ impl From<InodeAttributes> for fuser::FileAttr {
                 attrs.last_metadata_changed.0,
                 attrs.last_metadata_changed.1,
             ),
-            crtime: SystemTime::UNIX_EPOCH,
+            crtime: system_time_from_time(attrs.created.0, attrs.created.1),
             kind: attrs.kind.into(),
             perm: attrs.mode,
             nlink: attrs.hardlinks,
             uid: attrs.uid,
             gid: attrs.gid,
-            rdev: 0,
+            rdev: attrs.rdev,
             blksize: BLOCK_SIZE,
             flags: 0,
         }
+    }
+}
+
+/// Parse a record read for `inode`. One that does not parse - written by a version of this
+/// example with a different layout, such as one from before it stored records with MessagePack
+/// - is reported as EIO rather than taken down the filesystem with it
+fn read_record<T: for<'de> Deserialize<'de>>(file: File, inode: INodeNo) -> Result<T, Errno> {
+    rmp_serde::from_read(file).map_err(|error| {
+        error!("Unreadable record for inode {inode}: {error}");
+        Errno::EIO
+    })
+}
+
+/// Tells apart the temporary files of concurrent [`write_record`] calls
+static NEXT_RECORD_WRITE: AtomicU64 = AtomicU64::new(0);
+
+/// Store `value` at `path` by writing it to a temporary file and renaming that into place.
+///
+/// A reader then finds either the old record or the new one. Rewriting the file in place would
+/// let a concurrent reader find it truncated and fail to parse it, and a write that fails part
+/// way would leave it truncated for good.
+///
+/// The exception is a backing store with no room for the second copy that replacing takes,
+/// where the record is rewritten in place instead. It usually fits where the old one was, and
+/// refusing would leave a full filesystem with no way to free space, since even deleting a file
+/// first updates its parent's record
+fn write_record(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".{}.tmp",
+        NEXT_RECORD_WRITE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temporary = path.with_file_name(name);
+    // Encoded up front, so that a failure to store it surfaces as the OS error it is
+    let encoded = rmp_serde::to_vec(value).map_err(io::Error::other)?;
+    let Err(error) = fs::write(&temporary, &encoded).and_then(|()| fs::rename(&temporary, path))
+    else {
+        return Ok(());
+    };
+    let _ = fs::remove_file(&temporary);
+    if matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) {
+        fs::write(path, &encoded)
+    } else {
+        Err(error)
     }
 }
 
@@ -315,15 +623,24 @@ struct SimpleFS {
     next_file_handle: AtomicU64,
     direct_io: bool,
     suid_support: bool,
+    /// Whether a killpriv capability was negotiated, and so whether removing privileges is
+    /// this filesystem's job rather than the kernel's. Distinct from `suid_support`, which
+    /// only says whether the caller asked for setuid support
+    killpriv_negotiated: bool,
+    /// Whether the mount may be idmapped, and so whether it has a caller to check at all
+    idmapped: bool,
 }
 
 impl SimpleFS {
-    fn new(data_dir: String, direct_io: bool, suid_support: bool) -> SimpleFS {
+    fn new(data_dir: String, direct_io: bool, suid_support: bool, idmap: bool) -> SimpleFS {
         SimpleFS {
             data_dir,
             next_file_handle: AtomicU64::new(1),
             direct_io,
             suid_support,
+            killpriv_negotiated: false,
+            // Not settled until init(), where the kernel says whether it offers the capability
+            idmapped: idmap,
         }
     }
 
@@ -338,17 +655,11 @@ impl SimpleFS {
     fn allocate_next_inode(&self) -> INodeNo {
         let path = Path::new(&self.data_dir).join("superblock");
         let current_inode = match File::open(&path) {
-            Ok(file) => INodeNo(bincode::deserialize_from(file).unwrap()),
+            Ok(file) => INodeNo(rmp_serde::from_read(file).unwrap()),
             _ => INodeNo::ROOT,
         };
 
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .unwrap();
-        bincode::serialize_into(file, &(current_inode.0 + 1)).unwrap();
+        write_record(&path, &(current_inode.0 + 1)).unwrap();
 
         INodeNo(current_inode.0 + 1)
     }
@@ -381,12 +692,52 @@ impl SimpleFS {
             .join(inode.to_string())
     }
 
+    /// Whether the backing directory looks able to take a preallocation of `length` bytes at
+    /// `offset`.
+    ///
+    /// The range is rounded out to whole backing blocks before being compared, since a range
+    /// that starts mid-block touches one more block than its length alone implies.
+    ///
+    /// This is a preflight rather than a reservation, and cannot be exact: the backing
+    /// filesystem spends blocks on its own metadata, and nothing holds the space between this
+    /// answer and the call it guards. It exists to refuse the requests that are impossible by
+    /// orders of magnitude, not to predict the last block. An unreadable backing store is
+    /// therefore allowed through rather than refused, so that a `statvfs` this filesystem
+    /// cannot answer does not turn every preallocation into ENOSPC.
+    ///
+    /// The counts widen to `u64` explicitly because `statvfs` reports them in types whose
+    /// width varies by platform: 64 bits on Linux, 32 on macOS.
+    ///
+    /// Gated to match its only caller, the `fallocate` that FUSE offers on Linux alone
+    #[cfg(target_os = "linux")]
+    fn backing_store_can_take(&self, offset: u64, length: u64) -> bool {
+        let Ok(stat) = nix::sys::statvfs::statvfs(Path::new(&self.data_dir)) else {
+            return true;
+        };
+        let block_size = (stat.fragment_size() as u64).max(1);
+        let first_block = offset / block_size;
+        let last_block = offset.saturating_add(length).div_ceil(block_size);
+        last_block.saturating_sub(first_block) <= stat.blocks_available() as u64
+    }
+
+    /// Attributes as the kernel sees them. The block count comes from the backing file rather
+    /// than from the size, so that a file with holes reports the space it actually occupies
+    fn file_attr(&self, attrs: InodeAttributes) -> fuser::FileAttr {
+        let fallback = attrs.size.div_ceil(u64::from(BLOCK_SIZE));
+        let blocks = fs::metadata(self.content_path(INodeNo(attrs.inode)))
+            .map_or(fallback, |metadata| metadata.blocks());
+        fuser::FileAttr {
+            blocks,
+            ..attrs.into()
+        }
+    }
+
     fn get_directory_content(&self, inode: INodeNo) -> Result<DirectoryDescriptor, Errno> {
         let path = Path::new(&self.data_dir)
             .join("contents")
             .join(inode.to_string());
         match File::open(path) {
-            Ok(file) => Ok(bincode::deserialize_from(file).unwrap()),
+            Ok(file) => read_record(file, inode),
             _ => Err(Errno::ENOENT),
         }
     }
@@ -395,13 +746,7 @@ impl SimpleFS {
         let path = Path::new(&self.data_dir)
             .join("contents")
             .join(inode.to_string());
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .unwrap();
-        bincode::serialize_into(file, &entries).unwrap();
+        write_record(&path, entries).unwrap();
     }
 
     fn get_inode(&self, inode: INodeNo) -> Result<InodeAttributes, Errno> {
@@ -409,22 +754,76 @@ impl SimpleFS {
             .join("inodes")
             .join(inode.to_string());
         match File::open(path) {
-            Ok(file) => Ok(bincode::deserialize_from(file).unwrap()),
+            Ok(file) => read_record(file, inode),
             _ => Err(Errno::ENOENT),
         }
     }
 
+    /// Record that an inode was read, following the kernel's default `relatime` policy.
+    ///
+    /// Moving atime on every read would mean a write per read, so it only moves when it is no
+    /// newer than mtime or ctime - that is, when nothing has read the inode since it last
+    /// changed - or when it has gone stale by more than a day. That preserves the one thing a
+    /// reader can draw from atime: an atime older than mtime means nobody has looked since the
+    /// last write.
+    ///
+    /// A mount can ask for `noatime` or `strictatime` instead, but no FUSE request reports
+    /// which the mount used and this example takes no option for it, so the kernel's default
+    /// is the only policy on offer.
+    ///
+    /// `O_NOATIME` on the caller's handle is honored by `read()`, which is given the flag, on
+    /// Linux - neither macOS nor FreeBSD has the flag.
+    /// `readdir()` and `copy_file_range()` are not, and would have to carry it over from the
+    /// `open()` that set it, so a caller using it there still moves atime
+    fn touch_atime(&self, attrs: &mut InodeAttributes) {
+        // `chattr +A` asks for exactly this: leave the access time alone. Honoring it here
+        // covers every caller, including the readdir and copy_file_range that cannot see the
+        // opener's O_NOATIME
+        if attrs.is_noatime() {
+            return;
+        }
+        let now = time_now();
+        let a_day_ago = now.0 - 24 * 60 * 60;
+        if attrs.last_accessed <= attrs.last_modified
+            || attrs.last_accessed <= attrs.last_metadata_changed
+            || attrs.last_accessed.0 < a_day_ago
+        {
+            attrs.last_accessed = now;
+            // A read that succeeded is not failed for want of recording it, as on a backing
+            // store that has filled up or gone read-only
+            if let Err(error) = self.try_write_inode(attrs) {
+                warn!("Not recording the access to inode {}: {error}", attrs.inode);
+            }
+        }
+    }
+
     fn write_inode(&self, inode: &InodeAttributes) {
+        self.try_write_inode(inode).unwrap();
+    }
+
+    fn try_write_inode(&self, inode: &InodeAttributes) -> io::Result<()> {
         let path = Path::new(&self.data_dir)
             .join("inodes")
             .join(inode.inode.to_string());
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .unwrap();
-        bincode::serialize_into(file, inode).unwrap();
+        write_record(&path, inode)
+    }
+
+    /// Drops one open handle and reclaims the inode if that was the last thing keeping it.
+    /// The decrement has to be written back before [`Self::gc_inode`] is consulted, since an
+    /// inode with no links is held on disk only by its open handles - an anonymous file from
+    /// [`Filesystem::tmpfile`] has never had a link, and a file unlinked while open has lost
+    /// its last one, and either way closing the final handle is what makes it collectable
+    fn close_handle(&self, attrs: &mut InodeAttributes) {
+        attrs.open_file_handles = attrs.open_file_handles.saturating_sub(1);
+        // A close cannot usefully fail. If the count cannot be recorded, on a full backing
+        // store, the inode is at worst kept past its last handle rather than lost
+        if let Err(error) = self.try_write_inode(attrs) {
+            warn!(
+                "Not recording a closed handle of inode {}: {error}",
+                attrs.inode
+            );
+        }
+        self.gc_inode(attrs);
     }
 
     // Check whether a file should be removed from storage. Should be called after decrementing
@@ -446,12 +845,18 @@ impl SimpleFS {
         return false;
     }
 
+    /// `uid` and `gid` are the identity the access check runs against, which a caller holding a
+    /// write file handle deliberately bypasses; `req` is always the real caller
+    /// `enforce_access` says whether the caller's permission still has to be checked. A file
+    /// handle that was granted write access carries that permission with it, so a truncate
+    /// through one is not checked again even if the mode has changed since
     fn truncate(
         &self,
+        req: &Request,
         inode: INodeNo,
         new_length: u64,
-        uid: u32,
-        gid: u32,
+        kill_suid_gid: bool,
+        enforce_access: bool,
     ) -> Result<InodeAttributes, Errno> {
         if new_length > MAX_FILE_SIZE {
             return Err(Errno::EFBIG);
@@ -459,14 +864,13 @@ impl SimpleFS {
 
         let mut attrs = self.get_inode(inode)?;
 
-        if !check_access(
-            attrs.uid,
-            attrs.gid,
-            attrs.mode,
-            uid,
-            gid,
-            AccessFlags::W_OK,
-        ) {
+        // Both flags refuse a truncate: immutable admits no change at all, and append-only
+        // admits none that could drop what is already there
+        if attrs.is_immutable() || attrs.is_append_only() {
+            return Err(Errno::EPERM);
+        }
+
+        if enforce_access && !may_access(req, &attrs, AccessFlags::W_OK) {
             return Err(Errno::EACCES);
         }
 
@@ -474,12 +878,17 @@ impl SimpleFS {
         let file = OpenOptions::new().write(true).open(path).unwrap();
         file.set_len(new_length).unwrap();
 
+        let now = time_now();
         attrs.size = new_length;
-        attrs.last_metadata_changed = time_now();
-        attrs.last_modified = time_now();
+        attrs.last_metadata_changed = now;
+        attrs.last_modified = now;
 
-        // Clear SETUID & SETGID on truncate
-        clear_suid_sgid(&mut attrs);
+        // Clear SETUID & SETGID on truncate, but only when the kernel asks: under killpriv v2
+        // it does so exactly when the caller lacks CAP_FSETID
+        if kill_suid_gid {
+            clear_suid_sgid(&mut attrs, req, Privilege::KnownLacking);
+        }
+        clear_file_capabilities(&mut attrs);
 
         self.write_inode(&attrs);
 
@@ -507,19 +916,14 @@ impl SimpleFS {
         }
 
         let mut parent_attrs = self.get_inode(parent)?;
+        parent_attrs.check_writable()?;
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            req.uid(),
-            req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if !may_access(req, &parent_attrs, AccessFlags::W_OK) {
             return Err(Errno::EACCES);
         }
-        parent_attrs.last_modified = time_now();
-        parent_attrs.last_metadata_changed = time_now();
+        let now = time_now();
+        parent_attrs.last_modified = now;
+        parent_attrs.last_metadata_changed = now;
         self.write_inode(&parent_attrs);
 
         let mut entries = self.get_directory_content(parent).unwrap();
@@ -536,30 +940,78 @@ impl Filesystem for SimpleFS {
         _req: &Request,
         #[allow(unused_variables)] config: &mut KernelConfig,
     ) -> io::Result<()> {
-        if config
-            .add_capabilities(InitFlags::FUSE_HANDLE_KILLPRIV)
+        // Refused unless the mount can honor it, so what was asked for is not what is in force.
+        // A kernel that does not offer the capability at all refuses it the same way
+        if self.idmapped {
+            self.idmapped = config.add_capabilities(InitFlags::FUSE_ALLOW_IDMAP).is_ok();
+            if self.idmapped {
+                info!("idmapped mounts enabled; the kernel makes the access checks");
+            } else {
+                // The mount is already up, and already carries the allow_other that asking for
+                // the capability required. Serving on would leave it reachable by every local
+                // user without the thing that was traded for, so end it instead
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the kernel does not offer FUSE_ALLOW_IDMAP",
+                ));
+            }
+        }
+
+        // Taking privilege stripping on needs a caller to judge, and an idmapped mount has
+        // none: not every operation that drops suid and sgid carries a flag saying so, and the
+        // rest is decided from the caller's capabilities and groups. The kernel can still do
+        // it, knowing the mapping this filesystem does not, so leave it there.
+        //
+        // v2 otherwise reports per request whether suid and sgid must go, rather than asking
+        // for them to be cleared on every write, chown and truncate as FUSE_HANDLE_KILLPRIV does
+        if self.idmapped {
+            info!("privilege stripping left to the kernel, there being no caller to judge");
+            self.suid_support = false;
+        } else if config
+            .add_capabilities(InitFlags::FUSE_HANDLE_KILLPRIV_V2)
             .is_err()
         {
-            info!("FUSE_HANDLE_KILLPRIV not supported");
+            info!("FUSE_HANDLE_KILLPRIV_V2 not supported");
             self.suid_support = false;
+        } else {
+            self.killpriv_negotiated = true;
         }
 
         fs::create_dir_all(Path::new(&self.data_dir).join("inodes")).unwrap();
         fs::create_dir_all(Path::new(&self.data_dir).join("contents")).unwrap();
-        if self.get_inode(INodeNo::ROOT).is_err() {
+        // Only a missing root means an empty filesystem. One that is there but unreadable holds
+        // a tree this version cannot read, and starting afresh would write over it
+        let root = self.get_inode(INodeNo::ROOT);
+        if let Err(error) = root {
+            if error != Errno::ENOENT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} holds a filesystem in a format this version cannot read; \
+                         use another --data-dir",
+                        self.data_dir
+                    ),
+                ));
+            }
+        }
+        if root.is_err() {
             // Initialize with empty filesystem
+            let now = time_now();
             let root = InodeAttributes {
                 inode: INodeNo::ROOT.0,
                 open_file_handles: 0,
                 size: 0,
-                last_accessed: time_now(),
-                last_modified: time_now(),
-                last_metadata_changed: time_now(),
+                last_accessed: now,
+                last_modified: now,
+                last_metadata_changed: now,
+                created: now,
                 kind: FileKind::Directory,
                 mode: 0o777,
                 hardlinks: 2,
                 uid: 0,
                 gid: 0,
+                rdev: 0,
+                flags: 0,
                 xattrs: BTreeMap::default(),
             };
             self.write_inode(&root);
@@ -575,21 +1027,24 @@ impl Filesystem for SimpleFS {
             reply.error(Errno::ENAMETOOLONG);
             return;
         }
-        let parent_attrs = self.get_inode(parent).unwrap();
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::X_OK,
-        ) {
+        let parent_attrs = match self.get_inode(parent) {
+            Ok(attrs) => attrs,
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+        if !may_access(_req, &parent_attrs, AccessFlags::X_OK) {
             reply.error(Errno::EACCES);
             return;
         }
 
         match self.lookup_name(parent, name) {
-            Ok(attrs) => reply.entry(&Duration::new(0, 0), &attrs.into(), fuser::Generation(0)),
+            Ok(attrs) => reply.entry(
+                &Duration::new(0, 0),
+                &self.file_attr(attrs),
+                fuser::Generation(0),
+            ),
             Err(error_code) => reply.error(error_code),
         }
     }
@@ -598,7 +1053,7 @@ impl Filesystem for SimpleFS {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         match self.get_inode(ino) {
-            Ok(attrs) => reply.attr(&Duration::new(0, 0), &attrs.into()),
+            Ok(attrs) => reply.attr(&Duration::new(0, 0), &self.file_attr(attrs)),
             Err(error_code) => reply.error(error_code),
         }
     }
@@ -619,6 +1074,7 @@ impl Filesystem for SimpleFS {
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
         _flags: Option<BsdFileFlags>,
+        kill_suid_gid: bool,
         reply: ReplyAttr,
     ) {
         let mut attrs = match self.get_inode(ino) {
@@ -629,12 +1085,37 @@ impl Filesystem for SimpleFS {
             }
         };
 
+        // An immutable inode takes no attribute change at all. An append-only one takes only
+        // the timestamp updates that writing it produces, not an explicit time, mode or owner
+        if attrs.is_immutable()
+            || (attrs.is_append_only()
+                && (mode.is_some()
+                    || uid.is_some()
+                    || gid.is_some()
+                    || size.is_some()
+                    || matches!(_atime, Some(TimeOrNow::SpecificTime(_)))
+                    || matches!(_mtime, Some(TimeOrNow::SpecificTime(_)))))
+        {
+            reply.error(Errno::EPERM);
+            return;
+        }
+
+        // Without a killpriv capability the kernel clears suid and sgid itself, by folding the
+        // cleared mode into the chown or truncate that calls for it. That mode is the kernel's
+        // own calculation rather than a chmod the caller asked for, so it is checked only as
+        // part of the change it came with, and applied alongside it
+        let (mode, cleared_mode) = if uid.is_some() || gid.is_some() || size.is_some() {
+            (None, mode)
+        } else {
+            (mode, None)
+        };
+
         if let Some(mode) = mode {
             debug!("chmod() called with {ino:?}, {mode:o}");
             #[cfg(target_os = "freebsd")]
             {
                 // FreeBSD: sticky bit only valid on directories; otherwise EFTYPE
-                if _req.uid() != 0
+                if !caller_is_root(_req)
                     && (mode as u16 & libc::S_ISVTX as u16) != 0
                     && attrs.kind != FileKind::Directory
                 {
@@ -642,13 +1123,18 @@ impl Filesystem for SimpleFS {
                     return;
                 }
             }
-            if _req.uid() != 0 && _req.uid() != attrs.uid {
+            if !caller_is_root(_req) && !caller_owns(_req, attrs.uid) {
                 reply.error(Errno::EPERM);
                 return;
             }
-            if _req.uid() != 0
-                && _req.gid() != attrs.gid
-                && !get_groups(_req.pid()).contains(&attrs.gid)
+            // Without caller ids the mount is idmapped and so has default_permissions, under
+            // which the kernel's setattr_prepare() has already dropped sgid from the mode if the
+            // caller may not set it. Judging again here, with no caller to judge, would drop it
+            // from everyone's chmod, root's included
+            let kernel_decided = _req.uid().is_none();
+            if !kernel_decided
+                && !caller_keeps_privileges(_req)
+                && caller_outside_group(_req, attrs.gid)
             {
                 // If SGID is set and the file belongs to a group that the caller is not part of
                 // then the SGID bit is suppose to be cleared during chmod
@@ -658,76 +1144,84 @@ impl Filesystem for SimpleFS {
             }
             attrs.last_metadata_changed = time_now();
             self.write_inode(&attrs);
-            reply.attr(&Duration::new(0, 0), &attrs.into());
+            reply.attr(&Duration::new(0, 0), &self.file_attr(attrs));
             return;
         }
 
         if uid.is_some() || gid.is_some() {
             debug!("chown() called with {ino:?} {uid:?} {gid:?}");
             if let Some(gid) = gid {
-                // Non-root users can only change gid to a group they're in
-                if _req.uid() != 0 && !get_groups(_req.pid()).contains(&gid) {
-                    reply.error(Errno::EPERM);
-                    return;
-                }
-            }
-            if let Some(uid) = uid {
-                if _req.uid() != 0
-                    // but no-op changes by the owner are not an error
-                    && !(uid == attrs.uid && _req.uid() == attrs.uid)
+                // Non-root users can only change gid to a group they're in, which as in Linux's
+                // in_group_p() includes the one they act as
+                if !caller_is_root(_req)
+                    && _req.gid() != Some(gid)
+                    && !get_groups(_req.pid()).contains(&gid)
                 {
                     reply.error(Errno::EPERM);
                     return;
                 }
             }
+            if let Some(uid) = uid {
+                // A no-op change by the owner is not an error, unlike any other change of owner
+                let no_op_by_owner = uid == attrs.uid && caller_owns(_req, attrs.uid);
+                if !caller_is_root(_req) && !no_op_by_owner {
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+            }
             // Only owner may change the group
-            if gid.is_some() && _req.uid() != 0 && _req.uid() != attrs.uid {
+            if gid.is_some() && !caller_is_root(_req) && !caller_owns(_req, attrs.uid) {
                 reply.error(Errno::EPERM);
                 return;
             }
 
-            if attrs.mode & (libc::S_IXUSR | libc::S_IXGRP | libc::S_IXOTH) as u16 != 0 {
-                // SUID & SGID are suppose to be cleared when chown'ing an executable file
-                clear_suid_sgid(&mut attrs);
+            // Under killpriv v2 the kernel sends this for every chown of a non-directory, so
+            // the filesystem no longer has to work out when the bits should go
+            if kill_suid_gid {
+                clear_suid_sgid(&mut attrs, _req, Privilege::Unknown);
             }
+            clear_file_capabilities(&mut attrs);
 
             if let Some(uid) = uid {
                 attrs.uid = uid;
-                // Clear SETUID on owner change
-                attrs.mode &= !libc::S_ISUID as u16;
             }
             if let Some(gid) = gid {
                 attrs.gid = gid;
-                // Clear SETGID unless user is root
-                if _req.uid() != 0 {
-                    attrs.mode &= !libc::S_ISGID as u16;
-                }
+            }
+            if let Some(mode) = cleared_mode {
+                attrs.mode = mode as u16;
             }
             attrs.last_metadata_changed = time_now();
             self.write_inode(&attrs);
-            reply.attr(&Duration::new(0, 0), &attrs.into());
+            reply.attr(&Duration::new(0, 0), &self.file_attr(attrs));
             return;
         }
 
         if let Some(size) = size {
             debug!("truncate() called with {ino:?} {size:?}");
-            if let Some(handle) = fh {
-                // If the file handle is available, check access locally.
-                // This is important as it preserves the semantic that a file handle opened
-                // with W_OK will never fail to truncate, even if the file has been subsequently
-                // chmod'ed
-                if Self::check_file_handle_write(handle.into()) {
-                    if let Err(error_code) = self.truncate(ino, size, 0, 0) {
-                        reply.error(error_code);
-                        return;
-                    }
-                } else {
+            // If the file handle is available, check access locally.
+            // This is important as it preserves the semantic that a file handle opened
+            // with W_OK will never fail to truncate, even if the file has been subsequently
+            // chmod'ed
+            let enforce_access = match fh {
+                Some(handle) if Self::check_file_handle_write(handle.into()) => false,
+                Some(_) => {
                     reply.error(Errno::EACCES);
                     return;
                 }
-            } else if let Err(error_code) = self.truncate(ino, size, _req.uid(), _req.gid()) {
-                reply.error(error_code);
-                return;
+                None => true,
+            };
+            // The truncate writes the inode back itself, so carry on from what it wrote
+            attrs = match self.truncate(_req, ino, size, kill_suid_gid, enforce_access) {
+                Ok(attrs) => attrs,
+                Err(error_code) => {
+                    reply.error(error_code);
+                    return;
+                }
+            };
+            if let Some(mode) = cleared_mode {
+                attrs.mode = mode as u16;
+                self.write_inode(&attrs);
             }
         }
 
@@ -735,21 +1229,12 @@ impl Filesystem for SimpleFS {
         if let Some(atime) = _atime {
             debug!("utimens() called with {ino:?}, atime={atime:?}");
 
-            if attrs.uid != _req.uid() && _req.uid() != 0 && atime != Now {
+            if !caller_owns(_req, attrs.uid) && !caller_is_root(_req) && atime != Now {
                 reply.error(Errno::EPERM);
                 return;
             }
 
-            if attrs.uid != _req.uid()
-                && !check_access(
-                    attrs.uid,
-                    attrs.gid,
-                    attrs.mode,
-                    _req.uid(),
-                    _req.gid(),
-                    AccessFlags::W_OK,
-                )
-            {
+            if !caller_owns(_req, attrs.uid) && !may_access(_req, &attrs, AccessFlags::W_OK) {
                 reply.error(Errno::EACCES);
                 return;
             }
@@ -764,21 +1249,12 @@ impl Filesystem for SimpleFS {
         if let Some(mtime) = _mtime {
             debug!("utimens() called with {ino:?}, mtime={mtime:?}");
 
-            if attrs.uid != _req.uid() && _req.uid() != 0 && mtime != Now {
+            if !caller_owns(_req, attrs.uid) && !caller_is_root(_req) && mtime != Now {
                 reply.error(Errno::EPERM);
                 return;
             }
 
-            if attrs.uid != _req.uid()
-                && !check_access(
-                    attrs.uid,
-                    attrs.gid,
-                    attrs.mode,
-                    _req.uid(),
-                    _req.gid(),
-                    AccessFlags::W_OK,
-                )
-            {
+            if !caller_owns(_req, attrs.uid) && !may_access(_req, &attrs, AccessFlags::W_OK) {
                 reply.error(Errno::EACCES);
                 return;
             }
@@ -792,7 +1268,7 @@ impl Filesystem for SimpleFS {
         }
 
         let attrs = self.get_inode(ino).unwrap();
-        reply.attr(&Duration::new(0, 0), &attrs.into());
+        reply.attr(&Duration::new(0, 0), &self.file_attr(attrs));
         return;
     }
 
@@ -804,6 +1280,9 @@ impl Filesystem for SimpleFS {
                 let file_size = file.metadata().unwrap().len();
                 let mut buffer = vec![0; file_size as usize];
                 file.read_exact(&mut buffer).unwrap();
+                if let Ok(mut attrs) = self.get_inode(ino) {
+                    self.touch_atime(&mut attrs);
+                }
                 reply.data(&buffer);
             }
             _ => {
@@ -819,7 +1298,8 @@ impl Filesystem for SimpleFS {
         name: &OsStr,
         mut mode: u32,
         _umask: u32,
-        _rdev: u32,
+        rdev: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
         let file_type = mode & libc::S_IFMT as u32;
@@ -827,11 +1307,12 @@ impl Filesystem for SimpleFS {
         if file_type != libc::S_IFREG as u32
             && file_type != libc::S_IFLNK as u32
             && file_type != libc::S_IFDIR as u32
+            && file_type != libc::S_IFCHR as u32
+            && file_type != libc::S_IFBLK as u32
+            && file_type != libc::S_IFIFO as u32
+            && file_type != libc::S_IFSOCK as u32
         {
-            // TODO
-            warn!(
-                "mknod() implementation is incomplete. Only supports regular files, symlinks, and directories. Got {mode:o}"
-            );
+            warn!("mknod() got a mode with no recognized file type: {mode:o}");
             reply.error(Errno::EPERM);
             return;
         }
@@ -849,22 +1330,21 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if let Err(error_code) = parent_attrs.check_writable() {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
-        parent_attrs.last_modified = time_now();
-        parent_attrs.last_metadata_changed = time_now();
+        let now = time_now();
+        parent_attrs.last_modified = now;
+        parent_attrs.last_metadata_changed = now;
         self.write_inode(&parent_attrs);
 
-        if _req.uid() != 0 {
+        if !caller_is_root(_req) {
             mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
         }
 
@@ -872,7 +1352,7 @@ impl Filesystem for SimpleFS {
         {
             let kind = as_file_kind(mode);
             // FreeBSD: sticky bit only valid on directories; otherwise EFTYPE
-            if _req.uid() != 0
+            if !caller_is_root(_req)
                 && (mode as u16 & libc::S_ISVTX as u16) != 0
                 && kind != FileKind::Directory
             {
@@ -886,17 +1366,27 @@ impl Filesystem for SimpleFS {
             inode: inode.0,
             open_file_handles: 0,
             size: 0,
-            last_accessed: time_now(),
-            last_modified: time_now(),
-            last_metadata_changed: time_now(),
+            last_accessed: now,
+            last_modified: now,
+            last_metadata_changed: now,
+            created: now,
             kind: as_file_kind(mode),
             mode: self.creation_mode(mode),
             hardlinks: 1,
-            uid: _req.uid(),
-            gid: creation_gid(&parent_attrs, _req.gid()),
+            uid: owner.uid,
+            gid: creation_gid(&parent_attrs, owner.gid),
+            rdev: match as_file_kind(mode) {
+                FileKind::CharDevice | FileKind::BlockDevice => rdev,
+                // Every other type reports 0, as a local filesystem does
+                _ => 0,
+            },
+            flags: 0,
             xattrs: BTreeMap::default(),
         };
         self.write_inode(&attrs);
+        // A fifo, socket or device node holds no data of its own - the kernel services reads
+        // and writes without ever reaching this filesystem - but the empty file keeps unlink
+        // and the garbage collector uniform across every kind
         File::create(self.content_path(inode)).unwrap();
 
         if as_file_kind(mode) == FileKind::Directory {
@@ -911,7 +1401,11 @@ impl Filesystem for SimpleFS {
         self.write_directory_content(parent, &entries);
 
         // TODO: implement flags
-        reply.entry(&Duration::new(0, 0), &attrs.into(), fuser::Generation(0));
+        reply.entry(
+            &Duration::new(0, 0),
+            &self.file_attr(attrs),
+            fuser::Generation(0),
+        );
     }
 
     fn mkdir(
@@ -921,6 +1415,7 @@ impl Filesystem for SimpleFS {
         name: &OsStr,
         mut mode: u32,
         _umask: u32,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
         debug!("mkdir() called with {parent:?} {name:?} {mode:o}");
@@ -937,41 +1432,48 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if let Err(error_code) = parent_attrs.check_writable() {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
-        parent_attrs.last_modified = time_now();
-        parent_attrs.last_metadata_changed = time_now();
+        let now = time_now();
+        parent_attrs.last_modified = now;
+        parent_attrs.last_metadata_changed = now;
         self.write_inode(&parent_attrs);
 
-        if _req.uid() != 0 {
+        if !caller_is_root(_req) {
             mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
         }
-        if parent_attrs.mode & libc::S_ISGID as u16 != 0 {
-            mode |= libc::S_ISGID as u32;
-        }
+        // A directory inherits sgid from its parent so that what is created inside keeps the
+        // parent's group. That is not a privilege the caller asked for, so it is added after
+        // creation_mode() has decided which of the caller's bits to keep
+        let inherited = if parent_attrs.mode & libc::S_ISGID as u16 != 0 {
+            libc::S_ISGID as u16
+        } else {
+            0
+        };
 
         let inode = self.allocate_next_inode();
         let attrs = InodeAttributes {
             inode: inode.0,
             open_file_handles: 0,
             size: u64::from(BLOCK_SIZE),
-            last_accessed: time_now(),
-            last_modified: time_now(),
-            last_metadata_changed: time_now(),
+            last_accessed: now,
+            last_modified: now,
+            last_metadata_changed: now,
+            created: now,
             kind: FileKind::Directory,
-            mode: self.creation_mode(mode),
+            mode: self.creation_mode(mode) | inherited,
             hardlinks: 2, // Directories start with link count of 2, since they have a self link
-            uid: _req.uid(),
-            gid: creation_gid(&parent_attrs, _req.gid()),
+            uid: owner.uid,
+            gid: creation_gid(&parent_attrs, owner.gid),
+            rdev: 0,
+            flags: 0,
             xattrs: BTreeMap::default(),
         };
         self.write_inode(&attrs);
@@ -985,7 +1487,11 @@ impl Filesystem for SimpleFS {
         entries.insert(name.as_bytes().to_vec(), (inode.0, FileKind::Directory));
         self.write_directory_content(parent, &entries);
 
-        reply.entry(&Duration::new(0, 0), &attrs.into(), fuser::Generation(0));
+        reply.entry(
+            &Duration::new(0, 0),
+            &self.file_attr(attrs),
+            fuser::Generation(0),
+        );
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
@@ -1006,35 +1512,37 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if let Err(error_code) = parent_attrs
+            .check_removable()
+            .and_then(|()| attrs.check_removable())
+        {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
 
-        let uid = _req.uid();
-        // "Sticky bit" handling
+        // "Sticky bit" handling. An unknown caller passes it for the reason in may_access:
+        // with default_permissions in force the kernel has already applied it
         if parent_attrs.mode & libc::S_ISVTX as u16 != 0
-            && uid != 0
-            && uid != parent_attrs.uid
-            && uid != attrs.uid
+            && !caller_is_root(_req)
+            && !caller_owns(_req, parent_attrs.uid)
+            && !caller_owns(_req, attrs.uid)
         {
             reply.error(Errno::EACCES);
             return;
         }
 
-        parent_attrs.last_metadata_changed = time_now();
-        parent_attrs.last_modified = time_now();
+        let now = time_now();
+        parent_attrs.last_metadata_changed = now;
+        parent_attrs.last_modified = now;
         self.write_inode(&parent_attrs);
 
         attrs.hardlinks -= 1;
-        attrs.last_metadata_changed = time_now();
+        attrs.last_metadata_changed = now;
         self.write_inode(&attrs);
         self.gc_inode(&attrs);
 
@@ -1063,6 +1571,16 @@ impl Filesystem for SimpleFS {
             }
         };
 
+        // Ahead of the emptiness check, as Linux tests the flags before it reaches the
+        // filesystem at all: an immutable directory refuses the removal whatever is in it
+        if let Err(error_code) = parent_attrs
+            .check_removable()
+            .and_then(|()| attrs.check_removable())
+        {
+            reply.error(error_code);
+            return;
+        }
+
         // Directories always have a self and parent link
         if self
             .get_directory_content(INodeNo(attrs.inode))
@@ -1073,34 +1591,29 @@ impl Filesystem for SimpleFS {
             reply.error(Errno::ENOTEMPTY);
             return;
         }
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
 
         // "Sticky bit" handling
         if parent_attrs.mode & libc::S_ISVTX as u16 != 0
-            && _req.uid() != 0
-            && _req.uid() != parent_attrs.uid
-            && _req.uid() != attrs.uid
+            && !caller_is_root(_req)
+            && !caller_owns(_req, parent_attrs.uid)
+            && !caller_owns(_req, attrs.uid)
         {
             reply.error(Errno::EACCES);
             return;
         }
 
-        parent_attrs.last_metadata_changed = time_now();
-        parent_attrs.last_modified = time_now();
+        let now = time_now();
+        parent_attrs.last_metadata_changed = now;
+        parent_attrs.last_modified = now;
         self.write_inode(&parent_attrs);
 
         attrs.hardlinks = 0;
-        attrs.last_metadata_changed = time_now();
+        attrs.last_metadata_changed = now;
         self.write_inode(&attrs);
         self.gc_inode(&attrs);
 
@@ -1117,6 +1630,7 @@ impl Filesystem for SimpleFS {
         parent: INodeNo,
         link_name: &OsStr,
         target: &Path,
+        owner: Owner,
         reply: ReplyEntry,
     ) {
         debug!("symlink() called with {parent:?} {link_name:?} {target:?}");
@@ -1128,19 +1642,18 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if let Err(error_code) = parent_attrs.check_writable() {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
-        parent_attrs.last_modified = time_now();
-        parent_attrs.last_metadata_changed = time_now();
+        let now = time_now();
+        parent_attrs.last_modified = now;
+        parent_attrs.last_metadata_changed = now;
         self.write_inode(&parent_attrs);
 
         let inode = self.allocate_next_inode();
@@ -1148,14 +1661,17 @@ impl Filesystem for SimpleFS {
             inode: inode.0,
             open_file_handles: 0,
             size: target.as_os_str().as_bytes().len() as u64,
-            last_accessed: time_now(),
-            last_modified: time_now(),
-            last_metadata_changed: time_now(),
+            last_accessed: now,
+            last_modified: now,
+            last_metadata_changed: now,
+            created: now,
             kind: FileKind::Symlink,
             mode: 0o777,
             hardlinks: 1,
-            uid: _req.uid(),
-            gid: creation_gid(&parent_attrs, _req.gid()),
+            uid: owner.uid,
+            gid: creation_gid(&parent_attrs, owner.gid),
+            rdev: 0,
+            flags: 0,
             xattrs: BTreeMap::default(),
         };
 
@@ -1175,7 +1691,11 @@ impl Filesystem for SimpleFS {
             .unwrap();
         file.write_all(target.as_os_str().as_bytes()).unwrap();
 
-        reply.entry(&Duration::new(0, 0), &attrs.into(), fuser::Generation(0));
+        reply.entry(
+            &Duration::new(0, 0),
+            &self.file_attr(attrs),
+            fuser::Generation(0),
+        );
     }
 
     fn rename(
@@ -1186,6 +1706,7 @@ impl Filesystem for SimpleFS {
         newparent: INodeNo,
         newname: &OsStr,
         flags: RenameFlags,
+        owner: Option<Owner>,
         reply: ReplyEmpty,
     ) {
         debug!(
@@ -1208,23 +1729,16 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if !may_access(_req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
 
         // "Sticky bit" handling
         if parent_attrs.mode & libc::S_ISVTX as u16 != 0
-            && _req.uid() != 0
-            && _req.uid() != parent_attrs.uid
-            && _req.uid() != inode_attrs.uid
+            && !caller_is_root(_req)
+            && !caller_owns(_req, parent_attrs.uid)
+            && !caller_owns(_req, inode_attrs.uid)
         {
             reply.error(Errno::EACCES);
             return;
@@ -1238,14 +1752,7 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            new_parent_attrs.uid,
-            new_parent_attrs.gid,
-            new_parent_attrs.mode,
-            _req.uid(),
-            _req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if !may_access(_req, &new_parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
@@ -1253,9 +1760,9 @@ impl Filesystem for SimpleFS {
         // "Sticky bit" handling in new_parent
         if new_parent_attrs.mode & libc::S_ISVTX as u16 != 0 {
             if let Ok(existing_attrs) = self.lookup_name(newparent, newname) {
-                if _req.uid() != 0
-                    && _req.uid() != new_parent_attrs.uid
-                    && _req.uid() != existing_attrs.uid
+                if !caller_is_root(_req)
+                    && !caller_owns(_req, new_parent_attrs.uid)
+                    && !caller_owns(_req, existing_attrs.uid)
                 {
                     reply.error(Errno::EACCES);
                     return;
@@ -1263,8 +1770,59 @@ impl Filesystem for SimpleFS {
             }
         }
 
+        // A rename removes an entry from one directory and creates one in another, so every
+        // inode it touches has to allow its side of that
+        let destination = self.lookup_name(newparent, newname);
+        if let Err(error_code) = parent_attrs
+            .check_removable()
+            .and_then(|()| inode_attrs.check_removable())
+            .and_then(|()| new_parent_attrs.check_writable())
+            .and_then(|()| {
+                destination
+                    .as_ref()
+                    .map_or(Ok(()), InodeAttributes::check_removable)
+            })
+        {
+            reply.error(error_code);
+            return;
+        }
+
+        // Linux's RENAME_EXCHANGE and macOS's RENAME_SWAP both mean: atomically exchange the
+        // two entries instead of replacing the destination. Linux's RENAME_NOREPLACE and
+        // macOS's RENAME_EXCL both mean: fail instead of replacing an existing destination
         #[cfg(target_os = "linux")]
-        if flags.contains(RenameFlags::RENAME_EXCHANGE) {
+        let (exchange, no_replace) = (
+            flags.contains(RenameFlags::RENAME_EXCHANGE),
+            flags.contains(RenameFlags::RENAME_NOREPLACE),
+        );
+        #[cfg(target_os = "macos")]
+        let (exchange, no_replace) = (
+            flags.contains(RenameFlags::RENAME_SWAP),
+            flags.contains(RenameFlags::RENAME_EXCL),
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let (exchange, no_replace) = (false, false);
+
+        // Leaving a whiteout behind is Linux-only; macOS has no equivalent
+        #[cfg(target_os = "linux")]
+        let whiteout = flags.contains(RenameFlags::RENAME_WHITEOUT);
+        #[cfg(not(target_os = "linux"))]
+        let whiteout = false;
+
+        // Exchanging and refusing to replace are contradictory: renameat2(2) and
+        // renamex_np(2) both reject the combination
+        if exchange && no_replace {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+
+        // An exchange leaves nothing behind to white out, so renameat2(2) refuses the pair
+        if exchange && whiteout {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+
+        if exchange {
             let mut new_inode_attrs = match self.lookup_name(newparent, newname) {
                 Ok(attrs) => attrs,
                 Err(error_code) => {
@@ -1287,15 +1845,16 @@ impl Filesystem for SimpleFS {
             );
             self.write_directory_content(parent, &entries);
 
-            parent_attrs.last_metadata_changed = time_now();
-            parent_attrs.last_modified = time_now();
+            let now = time_now();
+            parent_attrs.last_metadata_changed = now;
+            parent_attrs.last_modified = now;
             self.write_inode(&parent_attrs);
-            new_parent_attrs.last_metadata_changed = time_now();
-            new_parent_attrs.last_modified = time_now();
+            new_parent_attrs.last_metadata_changed = now;
+            new_parent_attrs.last_modified = now;
             self.write_inode(&new_parent_attrs);
-            inode_attrs.last_metadata_changed = time_now();
+            inode_attrs.last_metadata_changed = now;
             self.write_inode(&inode_attrs);
-            new_inode_attrs.last_metadata_changed = time_now();
+            new_inode_attrs.last_metadata_changed = now;
             self.write_inode(&new_inode_attrs);
 
             if inode_attrs.kind == FileKind::Directory {
@@ -1317,6 +1876,11 @@ impl Filesystem for SimpleFS {
             return;
         }
 
+        if no_replace && self.lookup_name(newparent, newname).is_ok() {
+            reply.error(Errno::EEXIST);
+            return;
+        }
+
         // Only overwrite an existing directory if it's empty
         if let Ok(new_name_attrs) = self.lookup_name(newparent, newname) {
             if new_name_attrs.kind == FileKind::Directory
@@ -1335,18 +1899,13 @@ impl Filesystem for SimpleFS {
         // because that will change the ".." link in it
         if inode_attrs.kind == FileKind::Directory
             && parent != newparent
-            && !check_access(
-                inode_attrs.uid,
-                inode_attrs.gid,
-                inode_attrs.mode,
-                _req.uid(),
-                _req.gid(),
-                AccessFlags::W_OK,
-            )
+            && !may_access(_req, &inode_attrs, AccessFlags::W_OK)
         {
             reply.error(Errno::EACCES);
             return;
         }
+
+        let now = time_now();
 
         // If target already exists decrement its hardlink count
         if let Ok(mut existing_inode_attrs) = self.lookup_name(newparent, newname) {
@@ -1359,13 +1918,49 @@ impl Filesystem for SimpleFS {
             } else {
                 existing_inode_attrs.hardlinks -= 1;
             }
-            existing_inode_attrs.last_metadata_changed = time_now();
+            existing_inode_attrs.last_metadata_changed = now;
             self.write_inode(&existing_inode_attrs);
             self.gc_inode(&existing_inode_attrs);
         }
 
         let mut entries = self.get_directory_content(parent).unwrap();
         entries.remove(name.as_bytes());
+        // A whiteout rename puts a placeholder where the entry was, so a filesystem stacked
+        // above this one can tell "removed here" apart from "never existed". The kernel's own
+        // is a character device with device number 0 and no permission bits, which is not a
+        // node anything can be read from or written to
+        if whiteout {
+            // The kernel names the owner for exactly this case: a rename creates an inode
+            // only here, and this is the only rename it sends ids for
+            let Some(owner) = owner else {
+                reply.error(Errno::EIO);
+                return;
+            };
+            let whiteout_inode = self.allocate_next_inode();
+            let whiteout_attrs = InodeAttributes {
+                inode: whiteout_inode.0,
+                open_file_handles: 0,
+                size: 0,
+                last_accessed: now,
+                last_modified: now,
+                last_metadata_changed: now,
+                created: now,
+                kind: FileKind::CharDevice,
+                mode: 0,
+                hardlinks: 1,
+                uid: owner.uid,
+                gid: creation_gid(&parent_attrs, owner.gid),
+                rdev: 0,
+                flags: 0,
+                xattrs: BTreeMap::default(),
+            };
+            self.write_inode(&whiteout_attrs);
+            File::create(self.content_path(whiteout_inode)).unwrap();
+            entries.insert(
+                name.as_bytes().to_vec(),
+                (whiteout_attrs.inode, whiteout_attrs.kind),
+            );
+        }
         self.write_directory_content(parent, &entries);
 
         let mut entries = self.get_directory_content(newparent).unwrap();
@@ -1375,13 +1970,13 @@ impl Filesystem for SimpleFS {
         );
         self.write_directory_content(newparent, &entries);
 
-        parent_attrs.last_metadata_changed = time_now();
-        parent_attrs.last_modified = time_now();
+        parent_attrs.last_metadata_changed = now;
+        parent_attrs.last_modified = now;
         self.write_inode(&parent_attrs);
-        new_parent_attrs.last_metadata_changed = time_now();
-        new_parent_attrs.last_modified = time_now();
+        new_parent_attrs.last_metadata_changed = now;
+        new_parent_attrs.last_modified = now;
         self.write_inode(&new_parent_attrs);
-        inode_attrs.last_metadata_changed = time_now();
+        inode_attrs.last_metadata_changed = now;
         self.write_inode(&inode_attrs);
 
         if inode_attrs.kind == FileKind::Directory {
@@ -1411,17 +2006,31 @@ impl Filesystem for SimpleFS {
                 return;
             }
         };
-        if let Err(error_code) = self.insert_link(_req, newparent, newname, ino, attrs.kind) {
+        if let Err(error_code) = attrs
+            .check_removable()
+            .and_then(|()| self.insert_link(_req, newparent, newname, ino, attrs.kind))
+        {
             reply.error(error_code);
         } else {
             attrs.hardlinks += 1;
             attrs.last_metadata_changed = time_now();
             self.write_inode(&attrs);
-            reply.entry(&Duration::new(0, 0), &attrs.into(), fuser::Generation(0));
+            reply.entry(
+                &Duration::new(0, 0),
+                &self.file_attr(attrs),
+                fuser::Generation(0),
+            );
         }
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        flags: OpenFlags,
+        _kill_suid_gid: bool,
+        reply: ReplyOpen,
+    ) {
         debug!("open() called for {_ino:?}");
         let (access_mask, read, write) = match flags.acc_mode() {
             OpenAccMode::O_RDONLY => {
@@ -1443,14 +2052,20 @@ impl Filesystem for SimpleFS {
 
         match self.get_inode(_ino) {
             Ok(mut attr) => {
-                if check_access(
-                    attr.uid,
-                    attr.gid,
-                    attr.mode,
-                    _req.uid(),
-                    _req.gid(),
-                    AccessFlags::from_bits_retain(access_mask),
-                ) {
+                // Opening for write is where both flags bite. Linux checks here rather than on
+                // every write, so a file made immutable afterwards stays writable through a
+                // descriptor that was already open
+                if write && attr.is_immutable() {
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+                if attr.is_append_only()
+                    && ((write && flags.0 & libc::O_APPEND == 0) || flags.0 & libc::O_TRUNC != 0)
+                {
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+                if may_access(_req, &attr, AccessFlags::from_bits_retain(access_mask)) {
                     attr.open_file_handles += 1;
                     self.write_inode(&attr);
                     let open_flags = if self.direct_io {
@@ -1492,11 +2107,28 @@ impl Filesystem for SimpleFS {
         match File::open(path) {
             Ok(file) => {
                 let file_size = file.metadata().unwrap().len();
-                // Could underflow if file length is less than local_start
-                let read_size = min(size, file_size.saturating_sub(offset as u64) as u32);
+                // Compared as u64: what remains of a large file need not fit the request's u32
+                let read_size = min(u64::from(size), file_size.saturating_sub(offset)) as u32;
 
                 let mut buffer = vec![0; read_size as usize];
-                file.read_exact_at(&mut buffer, offset as u64).unwrap();
+                // The file can shrink between the size check and the read, under a truncate on
+                // another thread
+                if let Err(error) = file.read_exact_at(&mut buffer, offset) {
+                    reply.error(error.into());
+                    return;
+                }
+                // A reader that asked for O_NOATIME wants to leave no trace, and a read
+                // request carries the flag, so it can be honored here. The flag is Linux's;
+                // neither macOS nor FreeBSD defines it
+                #[cfg(target_os = "linux")]
+                let no_atime = _flags.0 & libc::O_NOATIME != 0;
+                #[cfg(not(target_os = "linux"))]
+                let no_atime = false;
+                if !no_atime {
+                    if let Ok(mut attrs) = self.get_inode(ino) {
+                        self.touch_atime(&mut attrs);
+                    }
+                }
                 reply.data(&buffer);
             }
             _ => {
@@ -1507,12 +2139,12 @@ impl Filesystem for SimpleFS {
 
     fn write(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         data: &[u8],
-        _write_flags: WriteFlags,
+        write_flags: WriteFlags,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
@@ -1523,15 +2155,21 @@ impl Filesystem for SimpleFS {
             return;
         }
 
+        // open() refuses to open an append-only file for writing without O_APPEND, but nothing
+        // stops the caller clearing O_APPEND with fcntl() afterwards: the kernel would refuse
+        // that for a file it knew to be append-only, and does not know this one is. So what
+        // the flag protects - the data already written - is checked here instead
+        if self
+            .get_inode(ino)
+            .is_ok_and(|attrs| attrs.is_append_only() && offset < attrs.size)
+        {
+            reply.error(Errno::EPERM);
+            return;
+        }
+
         let path = self.content_path(ino);
         match OpenOptions::new().write(true).open(path) {
             Ok(mut file) => {
-                file.seek(SeekFrom::Start(offset)).unwrap();
-                file.write_all(data).unwrap();
-
-                let mut attrs = self.get_inode(ino).unwrap();
-                attrs.last_metadata_changed = time_now();
-                attrs.last_modified = time_now();
                 let Ok(offset_usize): Result<usize, _> = offset.try_into() else {
                     reply.error(Errno::EFBIG);
                     return;
@@ -1540,16 +2178,49 @@ impl Filesystem for SimpleFS {
                     reply.error(Errno::EFBIG);
                     return;
                 };
+
+                // A full or failing backing store is the caller's error to see, not a reason to
+                // bring the filesystem down
+                if let Err(error) = file
+                    .seek(SeekFrom::Start(offset))
+                    .and_then(|_| file.write_all(data))
+                {
+                    reply.error(error.into());
+                    return;
+                }
+                // Release the descriptor before opening the inode. Near RLIMIT_NOFILE this write
+                // may hold the last one, and get_inode() reports the resulting EMFILE as ENOENT,
+                // which would fail a write whose data already landed.
+                drop(file);
+
+                // Read the inode only once the data is written. Holding a copy across the write
+                // would let this write back a record that a setattr() completing in the meantime
+                // had already updated. Contents and metadata are separate files, so the inode can
+                // be unreadable even though the write itself succeeded.
+                let mut attrs = match self.get_inode(ino) {
+                    Ok(attrs) => attrs,
+                    Err(error_code) => {
+                        reply.error(error_code);
+                        return;
+                    }
+                };
+                let now = time_now();
+                attrs.last_metadata_changed = now;
+                attrs.last_modified = now;
                 if end_offset > attrs.size as usize {
                     attrs.size = end_offset as u64;
                 }
-                // if flags & FUSE_WRITE_KILL_PRIV as i32 != 0 {
-                //     clear_suid_sgid(&mut attrs);
-                // }
-                // XXX: In theory we should only need to do this when WRITE_KILL_PRIV is set for 7.31+
-                // However, xfstests fail in that case
-                clear_suid_sgid(&mut attrs);
-                self.write_inode(&attrs);
+                // Only killpriv v2 sets this on a buffered write, which is why honoring it
+                // requires negotiating v2 rather than FUSE_HANDLE_KILLPRIV
+                if write_flags.contains(WriteFlags::FUSE_WRITE_KILL_SUIDGID) {
+                    clear_suid_sgid(&mut attrs, req, Privilege::KnownLacking);
+                }
+                clear_file_capabilities(&mut attrs);
+                // The data can fill the backing store, leaving no room to record its new size
+                if let Err(error) = self.try_write_inode(&attrs) {
+                    reply.error(error.into());
+                    return;
+                }
 
                 reply.written(data.len() as u32);
             }
@@ -1570,7 +2241,7 @@ impl Filesystem for SimpleFS {
         reply: ReplyEmpty,
     ) {
         if let Ok(mut attrs) = self.get_inode(_ino) {
-            attrs.open_file_handles -= 1;
+            self.close_handle(&mut attrs);
         }
         reply.ok();
     }
@@ -1592,14 +2263,7 @@ impl Filesystem for SimpleFS {
 
         match self.get_inode(_ino) {
             Ok(mut attr) => {
-                if check_access(
-                    attr.uid,
-                    attr.gid,
-                    attr.mode,
-                    _req.uid(),
-                    _req.gid(),
-                    AccessFlags::from_bits_retain(access_mask),
-                ) {
+                if may_access(_req, &attr, AccessFlags::from_bits_retain(access_mask)) {
                     attr.open_file_handles += 1;
                     self.write_inode(&attr);
                     let open_flags = if self.direct_io {
@@ -1636,6 +2300,9 @@ impl Filesystem for SimpleFS {
                 return;
             }
         };
+        if let Ok(mut attrs) = self.get_inode(ino) {
+            self.touch_atime(&mut attrs);
+        }
 
         for (index, entry) in entries.iter().skip(offset as usize).enumerate() {
             let (name, (inode, file_type)) = entry;
@@ -1664,20 +2331,35 @@ impl Filesystem for SimpleFS {
         reply: ReplyEmpty,
     ) {
         if let Ok(mut attrs) = self.get_inode(_ino) {
-            attrs.open_file_handles -= 1;
+            self.close_handle(&mut attrs);
         }
         reply.ok();
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        warn!("statfs() implementation is a stub");
-        // TODO: real implementation of this
+        // Pass through the backing directory's capacity, rescaled to this filesystem's block
+        // size. Callers that size their work to the free space, `df` among them, read this
+        let stat = match nix::sys::statvfs::statvfs(Path::new(&self.data_dir)) {
+            Ok(stat) => stat,
+            Err(error) => {
+                reply.error(io::Error::from(error).into());
+                return;
+            }
+        };
+        // Widened explicitly: statvfs reports these in types whose width varies by platform,
+        // 64 bits on Linux and 32 on macOS
+        let fragment_size = stat.fragment_size() as u64;
+        let in_blocks = |count: u64| count.saturating_mul(fragment_size) / u64::from(BLOCK_SIZE);
+        // Every inode here costs two in the backing directory, one under `inodes` for the
+        // metadata and one under `contents` for the data, so the backing store runs out of
+        // them twice as fast as a pass-through count would suggest
+        let in_inodes = |count: u64| count / 2;
         reply.statfs(
-            10_000,
-            10_000,
-            10_000,
-            1,
-            10_000,
+            in_blocks(stat.blocks() as u64),
+            in_blocks(stat.blocks_free() as u64),
+            in_blocks(stat.blocks_available() as u64),
+            in_inodes(stat.files() as u64),
+            in_inodes(stat.files_free() as u64),
             BLOCK_SIZE,
             MAX_NAME_LENGTH,
             BLOCK_SIZE,
@@ -1766,7 +2448,22 @@ impl Filesystem for SimpleFS {
 
     fn removexattr(&self, request: &Request, inode: INodeNo, key: &OsStr, reply: ReplyEmpty) {
         if let Ok(mut attrs) = self.get_inode(inode) {
-            if let Err(error) = xattr_access_check(key.as_bytes(), libc::W_OK, &attrs, request) {
+            // The kernel drops `security.capability` on behalf of whoever is writing the file,
+            // and sends that removal under their credentials rather than its own. Refusing it
+            // because they are not root fails the operation it was part of - a `fallocate` by
+            // an unprivileged user returns EPERM without ever reaching this filesystem. So
+            // this one key is removable by anyone: doing so only ever takes privilege away.
+            // Setting it still needs root, as it does for any other `security.*` key
+            //
+            // An immutable inode still refuses it: nothing can write, chown or truncate one, so
+            // no removal on such an operation's behalf can be pending. An append-only one cannot
+            // refuse, since appending to it is exactly such an operation
+            let check = if key.as_bytes() == b"security.capability" {
+                attrs.check_writable()
+            } else {
+                xattr_access_check(key.as_bytes(), libc::W_OK, &attrs, request)
+            };
+            if let Err(error) = check {
                 reply.error(error);
                 return;
             }
@@ -1790,7 +2487,7 @@ impl Filesystem for SimpleFS {
         debug!("access() called with {ino:?} {mask:?}");
         match self.get_inode(ino) {
             Ok(attr) => {
-                if check_access(attr.uid, attr.gid, attr.mode, _req.uid(), _req.gid(), mask) {
+                if may_access(_req, &attr, mask) {
                     reply.ok();
                 } else {
                     reply.error(Errno::EACCES);
@@ -1808,6 +2505,8 @@ impl Filesystem for SimpleFS {
         mut mode: u32,
         _umask: u32,
         flags: i32,
+        _kill_suid_gid: bool,
+        owner: Owner,
         reply: ReplyCreate,
     ) {
         debug!("create() called with {parent:?} {name:?}");
@@ -1835,22 +2534,21 @@ impl Filesystem for SimpleFS {
             }
         };
 
-        if !check_access(
-            parent_attrs.uid,
-            parent_attrs.gid,
-            parent_attrs.mode,
-            req.uid(),
-            req.gid(),
-            AccessFlags::W_OK,
-        ) {
+        if let Err(error_code) = parent_attrs.check_writable() {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(req, &parent_attrs, AccessFlags::W_OK) {
             reply.error(Errno::EACCES);
             return;
         }
-        parent_attrs.last_modified = time_now();
-        parent_attrs.last_metadata_changed = time_now();
+        let now = time_now();
+        parent_attrs.last_modified = now;
+        parent_attrs.last_metadata_changed = now;
         self.write_inode(&parent_attrs);
 
-        if req.uid() != 0 {
+        if !caller_is_root(req) {
             mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
         }
 
@@ -1858,7 +2556,7 @@ impl Filesystem for SimpleFS {
         {
             let kind = as_file_kind(mode);
             // FreeBSD: sticky bit only valid on directories; otherwise EFTYPE
-            if req.uid() != 0
+            if !caller_is_root(req)
                 && (mode as u16 & libc::S_ISVTX as u16) != 0
                 && kind != FileKind::Directory
             {
@@ -1872,14 +2570,17 @@ impl Filesystem for SimpleFS {
             inode: inode.0,
             open_file_handles: 1,
             size: 0,
-            last_accessed: time_now(),
-            last_modified: time_now(),
-            last_metadata_changed: time_now(),
+            last_accessed: now,
+            last_modified: now,
+            last_metadata_changed: now,
+            created: now,
             kind: as_file_kind(mode),
             mode: self.creation_mode(mode),
             hardlinks: 1,
-            uid: req.uid(),
-            gid: creation_gid(&parent_attrs, req.gid()),
+            uid: owner.uid,
+            gid: creation_gid(&parent_attrs, owner.gid),
+            rdev: 0,
+            flags: 0,
             xattrs: BTreeMap::default(),
         };
         self.write_inode(&attrs);
@@ -1899,7 +2600,226 @@ impl Filesystem for SimpleFS {
         // TODO: implement flags
         reply.created(
             &Duration::new(0, 0),
-            &attrs.into(),
+            &self.file_attr(attrs),
+            fuser::Generation(0),
+            FileHandle(self.allocate_next_file_handle(read, write)),
+            FopenFlags::empty(),
+        );
+    }
+
+    /// Answers `statx(2)`, which differs from `getattr()` in carrying a creation time. That
+    /// is the whole reason to implement it: `fuse_attr` has no field for one on Linux, so
+    /// without this the kernel reports whatever it last cached
+    #[cfg(target_os = "linux")]
+    fn statx(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: Option<FileHandle>,
+        _flags: u32,
+        _mask: fuser::StatxMask,
+        reply: fuser::ReplyStatx,
+    ) {
+        debug!("statx() called with {ino:?}");
+        let attrs = match self.get_inode(ino) {
+            Ok(attrs) => attrs,
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+
+        // The inode flags this filesystem honors, in the encoding statx uses. The kernel
+        // discards them, so `chattr +i` stays invisible to statx(2) whatever is reported here
+        // - see StatxAttr::attributes. Filled in because that is what the field is for, and
+        // so nothing has to change should the kernel start reading it
+        let mut attributes = fuser::StatxAttributes::empty();
+        attributes.set(fuser::StatxAttributes::IMMUTABLE, attrs.is_immutable());
+        attributes.set(fuser::StatxAttributes::APPEND, attrs.is_append_only());
+        attributes.set(
+            fuser::StatxAttributes::NODUMP,
+            attrs.flags & FS_NODUMP_FL != 0,
+        );
+
+        let btime = system_time_from_time(attrs.created.0, attrs.created.1);
+        reply.statx(
+            &Duration::new(0, 0),
+            &fuser::StatxAttr {
+                btime: Some(btime),
+                attributes,
+                // The three above are the ones this filesystem can speak to. Leaving the rest
+                // out is what tells a caller "cannot say" rather than "not set"
+                attributes_mask: fuser::StatxAttributes::IMMUTABLE
+                    | fuser::StatxAttributes::APPEND
+                    | fuser::StatxAttributes::NODUMP,
+                ..self.file_attr(attrs).into()
+            },
+        );
+    }
+
+    /// Serves the four ioctls the kernel turns chattr(1) and lsattr(1) into. The kernel does
+    /// the ownership and `CAP_LINUX_IMMUTABLE` checks before sending them, so all that is left
+    /// here is to store the flags and to refuse the ones this filesystem does not honor
+    #[cfg(target_os = "linux")]
+    fn ioctl(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _flags: fuser::IoctlFlags,
+        cmd: u32,
+        in_data: &[u8],
+        _out_size: u32,
+        reply: fuser::ReplyIoctl,
+    ) {
+        let mut attrs = match self.get_inode(ino) {
+            Ok(attrs) => attrs,
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+
+        // Both setters arrive as the full new flag set, not as a delta
+        let new_flags = match cmd {
+            FS_IOC_GETFLAGS => {
+                reply.ioctl(0, &attrs.flags.to_ne_bytes());
+                return;
+            }
+            FS_IOC_FSGETXATTR => {
+                let mut fsxattr = [0; FSXATTR_SIZE];
+                fsxattr[..size_of::<u32>()]
+                    .copy_from_slice(&xflags_from_flags(attrs.flags).to_ne_bytes());
+                reply.ioctl(0, &fsxattr);
+                return;
+            }
+            FS_IOC_SETFLAGS => {
+                let Ok(requested) = in_data.try_into().map(u32::from_ne_bytes) else {
+                    reply.error(Errno::EINVAL);
+                    return;
+                };
+                if requested & !SUPPORTED_FS_FLAGS != 0 {
+                    reply.error(Errno::EOPNOTSUPP);
+                    return;
+                }
+                requested
+            }
+            FS_IOC_FSSETXATTR => {
+                if in_data.len() != FSXATTR_SIZE {
+                    reply.error(Errno::EINVAL);
+                    return;
+                }
+                let xflags = u32::from_ne_bytes(in_data[..size_of::<u32>()].try_into().unwrap());
+                let Some(flags) = flags_from_xflags(xflags) else {
+                    reply.error(Errno::EOPNOTSUPP);
+                    return;
+                };
+                flags
+            }
+            _ => {
+                reply.error(Errno::ENOTTY);
+                return;
+            }
+        };
+
+        if new_flags != attrs.flags {
+            attrs.flags = new_flags;
+            attrs.last_metadata_changed = time_now();
+            self.write_inode(&attrs);
+        }
+        reply.ioctl(0, &[]);
+    }
+
+    /// Creates a file that no name reaches, for `open(..., O_TMPFILE)`. It belongs to
+    /// `parent`'s directory - that is where its space is accounted, and where it will live if
+    /// `link()` later gives it a name - but no entry points at it, so the descriptor replied
+    /// with here is the only way to it. Answering at all is what keeps the kernel offering
+    /// O_TMPFILE on this connection: the default ENOSYS turns it off permanently
+    fn tmpfile(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        mut mode: u32,
+        _umask: u32,
+        flags: i32,
+        _kill_suid_gid: bool,
+        owner: Owner,
+        reply: ReplyCreate,
+    ) {
+        debug!("tmpfile() called with {parent:?} {mode:o}");
+        let (read, write) = match flags & libc::O_ACCMODE {
+            libc::O_WRONLY => (false, true),
+            libc::O_RDWR => (true, true),
+            // An anonymous file that cannot be written is of no use, and the kernel rejects
+            // the combination before it reaches a filesystem
+            _ => {
+                reply.error(Errno::EINVAL);
+                return;
+            }
+        };
+
+        let parent_attrs = match self.get_inode(parent) {
+            Ok(attrs) => attrs,
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+
+        if parent_attrs.kind != FileKind::Directory {
+            reply.error(Errno::ENOTDIR);
+            return;
+        }
+
+        // The directory has to be writable even though nothing is written to it, and
+        // searchable even though nothing is looked up in it: `vfs_tmpfile` asks its own
+        // filesystems for `MAY_WRITE | MAY_EXEC`. The directory is this request's operand
+        // rather than a component of a path, so no lookup has passed through it and nothing
+        // the kernel has already checked implies either
+        if let Err(error_code) = parent_attrs.check_writable() {
+            reply.error(error_code);
+            return;
+        }
+
+        if !may_access(req, &parent_attrs, AccessFlags::W_OK | AccessFlags::X_OK) {
+            reply.error(Errno::EACCES);
+            return;
+        }
+
+        // The parent's timestamps are left alone, since no entry is added to it
+
+        if !caller_is_root(req) {
+            mode &= !(libc::S_ISUID | libc::S_ISGID) as u32;
+        }
+
+        let now = time_now();
+        let inode = self.allocate_next_inode();
+        let attrs = InodeAttributes {
+            inode: inode.0,
+            open_file_handles: 1,
+            size: 0,
+            last_accessed: now,
+            last_modified: now,
+            last_metadata_changed: now,
+            created: now,
+            // The kernel only ever asks for a regular file here
+            kind: FileKind::File,
+            mode: self.creation_mode(mode),
+            // What makes it anonymous. Closing the last handle without linking it collects it,
+            // and link() takes it from here to 1
+            hardlinks: 0,
+            uid: owner.uid,
+            gid: creation_gid(&parent_attrs, owner.gid),
+            rdev: 0,
+            flags: 0,
+            xattrs: BTreeMap::default(),
+        };
+        self.write_inode(&attrs);
+        File::create(self.content_path(inode)).unwrap();
+
+        reply.created(
+            &Duration::new(0, 0),
+            &self.file_attr(attrs),
             fuser::Generation(0),
             FileHandle(self.allocate_next_file_handle(read, write)),
             FopenFlags::empty(),
@@ -1917,21 +2837,70 @@ impl Filesystem for SimpleFS {
         mode: i32,
         reply: ReplyEmpty,
     ) {
+        let attrs = match self.get_inode(ino) {
+            Ok(attrs) => attrs,
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        };
+        // Preallocation past the end is the one mode an append-only file accepts, since it
+        // adds space without touching what is there. An immutable one accepts none
+        if attrs.is_immutable()
+            || (attrs.is_append_only() && mode & !libc::FALLOC_FL_KEEP_SIZE != 0)
+        {
+            reply.error(Errno::EPERM);
+            return;
+        }
+
         let path = self.content_path(ino);
-        match OpenOptions::new().write(true).open(path) {
+
+        // A filesystem knows roughly what it has and refuses an impossible request outright.
+        // Handing it to the backing store instead fills the disk before failing, and this
+        // filesystem cannot write even its own metadata once that has happened.
+        //
+        // The whole range is charged for, without crediting what the file already occupies.
+        // Only the blocks inside the requested range are free to reuse, and working out which
+        // those are needs a SEEK_HOLE/SEEK_DATA walk of the range. Crediting the file's total
+        // block count instead would let through exactly what this rejects: a 1 GiB file whose
+        // blocks all sit below the offset can ask for another 1 GiB on a device with less than
+        // that free. Erring towards ENOSPC costs a preallocation that would have fit.
+        //
+        // The modes that give space back are exempt, since they need none to succeed. Only
+        // punching can arrive here today - the FUSE kernel driver forwards KEEP_SIZE,
+        // PUNCH_HOLE and ZERO_RANGE and refuses the rest before the filesystem sees them -
+        // but the condition is written about what the modes mean rather than about what the
+        // driver currently sends
+        const FREES_SPACE: i32 = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_COLLAPSE_RANGE;
+        if mode & FREES_SPACE == 0 && !self.backing_store_can_take(offset, length) {
+            reply.error(Errno::ENOSPC);
+            return;
+        }
+
+        match OpenOptions::new().write(true).open(&path) {
             Ok(file) => {
-                unsafe {
-                    libc::fallocate64(file.into_raw_fd(), mode, offset as i64, length as i64);
+                // Must not consume `file`, otherwise its descriptor is leaked. Tests that punch
+                // thousands of holes exhaust RLIMIT_NOFILE within a single run.
+                let result = unsafe {
+                    libc::fallocate64(file.as_raw_fd(), mode, offset as i64, length as i64)
+                };
+                if result < 0 {
+                    reply.error(io::Error::last_os_error().into());
+                    return;
                 }
-                if mode & libc::FALLOC_FL_KEEP_SIZE == 0 {
-                    let mut attrs = self.get_inode(ino).unwrap();
-                    attrs.last_metadata_changed = time_now();
-                    attrs.last_modified = time_now();
-                    if offset + length > attrs.size {
-                        attrs.size = (offset + length) as u64;
-                    }
-                    self.write_inode(&attrs);
+                let mut attrs = self.get_inode(ino).unwrap();
+                // Every fallocate mode changes the file, so the times move even when the size
+                // is pinned: a punch-hole rewrites content, and preallocation commits blocks
+                let now = time_now();
+                attrs.last_metadata_changed = now;
+                attrs.last_modified = now;
+                if mode & libc::FALLOC_FL_KEEP_SIZE == 0 && offset + length > attrs.size {
+                    attrs.size = (offset + length) as u64;
                 }
+                if self.killpriv_negotiated {
+                    clear_privileges_unprompted(&mut attrs, _req);
+                }
+                self.write_inode(&attrs);
                 reply.ok();
             }
             _ => {
@@ -1964,6 +2933,20 @@ impl Filesystem for SimpleFS {
             reply.error(Errno::EACCES);
             return;
         }
+        // Checked on every call rather than at open, which is where the flags are otherwise
+        // enforced: `generic_copy_file_checks` rejects an immutable destination each time
+        match self.get_inode(dest_inode) {
+            Ok(attrs) => {
+                if let Err(error_code) = attrs.check_writable() {
+                    reply.error(error_code);
+                    return;
+                }
+            }
+            Err(error_code) => {
+                reply.error(error_code);
+                return;
+            }
+        }
 
         let src_path = self.content_path(src_inode);
         match File::open(src_path) {
@@ -1973,17 +2956,30 @@ impl Filesystem for SimpleFS {
                 let read_size = min(size, file_size.saturating_sub(src_offset));
 
                 let mut data = vec![0; read_size as usize];
-                file.read_exact_at(&mut data, src_offset).unwrap();
+                if let Err(error) = file.read_exact_at(&mut data, src_offset) {
+                    reply.error(error.into());
+                    return;
+                }
+                // Copying reads the source, and Linux moves its atime accordingly
+                if let Ok(mut src_attrs) = self.get_inode(src_inode) {
+                    self.touch_atime(&mut src_attrs);
+                }
 
                 let dest_path = self.content_path(dest_inode);
                 match OpenOptions::new().write(true).open(dest_path) {
                     Ok(mut file) => {
-                        file.seek(SeekFrom::Start(dest_offset)).unwrap();
-                        file.write_all(&data).unwrap();
+                        if let Err(error) = file
+                            .seek(SeekFrom::Start(dest_offset))
+                            .and_then(|_| file.write_all(&data))
+                        {
+                            reply.error(error.into());
+                            return;
+                        }
 
                         let mut attrs = self.get_inode(dest_inode).unwrap();
-                        attrs.last_metadata_changed = time_now();
-                        attrs.last_modified = time_now();
+                        let now = time_now();
+                        attrs.last_metadata_changed = now;
+                        attrs.last_modified = now;
                         let Ok(dest_offset_usize): Result<usize, _> = dest_offset.try_into() else {
                             reply.error(Errno::EFBIG);
                             return;
@@ -1995,7 +2991,13 @@ impl Filesystem for SimpleFS {
                         if end_offset > attrs.size as usize {
                             attrs.size = end_offset as u64;
                         }
-                        self.write_inode(&attrs);
+                        if self.killpriv_negotiated {
+                            clear_privileges_unprompted(&mut attrs, _req);
+                        }
+                        if let Err(error) = self.try_write_inode(&attrs) {
+                            reply.error(error.into());
+                            return;
+                        }
 
                         reply.written(data.len() as u32);
                     }
@@ -2056,21 +3058,94 @@ fn as_file_kind(mut mode: u32) -> FileKind {
         return FileKind::Symlink;
     } else if mode == libc::S_IFDIR as u32 {
         return FileKind::Directory;
+    } else if mode == libc::S_IFCHR as u32 {
+        return FileKind::CharDevice;
+    } else if mode == libc::S_IFBLK as u32 {
+        return FileKind::BlockDevice;
+    } else if mode == libc::S_IFIFO as u32 {
+        return FileKind::NamedPipe;
+    } else if mode == libc::S_IFSOCK as u32 {
+        return FileKind::Socket;
     }
     unimplemented!("{mode}");
 }
 
+/// Whether the caller holds `CAP_FSETID` over a file, and so keeps its suid and sgid when
+/// modifying it.
+///
+/// Read from the caller's effective capability set rather than guessed at from its uid, so that
+/// a root process which dropped the capability is treated as the unprivileged caller it is.
+/// As in the kernel's `capable_wrt_inode_uidgid()`, the capability counts only if the file's
+/// owner and group are mapped in the caller's user namespace: root in a namespace of its own,
+/// which holds every capability there, has none over files owned by ids outside it.
+/// Falls back to the uid where the capability set cannot be read, which is all a request alone
+/// would have supported
+fn has_fsetid(req: &Request, attr: &InodeAttributes) -> bool {
+    // From linux/capability.h; the libc crate does not export the capability numbers
+    const CAP_FSETID: u32 = 4;
+
+    if cfg!(target_os = "linux") {
+        let pid = req.pid();
+        let path = format!("/proc/{pid}/task/{pid}/status");
+        if let Ok(file) = File::open(path) {
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                if let Some(caps) = line.strip_prefix("CapEff:") {
+                    if let Ok(caps) = u64::from_str_radix(caps.trim(), 16) {
+                        return caps & (1 << CAP_FSETID) != 0
+                            && owner_mapped_for(pid, attr.uid, attr.gid);
+                    }
+                }
+            }
+        }
+    }
+
+    // Reached only where the capability set could not be read. An unknown caller cannot be
+    // shown to hold the capability, and privileges that cannot be shown to be earned go
+    req.uid().is_some_and(|uid| uid == 0)
+}
+
+/// Whether `uid` and `gid`, as this filesystem sees them, are mapped in the user namespace of
+/// the task `pid`. A task in this process's own namespace sees every id this process does.
+/// Otherwise its maps are read from here, where each line is "inside outside count" with the
+/// outside ids in this process's terms. A map that cannot be read maps nothing
+fn owner_mapped_for(pid: u32, uid: u32, gid: u32) -> bool {
+    let namespace = |path: &str| fs::read_link(path).ok();
+    let theirs = namespace(&format!("/proc/{pid}/task/{pid}/ns/user"));
+    if theirs.is_some() && theirs == namespace("/proc/self/ns/user") {
+        return true;
+    }
+    let maps = |which: &str, id: u32| {
+        fs::read_to_string(format!("/proc/{pid}/task/{pid}/{which}_map")).is_ok_and(|map| {
+            map.lines().any(|line| {
+                let mut fields = line.split_whitespace().map(str::parse::<u64>);
+                match (fields.next(), fields.next(), fields.next()) {
+                    (Some(Ok(_)), Some(Ok(outside)), Some(Ok(count))) => {
+                        (outside..outside.saturating_add(count)).contains(&u64::from(id))
+                    }
+                    _ => false,
+                }
+            })
+        })
+    };
+    maps("uid", uid) && maps("gid", gid)
+}
+
+/// The caller's supplementary groups.
+///
+/// None are known for a caller this process cannot see in `/proc`: one outside its pid
+/// namespace, which the kernel reports as pid 0, or one that has already exited. Every caller
+/// treats an unknown group as one the caller is not in, which refuses rather than grants
 fn get_groups(pid: u32) -> Vec<u32> {
     if cfg!(target_os = "linux") {
         let path = format!("/proc/{pid}/task/{pid}/status");
-        let file = File::open(path).unwrap();
-        for line in BufReader::new(file).lines() {
-            let line = line.unwrap();
-            if line.starts_with("Groups:") {
-                return line["Groups: ".len()..]
-                    .split(' ')
-                    .filter(|x| !x.trim().is_empty())
-                    .map(|x| x.parse::<u32>().unwrap())
+        let Ok(file) = File::open(path) else {
+            return Vec::new();
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if let Some(groups) = line.strip_prefix("Groups:") {
+                return groups
+                    .split_whitespace()
+                    .filter_map(|group| group.parse::<u32>().ok())
                     .collect();
             }
         }
@@ -2184,6 +3259,16 @@ fn main() {
         info!("setuid bit support enabled");
         cfg.mount_options.push(MountOption::Suid);
     }
+    if args.dev {
+        info!("device file support enabled");
+        cfg.mount_options.push(MountOption::Dev);
+    }
+    if args.idmap {
+        // Both are what the capability requires: the kernel refuses the connection without
+        // default_permissions, and fuser refuses the capability without allow_other
+        cfg.mount_options.push(MountOption::DefaultPermissions);
+        cfg.acl = SessionACL::All;
+    }
     if args.auto_unmount {
         cfg.mount_options.push(MountOption::AutoUnmount);
     }
@@ -2201,7 +3286,7 @@ fn main() {
 
     cfg.n_threads = Some(args.n_threads);
     let result = fuser::mount(
-        SimpleFS::new(args.data_dir, args.direct_io, args.suid),
+        SimpleFS::new(args.data_dir, args.direct_io, args.suid, args.idmap),
         &args.mount_point,
         &cfg,
     );
@@ -2213,6 +3298,7 @@ fn main() {
             std::process::exit(2);
         } else {
             error!("{e}");
+            std::process::exit(1);
         }
     }
 }

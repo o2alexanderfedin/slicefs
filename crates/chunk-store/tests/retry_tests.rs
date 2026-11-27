@@ -388,3 +388,75 @@ fn puts_go_on_while_a_store_sync_waits_for_a_seal() {
         assert_eq!(&s.get(id).unwrap(), d);
     }
 }
+
+// One failed sync (of the background sync of phase 1) must not let the sync
+// with no store lock after it drop the copies before they are written again.
+#[test]
+fn a_single_sync_error_is_repaired_and_the_data_is_durable() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let s = open(&io);
+    let objs = put_many(&s, 20, 900);
+    mem.fail_next_syncs(1);
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = open(&io);
+    for (id, d) in &objs {
+        assert_eq!(&s.get(id).unwrap(), d, "data lost after a repaired sync");
+    }
+}
+
+// The sync handle reports an error only after its retries end; the store
+// then fails, and refuses later puts and syncs.
+#[test]
+fn a_failed_handle_sync_fails_the_store() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let s = open(&io);
+    put_many(&s, 5, 1000);
+    mem.set_fail_syncs(true);
+    assert!(s.sync().is_err());
+    mem.set_fail_syncs(false);
+    assert!(s.put(&random(8000, 1100)).is_err(), "a put after the failure is refused");
+    assert!(s.sync().is_err(), "a sync after the failure is refused");
+}
+
+// A put that waits at `KEEP_CAP` for a slow background sync fails at
+// `Options::store_wait` with a busy error (issue #170). The store is not
+// failed: after the sync ends, the same put works. `is_store_busy` tells this
+// error from other errors, also when `io::Error::other` wraps it (as the CLI
+// does).
+#[test]
+fn a_put_that_waits_too_long_for_a_sync_gives_a_busy_error_and_the_store_goes_on() {
+    let mem = MemIo::new();
+    let io = retrying(&mem);
+    let o = Options { store_wait: Duration::from_millis(200), zstd_level: 0, index_background_merge: false, ..Options::default() };
+    let s = ChunkStore::open_with(Arc::clone(&io), o).unwrap();
+    mem.hold_syncs(true);
+    let mut busy = None;
+    for i in 0..(KEEP_CAP / MIB_PIECE + 4) as u64 {
+        match s.put(&random(MIB_PIECE, 2000 + i)) {
+            Ok(_) => {}
+            Err(e) => {
+                busy = Some((i, e));
+                break;
+            }
+        }
+    }
+    let (at, e) = busy.expect("no put waited at the cap");
+    assert!(at as usize * MIB_PIECE > KEEP_LIMIT, "failed too early, at piece {at}");
+    assert!(chunk_store::is_store_busy(&e), "not a busy error: {e:?}");
+    assert!(e.to_string().contains("200 ms"), "the message names the wait: {e}");
+    let wrapped = std::io::Error::other(e);
+    assert!(chunk_store::is_store_busy(&wrapped), "the wrapped error is not busy: {wrapped:?}");
+    // Other errors are not busy, also not a `TimedOut` of another source.
+    assert!(!chunk_store::is_store_busy(&std::io::Error::new(std::io::ErrorKind::TimedOut, "a disk")));
+    assert!(!chunk_store::is_store_busy(&std::io::Error::other("x")));
+    assert!(!chunk_store::is_store_busy(&chunk_store::Error::Corrupt("x".into())));
+    mem.hold_syncs(false);
+    s.put(&random(MIB_PIECE, 2999)).expect("the store is not failed by a busy wait");
+    s.sync().unwrap();
+}
+
+const MIB_PIECE: usize = 1 << 20;

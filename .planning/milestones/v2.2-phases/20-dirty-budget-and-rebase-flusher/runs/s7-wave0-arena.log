@@ -1,0 +1,630 @@
+host_uptime: 21:32  up 32 days,  1:52, 8 users, load averages: 19.44 23.08 26.64
+commit: 1bfc290514400fd48ebd0825fa7b1f5b6581a4d3
+porcelain_lines: 0
+sha256:71e0cab49714973153cac51c263ee0256568a0afb4bb5e9775439b6781891f13
+image_id: sha256:71e0cab49714973153cac51c263ee0256568a0afb4bb5e9775439b6781891f13
+Linux 26e1a38a29bd 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+3.03 2.95 1.63 2/907 20
+=== S7_SERIALIZE=0 MALLOC_ARENA_MAX=2 run 1
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable pattern
+   --> crates/chunk-store/src/pack_io.rs:491:34
+    |
+491 |         Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+    |         ----------------------   ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |         |
+    |         matches all the relevant values
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/metadata/src/store.rs:842:32
+    |
+842 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |                                ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+842 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+842 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1451:32
+     |
+1451 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |                                ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1451 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+1451 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1457:26
+     |
+1457 |         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |                          ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1457 -         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+1457 +         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/slicefs-cli/src/filesystem.rs:894:25
+    |
+894 |         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    |                         ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+894 -         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+894 +         self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/slicefs-cli/src/filesystem.rs:909:25
+    |
+909 |         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    |                         ^^^^^^^^^^^^
+    |
+help: replace the use of the deprecated method
+    |
+909 -         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+909 +         self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    |
+
+
+running 1 test
+[t=1795411959.373][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795411959.435][commit-cut] finish_ms=61
+[05:32:42.481][FUSE] write: fh=4 ino=5 switches to overlay (offset=776130560 len=1048576 expected=1073741824 pending=0 fresh=true overlap=false)
+[05:32:42.489][FUSE] write: fh=3 ino=4 switches to overlay (offset=771457024 len=1048576 expected=1073741824 pending=0 fresh=true overlap=false)
+[05:32:42.597][FUSE] write: fh=2 ino=3 switches to overlay (offset=66908160 len=1048576 expected=1073741824 pending=0 fresh=true overlap=false)
+[05:32:42.603][FUSE] write: fh=1 ino=2 switches to overlay (offset=93687808 len=1048576 expected=1073741824 pending=0 fresh=true overlap=false)
+[t=1795411962.761][rebase] ino=4 size=1073741824 free=1048576 cost_before=22021376 taken=45/1045760 rechunked=1747499 base_read=980533 reused_entries=3355 reused_nodes=162 nodes_loaded=9 splice_ms=61.2
+[t=1795411962.806][rebase] ino=3 size=1073741824 free=1048576 cost_before=7730304 taken=48/1045568 rechunked=1786029 base_read=1082624 reused_entries=7602 reused_nodes=173 nodes_loaded=12 splice_ms=107.0
+[t=1795411962.815][rebase] ino=5 size=1073741824 free=1048576 cost_before=27068672 taken=223/1034368 rechunked=4639910 base_read=4883412 reused_entries=6724 reused_nodes=150 nodes_loaded=16 splice_ms=116.9
+[t=1795411962.821][rebase] ino=2 size=1073741824 free=1048576 cost_before=11570432 taken=127/1040512 rechunked=3080627 base_read=2865131 reused_entries=10436 reused_nodes=155 nodes_loaded=25 splice_ms=122.2
+[t=1795411962.832][rebase] ino=3 size=1073741824 free=1048576 cost_before=8416640 taken=7/1048192 rechunked=1168996 base_read=147793 reused_entries=2443 reused_nodes=180 nodes_loaded=5 splice_ms=22.4
+[t=1795411962.838][rebase] ino=5 size=1073741824 free=1048576 cost_before=26148992 taken=30/1050496 rechunked=1513528 base_read=695026 reused_entries=1812 reused_nodes=162 nodes_loaded=6 splice_ms=20.0
+[t=1795411962.856][rebase] ino=4 size=1073741824 free=1048576 cost_before=20976960 taken=206/1039104 rechunked=4324471 base_read=4443902 reused_entries=8226 reused_nodes=151 nodes_loaded=22 splice_ms=90.7
+[t=1795411962.887][rebase] ino=3 size=1073741824 free=1048576 cost_before=8416320 taken=55/1045120 rechunked=1776538 base_read=1038529 reused_entries=4861 reused_nodes=172 nodes_loaded=14 splice_ms=48.6
+[t=1795411962.926][rebase] ino=2 size=1073741824 free=1048576 cost_before=11570048 taken=128/1044352 rechunked=3007507 base_read=2702532 reused_entries=9149 reused_nodes=157 nodes_loaded=23 splice_ms=96.2
+[t=1795411962.935][rebase] ino=5 size=1073741824 free=1048576 cost_before=26315712 taken=139/1039744 rechunked=3370832 base_read=3261185 reused_entries=6525 reused_nodes=154 nodes_loaded=13 splice_ms=93.9
+[t=1795411963.016][rebase] ino=2 size=1073741824 free=1048576 cost_before=11566144 taken=35/1046400 rechunked=1651989 base_read=824882 reused_entries=2445 reused_nodes=170 nodes_loaded=10 splice_ms=85.4
+[t=1795411963.061][rebase] ino=4 size=1073741824 free=1048576 cost_before=20810624 taken=144/1039424 rechunked=3390132 base_read=3278903 reused_entries=8374 reused_nodes=153 nodes_loaded=19 splice_ms=199.3
+[t=1795411963.086][rebase] ino=5 size=1073741824 free=1048576 cost_before=26310912 taken=69/1044224 rechunked=2218077 base_read=1545347 reused_entries=2911 reused_nodes=158 nodes_loaded=9 splice_ms=138.5
+[t=1795411963.086][rebase] ino=3 size=1073741824 free=1048576 cost_before=8424704 taken=148/1043136 rechunked=3553606 base_read=3390211 reused_entries=10862 reused_nodes=167 nodes_loaded=18 splice_ms=194.8
+[t=1795411963.126][rebase] ino=4 size=1073741824 free=1048576 cost_before=19778688 taken=108/1045440 rechunked=2661118 base_read=2241228 reused_entries=5615 reused_nodes=159 nodes_loaded=14 splice_ms=61.5
+[t=1795411963.131][rebase] ino=5 size=1073741824 free=1048576 cost_before=26689408 taken=43/1049472 rechunked=1764367 base_read=940919 reused_entries=2095 reused_nodes=157 nodes_loaded=9 splice_ms=33.8
+[t=1795411963.136][rebase] ino=2 size=1073741824 free=1048576 cost_before=12597824 taken=69/1044224 rechunked=2193265 base_read=1533813 reused_entries=4186 reused_nodes=165 nodes_loaded=15 splice_ms=102.5
+[t=1795411963.202][rebase] ino=5 size=1073741824 free=1048576 cost_before=27359232 taken=96/1042496 rechunked=2600781 base_read=2108519 reused_entries=2958 reused_nodes=161 nodes_loaded=6 splice_ms=60.3
+[t=1795411963.226][rebase] ino=2 size=1073741824 free=1048576 cost_before=11832128 taken=152/1042816 rechunked=3370076 base_read=3205143 reused_entries=8352 reused_nodes=162 nodes_loaded=18 splice_ms=84.9
+[t=1795411963.234][rebase] ino=3 size=1073741824 free=1048576 cost_before=8049984 taken=251/1036288 rechunked=5179742 base_read=5639051 reused_entries=17605 reused_nodes=157 nodes_loaded=32 splice_ms=136.5
+[t=1795411963.235][rebase] ino=4 size=1073741824 free=1048576 cost_before=19874752 taken=239/1048576 rechunked=5075847 base_read=5401593 reused_entries=9866 reused_nodes=152 nodes_loaded=21 splice_ms=106.2
+[t=1795411963.244][rebase] ino=5 size=1073741824 free=1048576 cost_before=28340672 taken=49/1045504 rechunked=1785553 base_read=1028182 reused_entries=4297 reused_nodes=158 nodes_loaded=9 splice_ms=34.7
+[t=1795411963.276][rebase] ino=4 size=1073741824 free=1048576 cost_before=19214272 taken=17/1048576 rechunked=1300120 base_read=335097 reused_entries=2652 reused_nodes=163 nodes_loaded=10 splice_ms=31.3
+[t=1795411963.335][rebase] ino=5 size=1073741824 free=1048576 cost_before=29363584 taken=109/1045440 rechunked=2932498 base_read=2574820 reused_entries=3361 reused_nodes=155 nodes_loaded=11 splice_ms=81.6
+[t=1795411963.361][rebase] ino=2 size=1073741824 free=1048576 cost_before=10846144 taken=253/1036288 rechunked=4877261 base_read=5340151 reused_entries=13935 reused_nodes=144 nodes_loaded=36 splice_ms=131.7
+[t=1795411963.384][rebase] ino=4 size=1073741824 free=1048576 cost_before=18185408 taken=209/1035264 rechunked=4448569 base_read=4593122 reused_entries=8159 reused_nodes=153 nodes_loaded=20 splice_ms=105.1
+[t=1795411963.391][rebase] ino=3 size=1073741824 free=1048576 cost_before=8716032 taken=251/1036288 rechunked=5154080 base_read=5601796 reused_entries=16307 reused_nodes=150 nodes_loaded=38 splice_ms=146.3
+[t=1795411963.435][rebase] ino=4 size=1073741824 free=1048576 cost_before=18772032 taken=46/1049600 rechunked=1828349 base_read=1060893 reused_entries=4062 reused_nodes=162 nodes_loaded=11 splice_ms=42.2
+[t=1795411963.442][rebase] ino=2 size=1073741824 free=1048576 cost_before=9831104 taken=125/1040640 rechunked=3065570 base_read=2751295 reused_entries=7160 reused_nodes=159 nodes_loaded=17 splice_ms=78.2
+[t=1795411963.448][rebase] ino=5 size=1073741824 free=1048576 cost_before=30378304 taken=186/1036736 rechunked=3938494 base_read=4040818 reused_entries=4820 reused_nodes=156 nodes_loaded=11 splice_ms=100.9
+[t=1795411963.485][rebase] ino=3 size=1073741824 free=1048576 cost_before=8129536 taken=191/1036416 rechunked=4063067 base_read=4127077 reused_entries=12224 reused_nodes=164 nodes_loaded=21 splice_ms=88.7
+[t=1795411963.498][rebase] ino=4 size=1073741824 free=1048576 cost_before=19803776 taken=63/1044608 rechunked=2090995 base_read=1412903 reused_entries=3083 reused_nodes=161 nodes_loaded=11 splice_ms=54.7
+[t=1795411963.506][rebase] ino=5 size=1073741824 free=1048576 cost_before=30340288 taken=63/1048128 rechunked=1968527 base_read=1231263 reused_entries=3673 reused_nodes=161 nodes_loaded=7 splice_ms=48.9
+[t=1795411963.526][rebase] ino=2 size=1073741824 free=1048576 cost_before=8836608 taken=128/1044224 rechunked=3242423 base_read=2985998 reused_entries=8000 reused_nodes=156 nodes_loaded=18 splice_ms=82.5
+[t=1795411963.539][rebase] ino=3 size=1073741824 free=1048640 cost_before=8408320 taken=63/1048448 rechunked=2056001 base_read=1408915 reused_entries=4910 reused_nodes=175 nodes_loaded=14 splice_ms=49.8
+[t=1795411963.559][rebase] ino=5 size=1073741824 free=1048576 cost_before=30345088 taken=63/1044608 rechunked=2108335 base_read=1414248 reused_entries=2339 reused_nodes=163 nodes_loaded=5 splice_ms=49.2
+[t=1795411963.563][rebase] ino=4 size=1073741824 free=1048576 cost_before=19524544 taken=92/1042752 rechunked=2468104 base_read=1972305 reused_entries=3962 reused_nodes=160 nodes_loaded=12 splice_ms=55.8
+[t=1795411963.614][rebase] ino=2 size=1073741824 free=1048576 cost_before=9431872 taken=143/1039488 rechunked=3357525 base_read=3202055 reused_entries=6893 reused_nodes=158 nodes_loaded=18 splice_ms=81.5
+[t=1795411963.637][rebase] ino=4 size=1073741824 free=1048576 cost_before=19769984 taken=101/1046080 rechunked=2606422 base_read=2138190 reused_entries=3702 reused_nodes=162 nodes_loaded=11 splice_ms=66.1
+[t=1795411963.649][rebase] ino=3 size=1073741824 free=1048576 cost_before=7809216 taken=235/1033600 rechunked=4774885 base_read=5192469 reused_entries=13831 reused_nodes=155 nodes_loaded=34 splice_ms=106.0
+[t=1795411963.650][rebase] ino=2 size=1073741824 free=1048576 cost_before=9418944 taken=16/1047616 rechunked=1341450 base_read=408976 reused_entries=950 reused_nodes=169 nodes_loaded=6 splice_ms=27.8
+[t=1795411963.652][rebase] ino=5 size=1073741824 free=1048576 cost_before=30111360 taken=184/1040256 rechunked=3829739 base_read=3813831 reused_entries=4527 reused_nodes=157 nodes_loaded=12 splice_ms=81.2
+[t=1795411963.676][rebase] ino=3 size=1073741824 free=1048576 cost_before=6781440 taken=19/1051264 rechunked=1426518 base_read=523186 reused_entries=2094 reused_nodes=181 nodes_loaded=6 splice_ms=25.2
+[t=1795411963.708][rebase] ino=5 size=1073741824 free=1048576 cost_before=30324224 taken=75/1043840 rechunked=2331838 base_read=1783515 reused_entries=2439 reused_nodes=159 nodes_loaded=10 splice_ms=51.0
+[t=1795411963.709][rebase] ino=2 size=1073741824 free=1048640 cost_before=9435648 taken=94/1095488 rechunked=2819870 base_read=2474170 reused_entries=5230 reused_nodes=162 nodes_loaded=14 splice_ms=57.2
+[t=1795411963.749][rebase] ino=2 size=1073741824 free=1048576 cost_before=8916480 taken=17/1048576 rechunked=1243858 base_read=281329 reused_entries=1554 reused_nodes=170 nodes_loaded=5 splice_ms=28.8
+[t=1795411963.759][rebase] ino=3 size=1073741824 free=1048576 cost_before=7355776 taken=136/1039936 rechunked=3301875 base_read=3132463 reused_entries=6426 reused_nodes=168 nodes_loaded=21 splice_ms=76.2
+[t=1795411963.764][rebase] ino=4 size=1073741824 free=1048576 cost_before=20797376 taken=251/1036288 rechunked=5149587 base_read=5754522 reused_entries=8108 reused_nodes=155 nodes_loaded=17 splice_ms=116.5
+[t=1795411963.807][rebase] ino=5 size=1073741824 free=1048576 cost_before=30044864 taken=173/1041024 rechunked=3950989 base_read=4032027 reused_entries=4539 reused_nodes=155 nodes_loaded=14 splice_ms=86.2
+[t=1795411963.814][rebase] ino=3 size=1073741824 free=1048576 cost_before=6872960 taken=77/1043712 rechunked=2119476 base_read=1521659 reused_entries=5241 reused_nodes=174 nodes_loaded=13 splice_ms=48.9
+[t=1795411963.857][rebase] ino=3 size=1073741824 free=1048576 cost_before=7355520 taken=38/1049792 rechunked=1744002 base_read=924534 reused_entries=3754 reused_nodes=180 nodes_loaded=7 splice_ms=37.5
+[t=1795411963.874][rebase] ino=4 size=1073741824 free=1048576 cost_before=20801216 taken=250/1036288 rechunked=4981663 base_read=5305501 reused_entries=7643 reused_nodes=157 nodes_loaded=14 splice_ms=101.0
+[t=1795411963.874][rebase] ino=2 size=1073741824 free=1048640 cost_before=9393792 taken=252/1036288 rechunked=4909284 base_read=5423150 reused_entries=12746 reused_nodes=160 nodes_loaded=16 splice_ms=118.8
+[t=1795411963.913][rebase] ino=5 size=1073741824 free=1048576 cost_before=30299136 taken=228/1034048 rechunked=4652927 base_read=4984142 reused_entries=5068 reused_nodes=155 nodes_loaded=15 splice_ms=100.5
+[t=1795411963.916][rebase] ino=4 size=1073741824 free=1048576 cost_before=21084480 taken=15/1105920 rechunked=1299809 base_read=283011 reused_entries=1799 reused_nodes=164 nodes_loaded=5 splice_ms=31.0
+[t=1795411963.974][rebase] ino=5 size=1073741824 free=1048576 cost_before=31288896 taken=25/1050816 rechunked=1356402 base_read=452881 reused_entries=2006 reused_nodes=164 nodes_loaded=6 splice_ms=34.7
+[t=1795411963.992][rebase] ino=3 size=1073741824 free=1048576 cost_before=6615296 taken=253/1036288 rechunked=5107460 base_read=5693076 reused_entries=17344 reused_nodes=159 nodes_loaded=31 splice_ms=133.3
+[t=1795411964.005][rebase] ino=2 size=1073741824 free=1048576 cost_before=9115008 taken=246/1036288 rechunked=4902570 base_read=5281849 reused_entries=9529 reused_nodes=157 nodes_loaded=19 splice_ms=119.6
+[t=1795411964.030][rebase] ino=4 size=1073741824 free=1048576 cost_before=20701312 taken=225/1034240 rechunked=4539139 base_read=4752610 reused_entries=7556 reused_nodes=155 nodes_loaded=14 splice_ms=98.2
+[t=1795411964.030][rebase] ino=3 size=1073741824 free=1048576 cost_before=7356032 taken=29/1046784 rechunked=1438489 base_read=558441 reused_entries=2769 reused_nodes=182 nodes_loaded=7 splice_ms=31.5
+[t=1795411964.056][rebase] ino=4 size=1073741824 free=1048576 cost_before=20697216 taken=25/1050624 rechunked=1395789 base_read=498195 reused_entries=3133 reused_nodes=164 nodes_loaded=5 splice_ms=21.6
+[t=1795411964.068][rebase] ino=3 size=1073741824 free=1048576 cost_before=6565376 taken=33/1046528 rechunked=1731621 base_read=941058 reused_entries=4149 reused_nodes=179 nodes_loaded=10 splice_ms=33.3
+[t=1795411964.086][rebase] ino=5 size=1073741824 free=1048576 cost_before=30677440 taken=245/1036288 rechunked=4622387 base_read=4917990 reused_entries=4315 reused_nodes=156 nodes_loaded=14 splice_ms=105.0
+[t=1795411964.113][rebase] ino=4 size=1073741824 free=1048576 cost_before=20476992 taken=85/1043200 rechunked=2275807 base_read=1766528 reused_entries=4552 reused_nodes=163 nodes_loaded=6 splice_ms=47.0
+[t=1795411964.142][rebase] ino=2 size=1073741824 free=1048576 cost_before=9390272 taken=237/1044480 rechunked=4868645 base_read=5165002 reused_entries=8929 reused_nodes=155 nodes_loaded=20 splice_ms=132.2
+[t=1795411964.150][rebase] ino=5 size=1073741824 free=1048576 cost_before=29887488 taken=110/1041600 rechunked=2827458 base_read=2437437 reused_entries=2743 reused_nodes=161 nodes_loaded=8 splice_ms=58.0
+[t=1795411964.175][rebase] ino=2 size=1073741824 free=1048576 cost_before=9187584 taken=16/1048576 rechunked=1352860 base_read=405165 reused_entries=1649 reused_nodes=171 nodes_loaded=6 splice_ms=26.4
+[t=1795411964.190][rebase] ino=3 size=1073741824 free=1048640 cost_before=7355776 taken=195/1040128 rechunked=4422175 base_read=4715750 reused_entries=16210 reused_nodes=163 nodes_loaded=26 splice_ms=115.9
+[t=1795411964.203][rebase] ino=4 size=1073741824 free=1048576 cost_before=20680896 taken=161/1041664 rechunked=3786673 base_read=3666578 reused_entries=5893 reused_nodes=158 nodes_loaded=11 splice_ms=84.5
+[t=1795411964.219][rebase] ino=5 size=1073741824 free=1048576 cost_before=30203456 taken=140/1047360 rechunked=3278728 base_read=2961909 reused_entries=2973 reused_nodes=161 nodes_loaded=8 splice_ms=63.3
+[t=1795411964.253][rebase] ino=4 size=1073741824 free=1048576 cost_before=20681024 taken=88/1043008 rechunked=2422905 base_read=1905165 reused_entries=3424 reused_nodes=159 nodes_loaded=9 splice_ms=40.9
+[t=1795411964.254][rebase] ino=2 size=1073741824 free=1048576 cost_before=9377984 taken=171/1037696 rechunked=4065788 base_read=4185589 reused_entries=8489 reused_nodes=155 nodes_loaded=22 splice_ms=73.7
+[t=1795411964.281][rebase] ino=5 size=1073741824 free=1048576 cost_before=31022080 taken=130/1040320 rechunked=3256365 base_read=3086867 reused_entries=3755 reused_nodes=160 nodes_loaded=9 splice_ms=54.0
+[t=1795411964.287][rebase] ino=4 size=1073741824 free=1048576 cost_before=20805760 taken=63/1044608 rechunked=2050411 base_read=1384433 reused_entries=2249 reused_nodes=159 nodes_loaded=9 splice_ms=28.1
+[t=1795411964.315][rebase] ino=2 size=1073741824 free=1048576 cost_before=8437568 taken=81/1047168 rechunked=2427797 base_read=1908236 reused_entries=5574 reused_nodes=163 nodes_loaded=16 splice_ms=56.5
+[t=1795411964.315][rebase] ino=3 size=1073741824 free=1048576 cost_before=6848128 taken=253/1036288 rechunked=5423792 base_read=5925759 reused_entries=18099 reused_nodes=151 nodes_loaded=40 splice_ms=120.3
+[t=1795411964.345][rebase] ino=5 size=1073741824 free=1048640 cost_before=32053440 taken=116/1044544 rechunked=2787461 base_read=2350788 reused_entries=5747 reused_nodes=162 nodes_loaded=7 splice_ms=52.0
+[t=1795411964.347][rebase] ino=4 size=1073741824 free=1048576 cost_before=19898624 taken=103/1045824 rechunked=2792888 base_read=2392800 reused_entries=3796 reused_nodes=157 nodes_loaded=11 splice_ms=54.6
+[t=1795411964.385][rebase] ino=4 size=1073741824 free=1048576 cost_before=20668352 taken=11/1089536 rechunked=1252055 base_read=212321 reused_entries=1658 reused_nodes=163 nodes_loaded=5 splice_ms=24.7
+[t=1795411964.405][rebase] ino=3 size=1073741824 free=1048576 cost_before=7360064 taken=169/1037824 rechunked=3493109 base_read=3440143 reused_entries=12300 reused_nodes=167 nodes_loaded=21 splice_ms=78.1
+[t=1795411964.415][rebase] ino=2 size=1073741824 free=1048576 cost_before=8030016 taken=245/1064960 rechunked=4769289 base_read=5098553 reused_entries=14610 reused_nodes=148 nodes_loaded=29 splice_ms=88.0
+[t=1795411964.430][rebase] ino=3 size=1073741824 free=1048576 cost_before=6436224 taken=21/1047296 rechunked=1398223 base_read=459512 reused_entries=2381 reused_nodes=180 nodes_loaded=8 splice_ms=23.5
+[t=1795411964.444][rebase] ino=2 size=1073741824 free=1048576 cost_before=8301760 taken=17/1048576 rechunked=1293074 base_read=362450 reused_entries=2642 reused_nodes=169 nodes_loaded=8 splice_ms=23.2
+[t=1795411964.464][rebase] ino=5 size=1073741824 free=1048576 cost_before=33060544 taken=248/1036288 rechunked=5000424 base_read=5440174 reused_entries=6236 reused_nodes=162 nodes_loaded=7 splice_ms=103.6
+[t=1795411964.486][rebase] ino=3 size=1073741824 free=1048576 cost_before=6165568 taken=66/1048320 rechunked=2128178 base_read=1479605 reused_entries=5877 reused_nodes=176 nodes_loaded=13 splice_ms=51.6
+[t=1795411964.489][rebase] ino=4 size=1073741824 free=1048576 cost_before=19582272 taken=249/1036288 rechunked=5162233 base_read=5520402 reused_entries=5999 reused_nodes=154 nodes_loaded=14 splice_ms=101.2
+[t=1795411964.525][rebase] ino=2 size=1073741824 free=1048576 cost_before=8304576 taken=140/1039680 rechunked=3265055 base_read=3118792 reused_entries=10025 reused_nodes=159 nodes_loaded=20 splice_ms=75.8
+[t=1795411964.527][rebase] ino=3 size=1073741824 free=1048576 cost_before=5158784 taken=35/1046400 rechunked=1676334 base_read=856695 reused_entries=4448 reused_nodes=177 nodes_loaded=11 splice_ms=38.9
+[t=1795411964.544][rebase] ino=5 size=1073741824 free=1048576 cost_before=34063488 taken=115/1041280 rechunked=3007023 base_read=2561597 reused_entries=2757 reused_nodes=163 nodes_loaded=6 splice_ms=69.2
+[t=1795411964.573][rebase] ino=5 size=1073741824 free=1048576 cost_before=33555392 taken=7/1048192 rechunked=1196265 base_read=179374 reused_entries=965 reused_nodes=164 nodes_loaded=5 splice_ms=24.0
+[t=1795411964.574][rebase] ino=4 size=1073741824 free=1048576 cost_before=20622464 taken=133/1040128 rechunked=2993663 base_read=2730017 reused_entries=4121 reused_nodes=161 nodes_loaded=9 splice_ms=69.8
+[t=1795411964.583][rebase] ino=2 size=1073741824 free=1048640 cost_before=8308800 taken=114/1045184 rechunked=2888023 base_read=2563079 reused_entries=7867 reused_nodes=159 nodes_loaded=18 splice_ms=55.7
+[t=1795411964.640][rebase] ino=3 size=1073741824 free=1048576 cost_before=4114368 taken=218/1038464 rechunked=4504092 base_read=4747512 reused_entries=15756 reused_nodes=148 nodes_loaded=41 splice_ms=111.2
+[t=1795411964.647][rebase] ino=2 size=1073741824 free=1048576 cost_before=9365568 taken=96/1042496 rechunked=2688008 base_read=2155045 reused_entries=7177 reused_nodes=162 nodes_loaded=14 splice_ms=53.4
+[t=1795411964.648][rebase] ino=5 size=1073741824 free=1048576 cost_before=34000256 taken=129/1043968 rechunked=3099057 base_read=2862055 reused_entries=2861 reused_nodes=160 nodes_loaded=9 splice_ms=59.7
+[t=1795411964.649][rebase] ino=4 size=1073741824 free=1048576 cost_before=20260096 taken=117/1044736 rechunked=2784921 base_read=2383563 reused_entries=5260 reused_nodes=161 nodes_loaded=10 splice_ms=54.2
+[t=1795411964.659][rebase] ino=2 size=1073741824 free=1048576 cost_before=8633152 taken=7/1048192 rechunked=1161831 base_read=156357 reused_entries=1323 reused_nodes=171 nodes_loaded=5 splice_ms=8.6
+[t=1795411964.681][rebase] ino=3 size=1073741824 free=1048640 cost_before=4218752 taken=95/1042624 rechunked=2369411 base_read=1883295 reused_entries=7425 reused_nodes=167 nodes_loaded=21 splice_ms=37.7
+[t=1795411964.688][rebase] ino=5 size=1073741824 free=1048576 cost_before=33555136 taken=51/1045376 rechunked=1785950 base_read=1024720 reused_entries=2167 reused_nodes=161 nodes_loaded=8 splice_ms=30.9
+[t=1795411964.717][rebase] ino=4 size=1073741824 free=1048576 cost_before=20705600 taken=146/1039296 rechunked=3425249 base_read=3259140 reused_entries=4185 reused_nodes=160 nodes_loaded=10 splice_ms=59.1
+[t=1795411964.740][rebase] ino=2 size=1073741824 free=1048640 cost_before=9377664 taken=153/1042752 rechunked=3464324 base_read=3323011 reused_entries=7472 reused_nodes=158 nodes_loaded=18 splice_ms=74.8
+[t=1795411964.747][rebase] ino=4 size=1073741824 free=1048576 cost_before=20518144 taken=8/1048128 rechunked=1164394 base_read=159124 reused_entries=1708 reused_nodes=166 nodes_loaded=5 splice_ms=21.8
+[t=1795411964.754][rebase] ino=3 size=1073741824 free=1048576 cost_before=3473792 taken=160/1042240 rechunked=3740974 base_read=3631177 reused_entries=13983 reused_nodes=161 nodes_loaded=29 splice_ms=69.9
+[t=1795411964.770][rebase] ino=5 size=1073741824 free=1048576 cost_before=33742208 taken=197/1036032 rechunked=3827020 base_read=3804816 reused_entries=3177 reused_nodes=160 nodes_loaded=9 splice_ms=76.6
+[t=1795411964.790][rebase] ino=4 size=1073741824 free=1048576 cost_before=20572288 taken=97/1046016 rechunked=2658069 base_read=2148768 reused_entries=2792 reused_nodes=164 nodes_loaded=8 splice_ms=39.8
+[t=1795411964.799][rebase] ino=5 size=1073741824 free=1048576 cost_before=32930688 taken=56/1048832 rechunked=1850922 base_read=1127856 reused_entries=1330 reused_nodes=163 nodes_loaded=7 splice_ms=25.8
+[t=1795411964.814][rebase] ino=4 size=1073741824 free=1048640 cost_before=21616768 taken=18/1047552 rechunked=1349941 base_read=385465 reused_entries=2537 reused_nodes=165 nodes_loaded=6 splice_ms=19.1
+[t=1795411964.837][rebase] ino=2 size=1073741824 free=1048576 cost_before=9377536 taken=237/1036288 rechunked=4554173 base_read=4898951 reused_entries=12497 reused_nodes=148 nodes_loaded=29 splice_ms=92.9
+[t=1795411964.858][rebase] ino=2 size=1073741824 free=1048640 cost_before=9383104 taken=17/1048576 rechunked=1332299 base_read=393908 reused_entries=1561 reused_nodes=170 nodes_loaded=5 splice_ms=17.8
+[t=1795411964.864][rebase] ino=5 size=1073741824 free=1048576 cost_before=31886592 taken=154/1038784 rechunked=3311288 base_read=3156560 reused_entries=3400 reused_nodes=159 nodes_loaded=10 splice_ms=62.8
+[t=1795411964.873][rebase] ino=3 size=1073741824 free=1048640 cost_before=4231168 taken=251/1036288 rechunked=4986592 base_read=5521380 reused_entries=29214 reused_nodes=140 nodes_loaded=53 splice_ms=110.7
+[t=1795411964.910][rebase] ino=4 size=1073741824 free=1048576 cost_before=21616256 taken=233/1037312 rechunked=4629404 base_read=4939482 reused_entries=4195 reused_nodes=161 nodes_loaded=10 splice_ms=87.3
+[t=1795411964.915][rebase] ino=5 size=1073741824 free=1048576 cost_before=32659584 taken=76/1043776 rechunked=2346548 base_read=1787315 reused_entries=3090 reused_nodes=162 nodes_loaded=6 splice_ms=41.7
+[t=1795411964.951][rebase] ino=5 size=1073741824 free=1048576 cost_before=32658752 taken=21/1050880 rechunked=1414515 base_read=512071 reused_entries=2191 reused_nodes=163 nodes_loaded=5 splice_ms=26.6
+[t=1795411964.979][rebase] ino=2 size=1073741824 free=1048576 cost_before=9377536 taken=252/1036288 rechunked=4920017 base_read=5380996 reused_entries=13458 reused_nodes=156 nodes_loaded=19 splice_ms=114.1
+[t=1795411964.994][rebase] ino=3 size=1073741824 free=1048576 cost_before=3457536 taken=178/1037248 rechunked=3877981 base_read=3874155 reused_entries=29540 reused_nodes=135 nodes_loaded=57 splice_ms=116.2
+[t=1795411965.002][rebase] ino=5 size=1073741824 free=1048576 cost_before=32659328 taken=85/1043200 rechunked=2338490 base_read=1724894 reused_entries=4413 reused_nodes=162 nodes_loaded=6 splice_ms=47.0
+[t=1795411965.031][rebase] ino=4 size=1073741824 free=1048576 cost_before=21616832 taken=249/1036288 rechunked=4989270 base_read=5548809 reused_entries=5944 reused_nodes=158 nodes_loaded=13 splice_ms=116.5
+[t=1795411965.061][rebase] ino=3 size=1073741824 free=1048640 cost_before=4239680 taken=76/1047616 rechunked=2223155 base_read=1620255 reused_entries=12181 reused_nodes=165 nodes_loaded=29 splice_ms=59.0
+[t=1795411965.073][rebase] ino=4 size=1073741824 free=1048576 cost_before=22590464 taken=45/1045760 rechunked=1793906 base_read=1023831 reused_entries=1893 reused_nodes=166 nodes_loaded=5 splice_ms=33.8
+[t=1795411965.086][rebase] ino=5 size=1073741824 free=1048576 cost_before=31874432 taken=163/1041664 rechunked=3465878 base_read=3383054 reused_entries=3171 reused_nodes=162 nodes_loaded=6 splice_ms=79.5
+[t=1795411965.117][rebase] ino=3 size=1073741824 free=1048576 cost_before=3262080 taken=61/1044736 rechunked=1957634 base_read=1301572 reused_entries=11077 reused_nodes=164 nodes_loaded=31 splice_ms=53.9
+[t=1795411965.125][rebase] ino=5 size=1073741824 free=1048576 cost_before=30838976 taken=35/1046400 rechunked=1561343 base_read=687005 reused_entries=1288 reused_nodes=162 nodes_loaded=6 splice_ms=35.5
+[t=1795411965.125][rebase] ino=2 size=1073741824 free=1048576 cost_before=9382080 taken=251/1036288 rechunked=5352331 base_read=5878895 reused_entries=13779 reused_nodes=146 nodes_loaded=30 splice_ms=142.9
+[t=1795411965.162][rebase] ino=5 size=1073741824 free=1048576 cost_before=30289472 taken=18/1047488 rechunked=1357911 base_read=409314 reused_entries=1555 reused_nodes=161 nodes_loaded=6 splice_ms=26.4
+[t=1795411965.171][rebase] ino=4 size=1073741824 free=1048576 cost_before=23625920 taken=181/1037056 rechunked=4084231 base_read=4195969 reused_entries=4171 reused_nodes=161 nodes_loaded=9 splice_ms=87.8
+[t=1795411965.193][rebase] ino=3 size=1073741824 free=1048576 cost_before=4510144 taken=110/1041600 rechunked=2937239 base_read=2566675 reused_entries=11661 reused_nodes=169 nodes_loaded=26 splice_ms=56.4
+[t=1795411965.204][rebase] ino=4 size=1073741824 free=1048576 cost_before=24636608 taken=29/1050624 rechunked=1551644 base_read=706564 reused_entries=1702 reused_nodes=165 nodes_loaded=6 splice_ms=22.2
+[t=1795411965.246][rebase] ino=2 size=1073741824 free=1048576 cost_before=8695808 taken=252/1036288 rechunked=4930069 base_read=5317962 reused_entries=15130 reused_nodes=144 nodes_loaded=31 splice_ms=108.6
+[t=1795411965.246][rebase] ino=3 size=1073741824 free=1048576 cost_before=5308928 taken=86/1047104 rechunked=2293224 base_read=1709043 reused_entries=10591 reused_nodes=171 nodes_loaded=21 splice_ms=48.1
+[t=1795411965.282][rebase] ino=3 size=1073741824 free=1048576 cost_before=6349056 taken=12/1093632 rechunked=1323743 base_read=299540 reused_entries=2575 reused_nodes=185 nodes_loaded=6 splice_ms=25.0
+[t=1795411965.287][rebase] ino=2 size=1073741824 free=1048640 cost_before=9382592 taken=12/1093632 rechunked=1289765 base_read=246636 reused_entries=2449 reused_nodes=168 nodes_loaded=6 splice_ms=29.2
+[t=1795411965.312][rebase] ino=4 size=1073741824 free=1048576 cost_before=23762944 taken=237/1033472 rechunked=4862888 base_read=5225312 reused_entries=7255 reused_nodes=156 nodes_loaded=14 splice_ms=104.5
+[t=1795411965.342][rebase] ino=4 size=1073741824 free=1048576 cost_before=24615744 taken=18/1051392 rechunked=1342497 base_read=374845 reused_entries=1702 reused_nodes=164 nodes_loaded=5 splice_ms=18.8
+[t=1795411965.374][rebase] ino=3 size=1073741824 free=1048576 cost_before=5258816 taken=253/1036288 rechunked=4998072 base_read=5490651 reused_entries=24531 reused_nodes=148 nodes_loaded=44 splice_ms=90.7
+[t=1795411965.391][rebase] ino=2 size=1073741824 free=1048576 cost_before=8745792 taken=251/1036288 rechunked=5119340 base_read=5594536 reused_entries=17278 reused_nodes=141 nodes_loaded=33 splice_ms=98.4
+[t=1795411965.393][rebase] ino=4 size=1073741824 free=1048576 cost_before=23762816 taken=111/1041536 rechunked=2845910 base_read=2482778 reused_entries=4215 reused_nodes=158 nodes_loaded=12 splice_ms=46.5
+[t=1795411965.442][rebase] ino=2 size=1073741824 free=1048576 cost_before=9366080 taken=55/1045120 rechunked=2011348 base_read=1357516 reused_entries=3823 reused_nodes=165 nodes_loaded=10 splice_ms=42.0
+[t=1795411965.458][rebase] ino=3 size=1073741824 free=1048576 cost_before=5258752 taken=225/1034240 rechunked=4384232 base_read=4660886 reused_entries=20640 reused_nodes=153 nodes_loaded=43 splice_ms=80.1
+[t=1795411965.459][rebase] ino=4 size=1073741824 free=1048576 cost_before=23146688 taken=138/1043328 rechunked=3163065 base_read=2992187 reused_entries=6427 reused_nodes=156 nodes_loaded=13 splice_ms=58.4
+[t=1795411965.466][rebase] ino=2 size=1073741824 free=1048640 cost_before=10385344 taken=5/1048384 rechunked=1135695 base_read=112982 reused_entries=1292 reused_nodes=171 nodes_loaded=5 splice_ms=14.3
+[t=1795411965.484][rebase] ino=3 size=1073741824 free=1048576 cost_before=5262976 taken=29/1050624 rechunked=1629016 base_read=744607 reused_entries=3211 reused_nodes=186 nodes_loaded=6 splice_ms=22.6
+[t=1795411965.969][rebase] ino=3 size=1073741824 free=1048576 cost_before=5262912 taken=133/1040128 rechunked=3313892 base_read=3134226 reused_entries=8815 reused_nodes=174 nodes_loaded=20 splice_ms=479.6
+[t=1795411965.985][rebase] ino=2 size=1073741824 free=1048576 cost_before=10305728 taken=196/1039936 rechunked=4099398 base_read=4287109 reused_entries=11554 reused_nodes=151 nodes_loaded=26 splice_ms=509.6
+[t=1795411965.992][rebase] ino=3 size=1073741824 free=1048640 cost_before=5271296 taken=5/1048384 rechunked=1139495 base_read=121750 reused_entries=1687 reused_nodes=188 nodes_loaded=6 splice_ms=20.1
+[t=1795411965.997][rebase] ino=4 size=1073741824 free=1048576 cost_before=22198528 taken=250/1036288 rechunked=5474005 base_read=6019067 reused_entries=6361 reused_nodes=157 nodes_loaded=12 splice_ms=535.5
+[t=1795411966.003][rebase] ino=2 size=1073741824 free=1048576 cost_before=9282368 taken=1/1048576 rechunked=1058815 base_read=10958 reused_entries=530 reused_nodes=171 nodes_loaded=5 splice_ms=15.7
+[t=1795411966.014][rebase] ino=5 size=1073741824 free=1048576 cost_before=30360128 taken=139/1039744 rechunked=3175438 base_read=2926636 reused_entries=2244 reused_nodes=159 nodes_loaded=8 splice_ms=342.0
+[t=1795411966.041][rebase] ino=4 size=1073741824 free=1048576 cost_before=22469376 taken=74/1043904 rechunked=2105596 base_read=1540471 reused_entries=3043 reused_nodes=164 nodes_loaded=6 splice_ms=40.1
+[t=1795411966.050][rebase] ino=5 size=1073741824 free=1048576 cost_before=30047552 taken=57/1048384 rechunked=1826915 base_read=1104262 reused_entries=2327 reused_nodes=162 nodes_loaded=6 splice_ms=30.7
+[t=1795411966.064][rebase] ino=3 size=1073741824 free=1048576 cost_before=5270848 taken=117/1044928 rechunked=2957980 base_read=2687363 reused_entries=7873 reused_nodes=171 nodes_loaded=24 splice_ms=67.1
+[t=1795411966.101][rebase] ino=5 size=1073741824 free=1048576 cost_before=30339456 taken=62/1044672 rechunked=1996747 base_read=1283538 reused_entries=1830 reused_nodes=163 nodes_loaded=5 splice_ms=46.2
+[t=1795411966.122][rebase] ino=2 size=1073741824 free=1048576 cost_before=9323968 taken=249/1081344 rechunked=5065842 base_read=5328718 reused_entries=14997 reused_nodes=149 nodes_loaded=27 splice_ms=115.1
+[t=1795411966.122][rebase] ino=4 size=1073741824 free=1048576 cost_before=22468864 taken=146/1039296 rechunked=3300410 base_read=3151712 reused_entries=4406 reused_nodes=158 nodes_loaded=12 splice_ms=75.5
+[t=1795411966.157][rebase] ino=2 size=1073741824 free=1048576 cost_before=8717632 taken=17/1048576 rechunked=1311551 base_read=345282 reused_entries=1261 reused_nodes=172 nodes_loaded=5 splice_ms=25.1
+[t=1795411966.176][rebase] ino=4 size=1073741824 free=1048576 cost_before=23080064 taken=35/1050240 rechunked=1627111 base_read=769636 reused_entries=2205 reused_nodes=163 nodes_loaded=6 splice_ms=43.6
+[t=1795411966.199][rebase] ino=5 size=1073741824 free=1048576 cost_before=30039360 taken=184/1044288 rechunked=3996229 base_read=4223954 reused_entries=2701 reused_nodes=161 nodes_loaded=8 splice_ms=89.2
+[t=1795411966.204][rebase] ino=3 size=1073741824 free=1048576 cost_before=5279552 taken=252/1036288 rechunked=5072535 base_read=5502446 reused_entries=19924 reused_nodes=151 nodes_loaded=49 splice_ms=136.1
+[t=1795411966.241][rebase] ino=3 size=1073741824 free=1048576 cost_before=4231296 taken=15/1105920 rechunked=1351727 base_read=334059 reused_entries=4481 reused_nodes=186 nodes_loaded=10 splice_ms=35.3
+[t=1795411966.261][rebase] ino=4 size=1073741824 free=1048576 cost_before=23487744 taken=61/1044736 rechunked=2054875 base_read=1351457 reused_entries=2895 reused_nodes=163 nodes_loaded=6 splice_ms=55.8
+[t=1795411966.270][rebase] ino=2 size=1073741824 free=1048640 cost_before=9274048 taken=172/1037696 rechunked=3825677 base_read=3750298 reused_entries=11628 reused_nodes=150 nodes_loaded=28 splice_ms=106.9
+[t=1795411966.270][rebase] ino=5 size=1073741824 free=1048576 cost_before=30314752 taken=132/1040192 rechunked=3035740 base_read=2663519 reused_entries=2753 reused_nodes=164 nodes_loaded=6 splice_ms=65.8
+[t=1795411966.344][rebase] ino=2 size=1073741824 free=1048576 cost_before=9265408 taken=81/1047168 rechunked=2382008 base_read=1743134 reused_entries=4913 reused_nodes=165 nodes_loaded=14 splice_ms=54.7
+[t=1795411966.364][rebase] ino=5 size=1073741824 free=1048576 cost_before=31350272 taken=114/1044672 rechunked=2877309 base_read=2538651 reused_entries=3743 reused_nodes=163 nodes_loaded=6 splice_ms=73.0
+[t=1795411966.396][rebase] ino=4 size=1073741824 free=1048576 cost_before=23487168 taken=185/1081088 rechunked=4025484 base_read=4089578 reused_entries=4713 reused_nodes=160 nodes_loaded=10 splice_ms=128.2
+[t=1795411966.427][rebase] ino=3 size=1073741824 free=1048576 cost_before=4035392 taken=252/1036288 rechunked=5286946 base_read=5955839 reused_entries=20681 reused_nodes=158 nodes_loaded=39 splice_ms=175.9
+[t=1795411966.433][rebase] ino=4 size=1073741824 free=1048576 cost_before=23434624 taken=16/1048576 rechunked=1311262 base_read=350632 reused_entries=2038 reused_nodes=165 nodes_loaded=5 splice_ms=32.2
+[t=1795411966.466][rebase] ino=5 size=1073741824 free=1048576 cost_before=32370048 taken=242/1036288 rechunked=4568820 base_read=4875663 reused_entries=5369 reused_nodes=162 nodes_loaded=7 splice_ms=91.8
+[t=1795411966.469][rebase] ino=2 size=1073741824 free=1048576 cost_before=8238016 taken=253/1036288 rechunked=5239662 base_read=5699971 reused_entries=15302 reused_nodes=159 nodes_loaded=21 splice_ms=123.4
+[t=1795411966.519][rebase] ino=2 size=1073741824 free=1048576 cost_before=8238336 taken=43/1045888 rechunked=1788827 base_read=1030360 reused_entries=3563 reused_nodes=168 nodes_loaded=10 splice_ms=46.3
+[t=1795411966.550][rebase] ino=4 size=1073741824 free=1048576 cost_before=24469312 taken=147/1039232 rechunked=3434778 base_read=3231628 reused_entries=4471 reused_nodes=160 nodes_loaded=10 splice_ms=104.7
+[t=1795411966.604][rebase] ino=5 size=1073741824 free=1048576 cost_before=31334912 taken=248/1036288 rechunked=4860219 base_read=5162668 reused_entries=4395 reused_nodes=163 nodes_loaded=7 splice_ms=134.9
+[t=1795411966.619][rebase] ino=3 size=1073741824 free=1048576 cost_before=3070336 taken=252/1036288 rechunked=4920782 base_read=5281841 reused_entries=25641 reused_nodes=149 nodes_loaded=51 splice_ms=188.3
+[t=1795411966.632][rebase] ino=4 size=1073741824 free=1048576 cost_before=23424896 taken=102/1045632 rechunked=2690401 base_read=2309805 reused_entries=2549 reused_nodes=159 nodes_loaded=9 splice_ms=80.1
+[t=1795411966.651][rebase] ino=3 size=1073741824 free=1048640 cost_before=3124800 taken=15/1105920 rechunked=1345194 base_read=324961 reused_entries=2709 reused_nodes=191 nodes_loaded=6 splice_ms=28.7
+[t=1795411966.687][rebase] ino=2 size=1073741824 free=1048640 cost_before=9282560 taken=211/1038976 rechunked=4487003 base_read=4830888 reused_entries=11666 reused_nodes=152 nodes_loaded=27 splice_ms=158.5
+[t=1795411966.759][rebase] ino=5 size=1073741824 free=1048576 cost_before=32325120 taken=244/1036288 rechunked=4715704 base_read=5078948 reused_entries=3029 reused_nodes=160 nodes_loaded=11 splice_ms=142.7
+[t=1795411966.811][rebase] ino=4 size=1073741824 free=1048576 cost_before=22376896 taken=247/1036288 rechunked=5059367 base_read=5435271 reused_entries=6278 reused_nodes=157 nodes_loaded=11 splice_ms=176.5
+[t=1795411966.866][rebase] ino=2 size=1073741824 free=1048576 cost_before=8275840 taken=253/1036288 rechunked=4740308 base_read=5058111 reused_entries=18021 reused_nodes=145 nodes_loaded=35 splice_ms=177.0
+[t=1795411966.869][rebase] ino=3 size=1073741824 free=1048640 cost_before=4131520 taken=253/1036288 rechunked=5355259 base_read=5756412 reused_entries=30469 reused_nodes=142 nodes_loaded=63 splice_ms=207.0
+[t=1795411966.884][rebase] ino=4 size=1073741824 free=1048576 cost_before=21345600 taken=81/1043456 rechunked=2262180 base_read=1670078 reused_entries=3772 reused_nodes=160 nodes_loaded=8 splice_ms=69.6
+[t=1795411966.885][rebase] ino=5 size=1073741824 free=1048640 cost_before=33357376 taken=165/1038144 rechunked=3455659 base_read=3384056 reused_entries=3019 reused_nodes=160 nodes_loaded=10 splice_ms=113.9
+[t=1795411966.928][rebase] ino=5 size=1073741824 free=1048576 cost_before=32999104 taken=22/1047232 rechunked=1364412 base_read=440761 reused_entries=1819 reused_nodes=164 nodes_loaded=6 splice_ms=29.3
+[t=1795411966.963][rebase] ino=2 size=1073741824 free=1048576 cost_before=9278528 taken=71/1044096 rechunked=2278988 base_read=1630219 reused_entries=4193 reused_nodes=164 nodes_loaded=13 splice_ms=82.9
+[t=1795411966.997][rebase] ino=4 size=1073741824 free=1048576 cost_before=20987520 taken=79/1043584 rechunked=2162130 base_read=1555934 reused_entries=3088 reused_nodes=160 nodes_loaded=8 splice_ms=98.0
+[t=1795411967.033][rebase] ino=5 size=1073741824 free=1048576 cost_before=33327360 taken=64/1048064 rechunked=2055186 base_read=1419801 reused_entries=1111 reused_nodes=165 nodes_loaded=5 splice_ms=99.7
+[t=1795411967.052][rebase] ino=2 size=1073741824 free=1048576 cost_before=8945472 taken=29/1046784 rechunked=1545614 base_read=719685 reused_entries=2043 reused_nodes=170 nodes_loaded=7 splice_ms=77.9
+[t=1795411967.089][rebase] ino=2 size=1073741824 free=1048576 cost_before=9286656 taken=31/1046656 rechunked=1502227 base_read=623669 reused_entries=2900 reused_nodes=169 nodes_loaded=7 splice_ms=32.1
+[t=1795411967.092][rebase] ino=4 size=1073741824 free=1048576 cost_before=21287040 taken=92/1046400 rechunked=2483379 base_read=2000507 reused_entries=2736 reused_nodes=162 nodes_loaded=6 splice_ms=91.1
+[t=1795411967.117][rebase] ino=3 size=1073741824 free=1048576 cost_before=3848640 taken=240/1044480 rechunked=5082879 base_read=5512570 reused_entries=37812 reused_nodes=131 nodes_loaded=85 splice_ms=236.7
+[t=1795411967.156][rebase] ino=3 size=1073741824 free=1048576 cost_before=4124480 taken=17/1048576 rechunked=1328491 base_read=376529 reused_entries=4032 reused_nodes=190 nodes_loaded=9 splice_ms=36.0
+[t=1795411967.190][rebase] ino=2 size=1073741824 free=1048576 cost_before=9094912 taken=126/1044480 rechunked=3121142 base_read=2817063 reused_entries=8259 reused_nodes=157 nodes_loaded=19 splice_ms=86.5
+[t=1795411967.191][rebase] ino=5 size=1073741824 free=1048576 cost_before=33027904 taken=248/1036288 rechunked=4849334 base_read=5133614 reused_entries=2752 reused_nodes=162 nodes_loaded=9 splice_ms=145.6
+[t=1795411967.219][rebase] ino=2 size=1073741824 free=1048576 cost_before=9606848 taken=16/1110016 rechunked=1325879 base_read=321166 reused_entries=2526 reused_nodes=170 nodes_loaded=6 splice_ms=21.5
+[t=1795411967.228][rebase] ino=5 size=1073741824 free=1048576 cost_before=33282304 taken=11/1093632 rechunked=1262408 base_read=241689 reused_entries=1590 reused_nodes=166 nodes_loaded=6 splice_ms=30.6
+[t=1795411967.230][rebase] ino=3 size=1073741824 free=1048576 cost_before=3844416 taken=88/1043008 rechunked=2426558 base_read=1878811 reused_entries=12099 reused_nodes=179 nodes_loaded=24 splice_ms=66.7
+[t=1795411967.262][rebase] ino=4 size=1073741824 free=1048576 cost_before=21145536 taken=251/1036288 rechunked=5081911 base_read=5647681 reused_entries=6260 reused_nodes=158 nodes_loaded=12 splice_ms=158.5
+[t=1795411967.708][rebase] ino=5 size=1073741824 free=1048576 cost_before=32911360 taken=34/1046464 rechunked=1577319 base_read=714788 reused_entries=1807 reused_nodes=165 nodes_loaded=7 splice_ms=470.7
+[t=1795411967.736][rebase] ino=5 size=1073741824 free=1048640 cost_before=33219008 taken=13/1050688 rechunked=1204968 base_read=204814 reused_entries=1564 reused_nodes=166 nodes_loaded=5 splice_ms=22.6
+[t=1795411967.767][rebase] ino=2 size=1073741824 free=1048576 cost_before=8836928 taken=128/1040448 rechunked=3202463 base_read=2915566 reused_entries=7823 reused_nodes=156 nodes_loaded=20 splice_ms=545.3
+[t=1795411967.774][rebase] ino=3 size=1073741824 free=1048576 cost_before=4222976 taken=86/1043136 rechunked=2432049 base_read=1958040 reused_entries=11124 reused_nodes=173 nodes_loaded=30 splice_ms=537.0
+[t=1795411967.787][rebase] ino=4 size=1073741824 free=1048576 cost_before=21241600 taken=93/1042688 rechunked=2536876 base_read=2041815 reused_entries=2753 reused_nodes=90 nodes_loaded=10 splice_ms=519.7
+[t=1795411967.837][rebase] ino=5 size=1073741824 free=1048576 cost_before=32807872 taken=68/1044288 rechunked=2088605 base_read=1437350 reused_entries=1646 reused_nodes=165 nodes_loaded=6 splice_ms=84.2
+[t=1795411967.855][rebase] ino=3 size=1073741824 free=1048576 cost_before=3831616 taken=83/1047296 rechunked=2399794 base_read=1817043 reused_entries=12419 reused_nodes=178 nodes_loaded=26 splice_ms=76.0
+[t=1795411967.868][rebase] ino=4 size=1073741824 free=1048576 cost_before=22252416 taken=92/1042752 rechunked=2451902 base_read=1988251 reused_entries=4492 reused_nodes=86 nodes_loaded=13 splice_ms=72.4
+[t=1795411967.873][rebase] ino=2 size=1073741824 free=1048640 cost_before=9227904 taken=127/1044416 rechunked=3233219 base_read=3059333 reused_entries=8384 reused_nodes=161 nodes_loaded=15 splice_ms=99.7
+[t=1795411967.876][rebase] ino=3 size=1073741824 free=1048640 cost_before=4147968 taken=5/1064960 rechunked=1161680 base_read=126741 reused_entries=2525 reused_nodes=193 nodes_loaded=5 splice_ms=17.2
+[t=1795411967.920][rebase] ino=2 size=1073741824 free=1048576 cost_before=8641280 taken=38/1046208 rechunked=1632141 base_read=797342 reused_entries=3505 reused_nodes=167 nodes_loaded=9 splice_ms=36.2
+[t=1795411967.934][rebase] ino=4 size=1073741824 free=1048576 cost_before=23263104 taken=69/1048000 rechunked=2078774 base_read=1368820 reused_entries=4023 reused_nodes=89 nodes_loaded=9 splice_ms=50.6
+[t=1795411967.942][rebase] ino=5 size=1073741824 free=1048576 cost_before=31800896 taken=173/1040576 rechunked=3729996 base_read=3740216 reused_entries=1963 reused_nodes=161 nodes_loaded=9 splice_ms=101.1
+[t=1795411967.956][rebase] ino=2 size=1073741824 free=1048576 cost_before=9232064 taken=22/1047232 rechunked=1428686 base_read=494898 reused_entries=1878 reused_nodes=169 nodes_loaded=7 splice_ms=28.7
+[t=1795411968.064][rebase] ino=4 size=1073741824 free=1048576 cost_before=22572416 taken=122/1040832 rechunked=2935073 base_read=2566410 reused_entries=3633 reused_nodes=89 nodes_loaded=10 splice_ms=125.1
+[t=1795411968.138][rebase] ino=3 size=1073741824 free=1048576 cost_before=3507008 taken=251/1036288 rechunked=5052392 base_read=5544445 reused_entries=32850 reused_nodes=125 nodes_loaded=78 splice_ms=253.6
+[t=1795411968.160][rebase] ino=5 size=1073741824 free=1048576 cost_before=32130560 taken=239/1036288 rechunked=4455886 base_read=4755658 reused_entries=4043 reused_nodes=157 nodes_loaded=14 splice_ms=213.4
+[t=1795411968.168][rebase] ino=2 size=1073741824 free=1048576 cost_before=8903040 taken=197/1040000 rechunked=4069327 base_read=4147969 reused_entries=11803 reused_nodes=150 nodes_loaded=25 splice_ms=202.7
+[t=1795411968.199][rebase] ino=4 size=1073741824 free=1048576 cost_before=23233792 taken=127/1044032 rechunked=3051223 base_read=2760891 reused_entries=3224 reused_nodes=89 nodes_loaded=10 splice_ms=123.3
+[t=1795411968.375][rebase] ino=4 size=1073741824 free=1048576 cost_before=22185792 taken=117/1041152 rechunked=3019957 base_read=2693908 reused_entries=3336 reused_nodes=87 nodes_loaded=12 splice_ms=173.3
+[t=1795411968.444][rebase] ino=5 size=1073741824 free=1048576 cost_before=33150336 taken=242/1036288 rechunked=4512128 base_read=4695197 reused_entries=3608 reused_nodes=161 nodes_loaded=9 splice_ms=260.8
+[t=1795411968.453][rebase] ino=4 size=1073741824 free=1048576 cost_before=21879616 taken=35/1046400 rechunked=1637790 base_read=840910 reused_entries=3264 reused_nodes=87 nodes_loaded=12 splice_ms=67.3
+[t=1795411968.462][rebase] ino=3 size=1073741824 free=1048576 cost_before=2841536 taken=252/1036288 rechunked=5118526 base_read=5665891 reused_entries=31446 reused_nodes=137 nodes_loaded=62 splice_ms=316.9
+[t=1795411968.482][rebase] ino=2 size=1073741824 free=1048640 cost_before=9240192 taken=252/1036288 rechunked=4983144 base_read=5533778 reused_entries=16708 reused_nodes=147 nodes_loaded=28 splice_ms=299.5
+[t=1795411968.581][rebase] ino=3 size=1073741824 free=1048576 cost_before=1926400 taken=30/1046720 rechunked=1484830 base_read=605320 reused_entries=6728 reused_nodes=184 nodes_loaded=13 splice_ms=114.3
+[t=1795411968.587][rebase] ino=5 size=1073741824 free=1048640 cost_before=34178368 taken=57/1045056 rechunked=1940663 base_read=1217115 reused_entries=1215 reused_nodes=164 nodes_loaded=6 splice_ms=121.5
+[t=1795411968.646][rebase] ino=4 size=1073741824 free=1048576 cost_before=22299584 taken=97/1045888 rechunked=2482036 base_read=2074384 reused_entries=4317 reused_nodes=88 nodes_loaded=9 splice_ms=178.7
+[t=1795411968.774][rebase] ino=5 size=1073741824 free=1048576 cost_before=33558144 taken=101/1042176 rechunked=2615222 base_read=2121301 reused_entries=1342 reused_nodes=164 nodes_loaded=7 splice_ms=173.7
+[t=1795411968.833][rebase] ino=4 size=1073741824 free=1048576 cost_before=23319168 taken=99/1042304 rechunked=2597204 base_read=2151493 reused_entries=4306 reused_nodes=88 nodes_loaded=9 splice_ms=166.0
+[t=1795411968.896][rebase] ino=2 size=1073741824 free=1048576 cost_before=8707776 taken=250/1036288 rechunked=4968892 base_read=5401951 reused_entries=14347 reused_nodes=155 nodes_loaded=22 splice_ms=404.2
+[t=1795411968.936][rebase] ino=3 size=1073741824 free=1048640 cost_before=2042944 taken=172/1037696 rechunked=3882060 base_read=3868456 reused_entries=42064 reused_nodes=123 nodes_loaded=93 splice_ms=348.7
+[t=1795411968.954][rebase] ino=5 size=1073741824 free=1048576 cost_before=33041920 taken=85/1046208 rechunked=2552627 base_read=2013143 reused_entries=2232 reused_nodes=163 nodes_loaded=7 splice_ms=166.6
+[t=1795411969.048][rebase] ino=4 size=1073741824 free=1048576 cost_before=24321536 taken=146/1042560 rechunked=3216948 base_read=2956042 reused_entries=3431 reused_nodes=89 nodes_loaded=10 splice_ms=196.8
+[t=1795411969.078][rebase] ino=3 size=1073741824 free=1048576 cost_before=2042624 taken=55/1049024 rechunked=1974154 base_read=1214795 reused_entries=12390 reused_nodes=167 nodes_loaded=33 splice_ms=126.4
+[t=1795411969.102][rebase] ino=2 size=1073741824 free=1048576 cost_before=7705408 taken=134/1040064 rechunked=3233390 base_read=3003685 reused_entries=7670 reused_nodes=159 nodes_loaded=18 splice_ms=201.5
+[t=1795411969.193][rebase] ino=5 size=1073741824 free=1048576 cost_before=33088832 taken=245/1036288 rechunked=4710136 base_read=4916701 reused_entries=4037 reused_nodes=160 nodes_loaded=9 splice_ms=235.0
+[t=1795411969.334][rebase] ino=4 size=1073741824 free=1048576 cost_before=24276032 taken=246/1036288 rechunked=4717161 base_read=5268776 reused_entries=4981 reused_nodes=85 nodes_loaded=14 splice_ms=274.5
+[t=1795411969.411][rebase] ino=2 size=1073741824 free=1048576 cost_before=8375232 taken=120/1044800 rechunked=2964411 base_read=2554824 reused_entries=7388 reused_nodes=158 nodes_loaded=16 splice_ms=203.9
+[t=1795411969.463][rebase] ino=3 size=1073741824 free=1048576 cost_before=2051200 taken=226/1034176 rechunked=4737223 base_read=5133697 reused_entries=63752 reused_nodes=90 nodes_loaded=131 splice_ms=380.8
+[t=1795411969.568][rebase] ino=5 size=1073741824 free=1048576 cost_before=32411136 taken=249/1036288 rechunked=4711573 base_read=5148406 reused_entries=3984 reused_nodes=158 nodes_loaded=11 splice_ms=359.7
+[t=1795411969.569][rebase] ino=3 size=1073741824 free=1048576 cost_before=1164864 taken=29/1050688 rechunked=1606815 base_read=778688 reused_entries=12038 reused_nodes=165 nodes_loaded=38 splice_ms=101.3
+[t=1795411969.588][rebase] ino=4 size=1073741824 free=1048576 cost_before=24293440 taken=187/1036672 rechunked=4137207 base_read=4185383 reused_entries=4059 reused_nodes=83 nodes_loaded=18 splice_ms=249.0
+[t=1795411969.653][rebase] ino=3 size=1073741824 free=1048576 cost_before=2059520 taken=11/1089536 rechunked=1244873 base_read=211214 reused_entries=5585 reused_nodes=181 nodes_loaded=15 splice_ms=55.0
+[t=1795411969.684][rebase] ino=4 size=1073741824 free=1048576 cost_before=23494464 taken=44/1045824 rechunked=1772543 base_read=972028 reused_entries=2281 reused_nodes=90 nodes_loaded=9 splice_ms=85.4
+[t=1795411969.742][rebase] ino=2 size=1073741824 free=1048576 cost_before=9240704 taken=228/1034048 rechunked=4493870 base_read=4760503 reused_entries=10827 reused_nodes=154 nodes_loaded=22 splice_ms=312.2
+[t=1795411969.760][rebase] ino=4 size=1073741824 free=1048576 cost_before=24276224 taken=23/1050944 rechunked=1357045 base_read=420281 reused_entries=2291 reused_nodes=89 nodes_loaded=10 splice_ms=65.2
+[t=1795411969.821][rebase] ino=2 size=1073741824 free=1048576 cost_before=8458368 taken=25/1050816 rechunked=1409082 base_read=494933 reused_entries=1855 reused_nodes=168 nodes_loaded=8 splice_ms=71.1
+[t=1795411969.928][rebase] ino=5 size=1073741824 free=1048576 cost_before=33089536 taken=247/1036288 rechunked=4707795 base_read=5042565 reused_entries=3927 reused_nodes=160 nodes_loaded=10 splice_ms=328.7
+[t=1795411970.076][rebase] ino=4 size=1073741824 free=1048576 cost_before=25303680 taken=246/1036288 rechunked=4938545 base_read=5430100 reused_entries=4851 reused_nodes=81 nodes_loaded=17 splice_ms=306.3
+[t=1795411970.109][rebase] ino=3 size=1073741824 free=1048576 cost_before=1285440 taken=253/1036288 rechunked=5333162 base_read=5960283 reused_entries=64179 reused_nodes=85 nodes_loaded=140 splice_ms=447.5
+[t=1795411970.116][rebase] ino=2 size=1073741824 free=1048576 cost_before=7430912 taken=245/1073152 rechunked=4931837 base_read=5391240 reused_entries=13103 reused_nodes=149 nodes_loaded=27 splice_ms=292.7
+[t=1795411970.174][rebase] ino=2 size=1073741824 free=1048576 cost_before=6687424 taken=17/1048576 rechunked=1323534 base_read=402521 reused_entries=2132 reused_nodes=168 nodes_loaded=10 splice_ms=49.9
+[t=1795411970.219][rebase] ino=5 size=1073741824 free=1048576 cost_before=34046592 taken=214/1034944 rechunked=4449803 base_read=4710036 reused_entries=3426 reused_nodes=157 nodes_loaded=12 splice_ms=269.7
+[t=1795411970.326][rebase] ino=5 size=1073741824 free=1048576 cost_before=33555200 taken=35/1049920 rechunked=1662370 base_read=863600 reused_entries=1895 reused_nodes=162 nodes_loaded=7 splice_ms=93.6
+[t=1795411970.350][rebase] ino=2 size=1073741824 free=1048576 cost_before=7106560 taken=102/1042112 rechunked=2683515 base_read=2317476 reused_entries=7817 reused_nodes=160 nodes_loaded=17 splice_ms=167.5
+[t=1795411970.362][rebase] ino=4 size=1073741824 free=1048576 cost_before=24347264 taken=247/1036288 rechunked=4597721 base_read=4930655 reused_entries=5191 reused_nodes=83 nodes_loaded=15 splice_ms=282.1
+[t=1795411970.443][rebase] ino=3 size=1073741824 free=1048640 cost_before=2030400 taken=190/1036544 rechunked=4290282 base_read=4344924 reused_entries=55226 reused_nodes=109 nodes_loaded=105 splice_ms=326.9
+[t=1795411970.518][rebase] ino=4 size=1073741824 free=1048576 cost_before=23956416 taken=87/1043072 rechunked=2269229 base_read=1713158 reused_entries=2667 reused_nodes=88 nodes_loaded=10 splice_ms=136.1
+[t=1795411970.590][rebase] ino=3 size=1073741824 free=1048576 cost_before=2025920 taken=65/1048320 rechunked=2178404 base_read=1634129 reused_entries=12470 reused_nodes=166 nodes_loaded=32 splice_ms=129.8
+[t=1795411970.595][rebase] ino=2 size=1073741824 free=1048576 cost_before=7102144 taken=153/1042752 rechunked=3377314 base_read=3196686 reused_entries=10546 reused_nodes=154 nodes_loaded=22 splice_ms=212.6
+[t=1795411970.608][rebase] ino=5 size=1073741824 free=1048576 cost_before=34025664 taken=246/1040384 rechunked=4968782 base_read=5310575 reused_entries=4596 reused_nodes=158 nodes_loaded=10 splice_ms=272.4
+[t=1795411970.708][rebase] ino=4 size=1073741824 free=1048576 cost_before=24201920 taken=164/1041792 rechunked=3429296 base_read=3314077 reused_entries=4389 reused_nodes=84 nodes_loaded=16 splice_ms=183.8
+[t=1795411970.769][rebase] ino=5 size=1073741824 free=1048576 cost_before=33555712 taken=136/1039936 rechunked=3187881 base_read=2879244 reused_entries=3238 reused_nodes=161 nodes_loaded=7 splice_ms=149.9
+[t=1795411970.774][rebase] ino=2 size=1073741824 free=1048640 cost_before=7114880 taken=150/1039104 rechunked=3331207 base_read=3216746 reused_entries=11504 reused_nodes=153 nodes_loaded=23 splice_ms=175.6
+[t=1795411970.861][rebase] ino=5 size=1073741824 free=1048576 cost_before=32719168 taken=43/1045888 rechunked=1689589 base_read=922004 reused_entries=1347 reused_nodes=163 nodes_loaded=5 splice_ms=86.2
+[t=1795411970.878][rebase] ino=3 size=1073741824 free=1048640 cost_before=2038720 taken=180/1037184 rechunked=3845342 base_read=3963851 reused_entries=52128 reused_nodes=106 nodes_loaded=113 splice_ms=284.4
+[t=1795411970.935][rebase] ino=2 size=1073741824 free=1048576 cost_before=7114496 taken=105/1045760 rechunked=2866464 base_read=2496239 reused_entries=8483 reused_nodes=155 nodes_loaded=22 splice_ms=149.6
+[t=1795411970.959][rebase] ino=5 size=1073741824 free=1048576 cost_before=32889856 taken=72/1047616 rechunked=2189909 base_read=1578875 reused_entries=1254 reused_nodes=162 nodes_loaded=7 splice_ms=91.4
+[t=1795411970.974][rebase] ino=4 size=1073741824 free=1048640 cost_before=25238016 taken=219/1034688 rechunked=4479051 base_read=4741060 reused_entries=4157 reused_nodes=21 nodes_loaded=12 splice_ms=249.5
+[t=1795411970.999][rebase] ino=3 size=1073741824 free=1048576 cost_before=1867840 taken=75/1047680 rechunked=2290010 base_read=1733322 reused_entries=15359 reused_nodes=167 nodes_loaded=31 splice_ms=111.7
+[t=1795411971.030][rebase] ino=4 size=1073741824 free=1048576 cost_before=24368256 taken=35/1050176 rechunked=1516718 base_read=643398 reused_entries=2533 reused_nodes=25 nodes_loaded=10 splice_ms=50.4
+[t=1795411971.133][rebase] ino=2 size=1073741824 free=1048576 cost_before=7123136 taken=191/1036416 rechunked=4170837 base_read=4430252 reused_entries=16691 reused_nodes=148 nodes_loaded=29 splice_ms=195.5
+[t=1795411971.135][rebase] ino=4 size=1073741824 free=1048576 cost_before=23831552 taken=30/1046720 rechunked=1514150 base_read=632401 reused_entries=2050 reused_nodes=25 nodes_loaded=9 splice_ms=60.0
+[t=1795411971.137][rebase] ino=5 size=1073741824 free=1048576 cost_before=33904704 taken=147/1039232 rechunked=3518437 base_read=3303951 reused_entries=2159 reused_nodes=159 nodes_loaded=10 splice_ms=157.7
+[t=1795411971.240][rebase] ino=2 size=1073741824 free=1048576 cost_before=7014656 taken=64/1048448 rechunked=2029976 base_read=1357554 reused_entries=5341 reused_nodes=163 nodes_loaded=12 splice_ms=80.9
+[t=1795411971.292][rebase] ino=3 size=1073741824 free=1048576 cost_before=2255040 taken=175/1037440 rechunked=3632831 base_read=3582569 reused_entries=43185 reused_nodes=118 nodes_loaded=96 splice_ms=216.6
+[t=1795411971.294][rebase] ino=4 size=1073741824 free=1048576 cost_before=24380480 taken=111/1041536 rechunked=2823809 base_read=2499689 reused_entries=3099 reused_nodes=25 nodes_loaded=10 splice_ms=134.3
+[t=1795411971.295][rebase] ino=5 size=1073741824 free=1048576 cost_before=33467456 taken=105/1045632 rechunked=2700743 base_read=2227763 reused_entries=1504 reused_nodes=158 nodes_loaded=12 splice_ms=136.3
+[t=1795411971.353][rebase] ino=2 size=1073741824 free=1048640 cost_before=7131392 taken=76/1043840 rechunked=2181372 base_read=1523876 reused_entries=4827 reused_nodes=160 nodes_loaded=17 splice_ms=110.1
+[t=1795411971.434][rebase] ino=4 size=1073741824 free=1048576 cost_before=23993088 taken=110/1045184 rechunked=2755030 base_read=2306869 reused_entries=3531 reused_nodes=23 nodes_loaded=13 splice_ms=112.9
+[t=1795411971.440][rebase] ino=3 size=1073741824 free=1048640 cost_before=3116224 taken=80/1047424 rechunked=2483019 base_read=1935319 reused_entries=15356 reused_nodes=165 nodes_loaded=28 splice_ms=118.7
+[t=1795411971.462][rebase] ino=4 size=1073741824 free=1048576 cost_before=24139200 taken=1/1048576 rechunked=1056780 base_read=8472 reused_entries=1654 reused_nodes=27 nodes_loaded=8 splice_ms=22.8
+[t=1795411971.467][rebase] ino=2 size=1073741824 free=1048576 cost_before=6136832 taken=113/1041408 rechunked=2833340 base_read=2472465 reused_entries=9312 reused_nodes=157 nodes_loaded=19 splice_ms=110.5
+[t=1795411971.522][rebase] ino=5 size=1073741824 free=1048576 cost_before=33862784 taken=234/1040384 rechunked=4554807 base_read=4706769 reused_entries=3407 reused_nodes=158 nodes_loaded=12 splice_ms=214.0
+[t=1795411971.576][rebase] ino=5 size=1073741824 free=1048576 cost_before=33032000 taken=17/1048576 rechunked=1337628 base_read=399270 reused_entries=614 reused_nodes=165 nodes_loaded=5 splice_ms=45.5
+[t=1795411971.582][rebase] ino=2 size=1073741824 free=1048576 cost_before=5911936 taken=66/1048192 rechunked=2083670 base_read=1427299 reused_entries=5334 reused_nodes=163 nodes_loaded=14 splice_ms=95.1
+[t=1795411971.615][rebase] ino=4 size=1073741824 free=1048640 cost_before=25195264 taken=106/1041920 rechunked=2774251 base_read=2321620 reused_entries=2934 reused_nodes=24 nodes_loaded=10 splice_ms=128.2
+[t=1795411971.670][rebase] ino=5 size=1073741824 free=1048576 cost_before=32853632 taken=75/1043840 rechunked=2190012 base_read=1566941 reused_entries=1342 reused_nodes=164 nodes_loaded=6 splice_ms=74.5
+[t=1795411971.710][rebase] ino=5 size=1073741824 free=1048576 cost_before=31813312 taken=5/1048320 rechunked=1102635 base_read=72259 reused_entries=1639 reused_nodes=164 nodes_loaded=6 splice_ms=35.3
+[t=1795411971.711][rebase] ino=2 size=1073741824 free=1048576 cost_before=6095296 taken=93/1042688 rechunked=2528916 base_read=2130539 reused_entries=7387 reused_nodes=159 nodes_loaded=16 splice_ms=114.9
+[t=1795411971.720][rebase] ino=4 size=1073741824 free=1048640 cost_before=26230656 taken=78/1043712 rechunked=2465694 base_read=1901259 reused_entries=2116 reused_nodes=100 nodes_loaded=7 splice_ms=92.0
+[t=1795411971.727][rebase] ino=3 size=1073741824 free=1048576 cost_before=2970560 taken=253/1036288 rechunked=5112729 base_read=5671120 reused_entries=39929 reused_nodes=121 nodes_loaded=78 splice_ms=276.1
+[t=1795411971.806][rebase] ino=2 size=1073741824 free=1048576 cost_before=6032576 taken=43/1045888 rechunked=1734587 base_read=957023 reused_entries=3547 reused_nodes=164 nodes_loaded=12 splice_ms=70.3
+[t=1795411971.810][rebase] ino=4 size=1073741824 free=1048576 cost_before=25641472 taken=67/1047808 rechunked=2080071 base_read=1382969 reused_entries=2662 reused_nodes=99 nodes_loaded=10 splice_ms=74.7
+[t=1795411971.830][rebase] ino=5 size=1073741824 free=1048576 cost_before=32541056 taken=92/1042752 rechunked=2540120 base_read=2117020 reused_entries=1270 reused_nodes=163 nodes_loaded=8 splice_ms=94.9
+[t=1795411971.890][rebase] ino=3 size=1073741824 free=1048640 cost_before=3124736 taken=94/1042688 rechunked=2665636 base_read=2341411 reused_entries=17498 reused_nodes=77 nodes_loaded=50 splice_ms=153.6
+[t=1795411971.919][rebase] ino=2 size=1073741824 free=1048640 cost_before=6095040 taken=76/1043840 rechunked=2205787 base_read=1574398 reused_entries=4827 reused_nodes=163 nodes_loaded=12 splice_ms=107.4
+[t=1795411971.925][rebase] ino=5 size=1073741824 free=1048576 cost_before=31795776 taken=40/1046080 rechunked=1559891 base_read=737541 reused_entries=1188 reused_nodes=161 nodes_loaded=9 splice_ms=85.9
+[t=1795411972.001][rebase] ino=5 size=1073741824 free=1048576 cost_before=31858304 taken=41/1049600 rechunked=1690519 base_read=886843 reused_entries=1724 reused_nodes=163 nodes_loaded=6 splice_ms=67.1
+[t=1795411972.007][rebase] ino=2 size=1073741824 free=1048576 cost_before=6036480 taken=45/1049600 rechunked=1798002 base_read=1002249 reused_entries=2757 reused_nodes=165 nodes_loaded=10 splice_ms=73.5
+[t=1795411972.058][rebase] ino=4 size=1073741824 free=1048576 cost_before=26095296 taken=248/1036288 rechunked=4937093 base_read=5455335 reused_entries=4517 reused_nodes=98 nodes_loaded=12 splice_ms=237.7
+[t=1795411972.061][rebase] ino=3 size=1073741824 free=1048576 cost_before=3124416 taken=160/1042176 rechunked=3530973 base_read=3469634 reused_entries=21531 reused_nodes=149 nodes_loaded=46 splice_ms=161.0
+[t=1795411972.135][rebase] ino=3 size=1073741824 free=1048576 cost_before=3528320 taken=24/1047104 rechunked=1389894 base_read=487338 reused_entries=6196 reused_nodes=176 nodes_loaded=17 splice_ms=62.2
+[t=1795411972.231][rebase] ino=5 size=1073741824 free=1048576 cost_before=31625280 taken=244/1036288 rechunked=4734267 base_read=5117677 reused_entries=3493 reused_nodes=160 nodes_loaded=8 splice_ms=210.4
+[t=1795411972.236][rebase] ino=2 size=1073741824 free=1048576 cost_before=6269760 taken=253/1036288 rechunked=4954226 base_read=5453470 reused_entries=15645 reused_nodes=147 nodes_loaded=29 splice_ms=216.3
+[t=1795411972.285][rebase] ino=4 size=1073741824 free=1048576 cost_before=25691776 taken=244/1036288 rechunked=4514349 base_read=4842677 reused_entries=5200 reused_nodes=95 nodes_loaded=16 splice_ms=211.3
+[t=1795411972.363][rebase] ino=3 size=1073741824 free=1048640 cost_before=4193920 taken=230/1037760 rechunked=5013108 base_read=5349835 reused_entries=36114 reused_nodes=130 nodes_loaded=67 splice_ms=218.8
+[t=1795411972.415][rebase] ino=5 size=1073741824 free=1048576 cost_before=31854784 taken=247/1036288 rechunked=4709100 base_read=5212479 reused_entries=4258 reused_nodes=156 nodes_loaded=13 splice_ms=173.6
+[t=1795411972.431][rebase] ino=3 size=1073741824 free=1048576 cost_before=3832000 taken=52/1045312 rechunked=1852324 base_read=1085577 reused_entries=6144 reused_nodes=95 nodes_loaded=18 splice_ms=58.5
+[t=1795411972.432][rebase] ino=2 size=1073741824 free=1048576 cost_before=5375232 taken=253/1036288 rechunked=5071819 base_read=5496237 reused_entries=17811 reused_nodes=147 nodes_loaded=32 splice_ms=191.1
+[t=1795411972.456][rebase] ino=4 size=1073741824 free=1048576 cost_before=26050432 taken=245/1036288 rechunked=4663322 base_read=5088032 reused_entries=5608 reused_nodes=93 nodes_loaded=18 splice_ms=166.1
+[t=1795411972.509][rebase] ino=5 size=1073741824 free=1048576 cost_before=32761984 taken=97/1042432 rechunked=2425807 base_read=1944036 reused_entries=1638 reused_nodes=162 nodes_loaded=6 splice_ms=82.2
+[t=1795411972.514][rebase] ino=2 size=1073741824 free=1048576 cost_before=4900928 taken=73/1043968 rechunked=2151465 base_read=1569784 reused_entries=5667 reused_nodes=162 nodes_loaded=16 splice_ms=72.1
+[t=1795411972.541][rebase] ino=3 size=1073741824 free=1048576 cost_before=4198080 taken=82/1043392 rechunked=2410035 base_read=1835182 reused_entries=12393 reused_nodes=81 nodes_loaded=35 splice_ms=98.8
+[t=1795411972.543][rebase] ino=4 size=1073741824 free=1048576 cost_before=25248000 taken=89/1042944 rechunked=2464182 base_read=1874865 reused_entries=3851 reused_nodes=99 nodes_loaded=10 splice_ms=81.0
+[t=1795411972.642][rebase] ino=5 size=1073741824 free=1048576 cost_before=32603456 taken=154/1042432 rechunked=3413816 base_read=3272686 reused_entries=2628 reused_nodes=160 nodes_loaded=8 splice_ms=120.6
+[t=1795411972.665][rebase] ino=2 size=1073741824 free=1048576 cost_before=5067392 taken=181/1040896 rechunked=3905964 base_read=3897366 reused_entries=13260 reused_nodes=148 nodes_loaded=30 splice_ms=142.9
+[t=1795411972.667][rebase] ino=3 size=1073741824 free=1048576 cost_before=5254656 taken=122/1044736 rechunked=2888048 base_read=2655826 reused_entries=13189 reused_nodes=81 nodes_loaded=32 splice_ms=112.0
+[t=1795411972.675][rebase] ino=5 size=1073741824 free=1048576 cost_before=32728640 taken=12/1093632 rechunked=1266484 base_read=220154 reused_entries=1411 reused_nodes=163 nodes_loaded=5 splice_ms=26.2
+[t=1795411972.684][rebase] ino=4 size=1073741824 free=1048576 cost_before=24840000 taken=162/1041920 rechunked=3550282 base_read=3381154 reused_entries=4479 reused_nodes=97 nodes_loaded=12 splice_ms=129.5
+[t=1795411972.732][rebase] ino=4 size=1073741824 free=1048576 cost_before=23883328 taken=31/1046656 rechunked=1603922 base_read=773828 reused_entries=1836 reused_nodes=99 nodes_loaded=9 splice_ms=44.4
+[t=1795411972.759][rebase] ino=3 size=1073741824 free=1048640 cost_before=6315648 taken=72/1044096 rechunked=2281904 base_read=1717958 reused_entries=6553 reused_nodes=91 nodes_loaded=23 splice_ms=71.2
+[t=1795411972.776][rebase] ino=2 size=1073741824 free=1048640 cost_before=6099200 taken=84/1043328 rechunked=2484492 base_read=1917875 reused_entries=8406 reused_nodes=168 nodes_loaded=8 splice_ms=87.3
+[t=1795411972.793][rebase] ino=5 size=1073741824 free=1048576 cost_before=32191488 taken=148/1039168 rechunked=3484680 base_read=3495291 reused_entries=2626 reused_nodes=160 nodes_loaded=9 splice_ms=105.1
+[t=1795411972.814][rebase] ino=3 size=1073741824 free=1048576 cost_before=5982464 taken=37/1046272 rechunked=1747267 base_read=947682 reused_entries=5207 reused_nodes=96 nodes_loaded=17 splice_ms=49.6
+[t=1795411972.872][rebase] ino=5 size=1073741824 free=1048576 cost_before=32665408 taken=97/1045696 rechunked=2494296 base_read=1974136 reused_entries=2162 reused_nodes=163 nodes_loaded=6 splice_ms=73.4
+[t=1795411972.880][rebase] ino=4 size=1073741824 free=1048576 cost_before=22838912 taken=218/1099648 rechunked=4510369 base_read=4727382 reused_entries=4756 reused_nodes=94 nodes_loaded=14 splice_ms=142.7
+[t=1795411972.896][rebase] ino=2 size=1073741824 free=1048576 cost_before=6098624 taken=167/1041536 rechunked=3543560 base_read=3480933 reused_entries=12983 reused_nodes=146 nodes_loaded=31 splice_ms=112.9
+[t=1795411972.910][rebase] ino=4 size=1073741824 free=1048576 cost_before=22836416 taken=17/1048576 rechunked=1247885 base_read=302200 reused_entries=2305 reused_nodes=100 nodes_loaded=10 splice_ms=24.9
+[t=1795411972.930][rebase] ino=2 size=1073741824 free=1048576 cost_before=6099200 taken=28/1046848 rechunked=1477898 base_read=561210 reused_entries=2301 reused_nodes=168 nodes_loaded=7 splice_ms=29.8
+[t=1795411972.932][rebase] ino=3 size=1073741824 free=1048640 cost_before=6323584 taken=146/1043072 rechunked=3541725 base_read=3317041 reused_entries=13141 reused_nodes=164 nodes_loaded=29 splice_ms=111.5
+[t=1795411972.985][rebase] ino=2 size=1073741824 free=1048640 cost_before=7155712 taken=51/1045440 rechunked=1830601 base_read=1000330 reused_entries=3411 reused_nodes=167 nodes_loaded=9 splice_ms=42.8
+[t=1795411973.048][rebase] ino=5 size=1073741824 free=1048576 cost_before=31850496 taken=241/1036288 rechunked=4644410 base_read=4768031 reused_entries=3724 reused_nodes=164 nodes_loaded=6 splice_ms=169.0
+[t=1795411973.084][rebase] ino=4 size=1073741824 free=1048576 cost_before=22836992 taken=247/1036288 rechunked=4811514 base_read=5279144 reused_entries=4892 reused_nodes=95 nodes_loaded=14 splice_ms=165.6
+[t=1795411973.146][rebase] ino=3 size=1073741824 free=1048576 cost_before=6111424 taken=252/1036288 rechunked=5297583 base_read=5567494 reused_entries=18379 reused_nodes=158 nodes_loaded=34 splice_ms=203.5
+[t=1795411973.150][rebase] ino=5 size=1073741824 free=1048640 cost_before=32649920 taken=90/1042944 rechunked=2481870 base_read=1978043 reused_entries=1792 reused_nodes=165 nodes_loaded=6 splice_ms=93.6
+[t=1795411973.170][rebase] ino=2 size=1073741824 free=1048576 cost_before=6310912 taken=175/1041152 rechunked=3928850 base_read=3993432 reused_entries=13145 reused_nodes=148 nodes_loaded=26 splice_ms=179.3
+[t=1795411973.256][rebase] ino=3 size=1073741824 free=1048576 cost_before=5225408 taken=117/1041152 rechunked=3040635 base_read=2747824 reused_entries=8358 reused_nodes=172 nodes_loaded=18 splice_ms=106.6
+[t=1795411973.302][rebase] ino=2 size=1073741824 free=1048576 cost_before=7155584 taken=36/1046336 rechunked=1561795 base_read=697805 reused_entries=3656 reused_nodes=165 nodes_loaded=9 splice_ms=98.9
+[t=1795411973.377][rebase] ino=5 size=1073741824 free=1048576 cost_before=32644800 taken=158/1041920 rechunked=3484453 base_read=3390015 reused_entries=3169 reused_nodes=164 nodes_loaded=7 splice_ms=174.4
+[t=1795411973.389][rebase] ino=4 size=1073741824 free=1048576 cost_before=22925056 taken=193/1036288 rechunked=4105524 base_read=4289800 reused_entries=6891 reused_nodes=96 nodes_loaded=14 splice_ms=298.8
+[t=1795411973.410][rebase] ino=3 size=1073741824 free=1048576 cost_before=5271232 taken=137/1043712 rechunked=3282070 base_read=3200331 reused_entries=11623 reused_nodes=160 nodes_loaded=32 splice_ms=147.7
+[t=1795411973.427][rebase] ino=2 size=1073741824 free=1048576 cost_before=6269248 taken=109/1041664 rechunked=2761691 base_read=2332938 reused_entries=6322 reused_nodes=156 nodes_loaded=17 splice_ms=112.9
+[t=1795411973.450][rebase] ino=4 size=1073741824 free=1048640 cost_before=23952192 taken=55/1048576 rechunked=1917557 base_read=1201583 reused_entries=2458 reused_nodes=103 nodes_loaded=8 splice_ms=50.8
+[t=1795411973.502][rebase] ino=4 size=1073741824 free=1048576 cost_before=23058176 taken=32/1046592 rechunked=1539892 base_read=659364 reused_entries=2781 reused_nodes=101 nodes_loaded=10 splice_ms=45.4
+[t=1795411973.531][rebase] ino=2 size=1073741824 free=1048576 cost_before=7163520 taken=110/1045440 rechunked=2880274 base_read=2542650 reused_entries=7450 reused_nodes=155 nodes_loaded=17 splice_ms=95.1
+[t=1795411973.533][rebase] ino=5 size=1073741824 free=1048576 cost_before=32645568 taken=227/1034112 rechunked=4352181 base_read=4630748 reused_entries=3304 reused_nodes=160 nodes_loaded=12 splice_ms=151.3
+[t=1795411973.575][rebase] ino=4 size=1073741824 free=1048576 cost_before=23914880 taken=62/1044672 rechunked=1982388 base_read=1221393 reused_entries=2598 reused_nodes=99 nodes_loaded=11 splice_ms=58.3
+[t=1795411973.583][rebase] ino=5 size=1073741824 free=1048576 cost_before=32087296 taken=18/1050752 rechunked=1389774 base_read=502773 reused_entries=1423 reused_nodes=166 nodes_loaded=6 splice_ms=37.9
+[t=1795411973.612][rebase] ino=3 size=1073741824 free=1048576 cost_before=4243712 taken=251/1036288 rechunked=5069462 base_read=5565980 reused_entries=22138 reused_nodes=148 nodes_loaded=46 splice_ms=198.9
+[t=1795411973.682][rebase] ino=5 size=1073741824 free=1048576 cost_before=31235008 taken=109/1041664 rechunked=2493325 base_read=2153000 reused_entries=1704 reused_nodes=166 nodes_loaded=6 splice_ms=94.0
+[t=1795411973.710][rebase] ino=4 size=1073741824 free=1048576 cost_before=24831872 taken=155/1042176 rechunked=3454240 base_read=3276059 reused_entries=4281 reused_nodes=98 nodes_loaded=11 splice_ms=121.4
+[t=1795411973.758][rebase] ino=2 size=1073741824 free=1048576 cost_before=6868160 taken=251/1036288 rechunked=5197517 base_read=5729781 reused_entries=14965 reused_nodes=146 nodes_loaded=27 splice_ms=212.9
+[t=1795411973.761][rebase] ino=4 size=1073741824 free=1048576 cost_before=24532352 taken=10/1085440 rechunked=1217532 base_read=189441 reused_entries=2079 reused_nodes=100 nodes_loaded=8 splice_ms=42.0
+[t=1795411973.798][rebase] ino=5 size=1073741824 free=1048576 cost_before=31534528 taken=139/1043200 rechunked=3340723 base_read=3218244 reused_entries=2431 reused_nodes=163 nodes_loaded=9 splice_ms=107.8
+[t=1795411973.801][rebase] ino=2 size=1073741824 free=1048576 cost_before=7446784 taken=8/1077248 rechunked=1264365 base_read=270978 reused_entries=2278 reused_nodes=168 nodes_loaded=5 splice_ms=29.5
+[t=1795411973.837][rebase] ino=3 size=1073741824 free=1048576 cost_before=4177216 taken=252/1036288 rechunked=5095752 base_read=5449737 reused_entries=22294 reused_nodes=62 nodes_loaded=56 splice_ms=211.8
+[t=1795411973.875][rebase] ino=5 size=1073741824 free=1048576 cost_before=31098048 taken=54/1045184 rechunked=1951982 base_read=1238169 reused_entries=2215 reused_nodes=164 nodes_loaded=8 splice_ms=61.9
+[t=1795411973.884][rebase] ino=3 size=1073741824 free=1048640 cost_before=4227520 taken=43/1045952 rechunked=1730462 base_read=975820 reused_entries=8319 reused_nodes=91 nodes_loaded=23 splice_ms=44.0
+[t=1795411973.917][rebase] ino=4 size=1073741824 free=1048576 cost_before=24789952 taken=218/1034688 rechunked=4373376 base_read=4615899 reused_entries=3980 reused_nodes=96 nodes_loaded=13 splice_ms=145.3
+[t=1795411973.964][rebase] ino=4 size=1073741824 free=1048576 cost_before=24845504 taken=9/1048064 rechunked=1215889 base_read=234978 reused_entries=2947 reused_nodes=100 nodes_loaded=9 splice_ms=37.4
+[t=1795411973.970][rebase] ino=3 size=1073741824 free=1048576 cost_before=3765440 taken=77/1043712 rechunked=2192122 base_read=1683655 reused_entries=10950 reused_nodes=167 nodes_loaded=25 splice_ms=78.8
+[t=1795411973.998][rebase] ino=5 size=1073741824 free=1048576 cost_before=31505472 taken=148/1039168 rechunked=3409921 base_read=3164035 reused_entries=3658 reused_nodes=164 nodes_loaded=7 splice_ms=114.2
+[t=1795411974.008][rebase] ino=4 size=1073741824 free=1048576 cost_before=24903808 taken=28/1050688 rechunked=1502850 base_read=628187 reused_entries=2225 reused_nodes=101 nodes_loaded=8 splice_ms=39.9
+[t=1795411974.009][rebase] ino=2 size=1073741824 free=1048576 cost_before=7051072 taken=251/1036288 rechunked=4989685 base_read=5581415 reused_entries=15978 reused_nodes=147 nodes_loaded=26 splice_ms=195.1
+[t=1795411974.049][rebase] ino=5 size=1073741824 free=1048576 cost_before=30910208 taken=47/1049088 rechunked=1757992 base_read=1051372 reused_entries=1829 reused_nodes=166 nodes_loaded=5 splice_ms=42.4
+[t=1795411974.108][rebase] ino=3 size=1073741824 free=1048640 cost_before=4243904 taken=137/1043776 rechunked=3461873 base_read=3269123 reused_entries=25594 reused_nodes=151 nodes_loaded=44 splice_ms=126.7
+[t=1795411974.155][rebase] ino=3 size=1073741824 free=1048576 cost_before=3665536 taken=27/1046912 rechunked=1529131 base_read=664458 reused_entries=3786 reused_nodes=180 nodes_loaded=11 splice_ms=39.4
+[t=1795411974.161][rebase] ino=4 size=1073741824 free=1048576 cost_before=24562432 taken=203/1035648 rechunked=4299240 base_read=4350129 reused_entries=4362 reused_nodes=96 nodes_loaded=14 splice_ms=140.1
+[t=1795411974.191][rebase] ino=3 size=1073741824 free=1048576 cost_before=4243776 taken=10/1048000 rechunked=1216379 base_read=219556 reused_entries=2443 reused_nodes=180 nodes_loaded=11 splice_ms=30.6
+[t=1795411974.214][rebase] ino=2 size=1073741824 free=1048576 cost_before=7396800 taken=248/1036288 rechunked=5208827 base_read=5872172 reused_entries=14072 reused_nodes=141 nodes_loaded=31 splice_ms=193.5
+[t=1795411974.228][rebase] ino=4 size=1073741824 free=1048576 cost_before=24866048 taken=46/1049216 rechunked=1861911 base_read=1146378 reused_entries=2573 reused_nodes=101 nodes_loaded=10 splice_ms=58.9
+[t=1795411974.252][rebase] ino=5 size=1073741824 free=1048576 cost_before=31484608 taken=248/1036288 rechunked=5107130 base_read=5583683 reused_entries=4780 reused_nodes=164 nodes_loaded=7 splice_ms=192.9
+[t=1795411974.355][rebase] ino=4 size=1073741824 free=1048576 cost_before=24054912 taken=140/1039680 rechunked=3106931 base_read=2873330 reused_entries=3142 reused_nodes=169 nodes_loaded=12 splice_ms=119.6
+[t=1795411974.370][rebase] ino=5 size=1073741824 free=1048640 cost_before=32508480 taken=111/1041600 rechunked=2828579 base_read=2380732 reused_entries=2375 reused_nodes=164 nodes_loaded=9 splice_ms=104.3
+[t=1795411974.399][rebase] ino=3 size=1073741824 free=1048576 cost_before=3361600 taken=219/1038528 rechunked=4811585 base_read=5094069 reused_entries=26586 reused_nodes=139 nodes_loaded=58 splice_ms=204.3
+[t=1795411974.411][rebase] ino=2 size=1073741824 free=1048640 cost_before=8208320 taken=251/1036288 rechunked=4993868 base_read=5559575 reused_entries=13172 reused_nodes=150 nodes_loaded=23 splice_ms=184.2
+[t=1795411974.451][rebase] ino=3 size=1073741824 free=1048576 cost_before=4247872 taken=31/1046656 rechunked=1545518 base_read=654635 reused_entries=4340 reused_nodes=97 nodes_loaded=14 splice_ms=43.3
+[t=1795411974.461][rebase] ino=4 size=1073741824 free=1048576 cost_before=23031296 taken=110/1045184 rechunked=2870976 base_read=2528420 reused_entries=3234 reused_nodes=168 nodes_loaded=11 splice_ms=101.5
+[t=1795411974.488][rebase] ino=5 size=1073741824 free=1048576 cost_before=32507776 taken=138/1043264 rechunked=3154742 base_read=2920826 reused_entries=2727 reused_nodes=165 nodes_loaded=8 splice_ms=107.1
+[t=1795411974.494][rebase] ino=3 size=1073741824 free=1048640 cost_before=5312896 taken=16/1047680 rechunked=1316815 base_read=404102 reused_entries=3973 reused_nodes=100 nodes_loaded=12 splice_ms=30.2
+[t=1795411974.527][rebase] ino=4 size=1073741824 free=1048576 cost_before=22191104 taken=96/1042496 rechunked=2566440 base_read=2082051 reused_entries=3695 reused_nodes=168 nodes_loaded=10 splice_ms=63.3
+[t=1795411974.571][rebase] ino=2 size=1073741824 free=1048576 cost_before=7322304 taken=207/1035392 rechunked=4509781 base_read=4693727 reused_entries=15899 reused_nodes=149 nodes_loaded=24 splice_ms=154.0
+[t=1795411974.621][rebase] ino=2 size=1073741824 free=1048576 cost_before=8200064 taken=42/1049472 rechunked=1789866 base_read=1081211 reused_entries=3232 reused_nodes=160 nodes_loaded=13 splice_ms=42.3
+[t=1795411974.643][rebase] ino=3 size=1073741824 free=1048576 cost_before=5104448 taken=110/1041600 rechunked=3052523 base_read=2793976 reused_entries=10142 reused_nodes=83 nodes_loaded=29 splice_ms=78.9
+[t=1795411974.651][rebase] ino=4 size=1073741824 free=1048576 cost_before=23226752 taken=152/1042368 rechunked=3153574 base_read=2875178 reused_entries=4428 reused_nodes=167 nodes_loaded=12 splice_ms=87.3
+[t=1795411974.671][rebase] ino=2 size=1073741824 free=1048576 cost_before=7318400 taken=64/1044544 rechunked=2054631 base_read=1337742 reused_entries=4392 reused_nodes=165 nodes_loaded=8 splice_ms=45.8
+[t=1795411974.713][rebase] ino=3 size=1073741824 free=1048640 cost_before=5324928 taken=100/1046080 rechunked=2629590 base_read=2140432 reused_entries=7385 reused_nodes=93 nodes_loaded=20 splice_ms=67.3
+[t=1795411974.777][rebase] ino=2 size=1073741824 free=1048576 cost_before=6548544 taken=130/1040320 rechunked=3345247 base_read=3130675 reused_entries=9391 reused_nodes=152 nodes_loaded=21 splice_ms=99.5
+[t=1795411974.791][rebase] ino=4 size=1073741824 free=1048576 cost_before=23775936 taken=248/1036288 rechunked=5131502 base_read=5623130 reused_entries=4952 reused_nodes=167 nodes_loaded=12 splice_ms=130.7
+[t=1795411974.818][rebase] ino=2 size=1073741824 free=1048640 cost_before=7159936 taken=25/1047104 rechunked=1463295 base_read=624759 reused_entries=1475 reused_nodes=168 nodes_loaded=7 splice_ms=35.0
+[t=1795411974.854][rebase] ino=3 size=1073741824 free=1048576 cost_before=5324800 taken=252/1036288 rechunked=4925563 base_read=5262470 reused_entries=15527 reused_nodes=70 nodes_loaded=42 splice_ms=130.5
+[t=1795411974.857][rebase] ino=2 size=1073741824 free=1048576 cost_before=7163776 taken=38/1050048 rechunked=1661503 base_read=837377 reused_entries=3108 reused_nodes=165 nodes_loaded=9 splice_ms=30.5
+[t=1795411974.900][rebase] ino=2 size=1073741824 free=1048640 cost_before=7164096 taken=44/1045888 rechunked=1801292 base_read=1002439 reused_entries=3091 reused_nodes=169 nodes_loaded=6 splice_ms=39.5
+[t=1795411974.923][rebase] ino=4 size=1073741824 free=1048576 cost_before=23164608 taken=249/1036288 rechunked=4871993 base_read=5352143 reused_entries=7002 reused_nodes=164 nodes_loaded=16 splice_ms=125.1
+[t=1795411974.979][rebase] ino=3 size=1073741824 free=1048640 cost_before=5329344 taken=252/1036288 rechunked=5290661 base_read=5752982 reused_entries=19330 reused_nodes=157 nodes_loaded=37 splice_ms=122.8
+[t=1795411975.004][rebase] ino=2 size=1073741824 free=1048576 cost_before=7155264 taken=209/1038976 rechunked=4428777 base_read=4627063 reused_entries=12642 reused_nodes=150 nodes_loaded=25 splice_ms=94.2
+[t=1795411975.069][rebase] ino=2 size=1073741824 free=1048576 cost_before=7143232 taken=126/1040576 rechunked=3106422 base_read=2826619 reused_entries=9087 reused_nodes=154 nodes_loaded=20 splice_ms=61.7
+[t=1795411975.100][rebase] ino=3 size=1073741824 free=1048576 cost_before=6373824 taken=251/1036288 rechunked=5010177 base_read=5324794 reused_entries=17343 reused_nodes=163 nodes_loaded=32 splice_ms=114.4
+[t=1795411975.141][rebase] ino=2 size=1073741824 free=1048576 cost_before=6577152 taken=126/1044288 rechunked=2914913 base_read=2611651 reused_entries=9599 reused_nodes=154 nodes_loaded=20 splice_ms=66.0
+[t=1795411975.221][rebase] ino=3 size=1073741824 free=1048576 cost_before=6373824 taken=241/1052672 rechunked=4890593 base_read=5343793 reused_entries=17672 reused_nodes=156 nodes_loaded=39 splice_ms=113.7
+[t=1795411975.242][rebase] ino=3 size=1073741824 free=1048576 cost_before=6350272 taken=17/1048576 rechunked=1320712 base_read=389622 reused_entries=2522 reused_nodes=186 nodes_loaded=6 splice_ms=17.7
+[t=1795411975.268][rebase] ino=2 size=1073741824 free=1048640 cost_before=7135040 taken=252/1036288 rechunked=5028735 base_read=5470980 reused_entries=18013 reused_nodes=144 nodes_loaded=30 splice_ms=123.2
+[t=1795411975.314][rebase] ino=3 size=1073741824 free=1048576 cost_before=5816384 taken=106/1041856 rechunked=2773852 base_read=2440150 reused_entries=7344 reused_nodes=175 nodes_loaded=19 splice_ms=65.9
+[t=1795411975.389][rebase] ino=3 size=1073741824 free=1048576 cost_before=6353088 taken=146/1043008 rechunked=3423156 base_read=3239770 reused_entries=11484 reused_nodes=167 nodes_loaded=29 splice_ms=70.1
+[t=1795411975.393][rebase] ino=2 size=1073741824 free=1048576 cost_before=7134848 taken=235/1033600 rechunked=4904045 base_read=5320591 reused_entries=14687 reused_nodes=143 nodes_loaded=34 splice_ms=118.9
+[t=1795411975.411][rebase] ino=2 size=1073741824 free=1048576 cost_before=7139072 taken=19/1051264 rechunked=1368391 base_read=452177 reused_entries=2638 reused_nodes=165 nodes_loaded=9 splice_ms=16.3
+[t=1795411975.490][rebase] ino=3 size=1073741824 free=1048576 cost_before=5816576 taken=197/1036032 rechunked=4161780 base_read=4312409 reused_entries=18111 reused_nodes=155 nodes_loaded=45 splice_ms=96.0
+[t=1795411975.517][rebase] ino=3 size=1073741824 free=1048640 cost_before=6357376 taken=29/1046848 rechunked=1543655 base_read=712640 reused_entries=4148 reused_nodes=184 nodes_loaded=13 splice_ms=23.6
+[t=1795411975.528][rebase] ino=2 size=1073741824 free=1048576 cost_before=7134784 taken=252/1036288 rechunked=4874390 base_read=5319456 reused_entries=13854 reused_nodes=153 nodes_loaded=21 splice_ms=109.2
+[t=1795411975.543][rebase] ino=3 size=1073741824 free=1048576 cost_before=5816256 taken=31/1050560 rechunked=1511581 base_read=600515 reused_entries=3977 reused_nodes=188 nodes_loaded=10 splice_ms=21.0
+[t=1795411975.616][rebase] ino=2 size=1073741824 free=1048576 cost_before=7135168 taken=161/1038336 rechunked=3617866 base_read=3521337 reused_entries=10950 reused_nodes=148 nodes_loaded=24 splice_ms=84.9
+[t=1795411975.668][rebase] ino=2 size=1073741824 free=1048576 cost_before=6589952 taken=89/1046528 rechunked=2357073 base_read=1818795 reused_entries=5107 reused_nodes=159 nodes_loaded=13 splice_ms=46.1
+[t=1795411975.683][rebase] ino=3 size=1073741824 free=1048576 cost_before=6361280 taken=251/1036288 rechunked=5190163 base_read=5659088 reused_entries=21233 reused_nodes=162 nodes_loaded=38 splice_ms=135.6
+[t=1795411975.689][rebase] ino=2 size=1073741824 free=1048576 cost_before=7131264 taken=14/1101824 rechunked=1336750 base_read=326806 reused_entries=1661 reused_nodes=161 nodes_loaded=8 splice_ms=16.4
+[t=1795411975.763][rebase] ino=3 size=1073741824 free=1048576 cost_before=5820608 taken=151/1038976 rechunked=3645588 base_read=3498784 reused_entries=11098 reused_nodes=177 nodes_loaded=19 splice_ms=74.0
+[t=1795411975.815][rebase] ino=3 size=1073741824 free=1048576 cost_before=4813632 taken=101/1045888 rechunked=2854174 base_read=2470144 reused_entries=11458 reused_nodes=172 nodes_loaded=23 splice_ms=50.2
+[t=1795411975.824][rebase] ino=2 size=1073741824 free=1048640 cost_before=8137856 taken=249/1036288 rechunked=5012210 base_read=5474178 reused_entries=15758 reused_nodes=141 nodes_loaded=29 splice_ms=128.3
+[t=1795411975.862][rebase] ino=2 size=1073741824 free=1048576 cost_before=7634752 taken=55/1045120 rechunked=1996092 base_read=1371899 reused_entries=5266 reused_nodes=157 nodes_loaded=11 splice_ms=32.6
+[t=1795411975.882][rebase] ino=2 size=1073741824 free=1048576 cost_before=8125632 taken=17/1047552 rechunked=1332683 base_read=391730 reused_entries=2101 reused_nodes=160 nodes_loaded=8 splice_ms=16.2
+[t=1795411975.944][rebase] ino=3 size=1073741824 free=1048640 cost_before=5317440 taken=253/1036288 rechunked=5110124 base_read=5857781 reused_entries=29061 reused_nodes=136 nodes_loaded=64 splice_ms=125.0
+[t=1795411975.946][rebase] ino=2 size=1073741824 free=1048576 cost_before=7634432 taken=114/1041344 rechunked=2977283 base_read=2633287 reused_entries=10095 reused_nodes=146 nodes_loaded=21 splice_ms=58.4
+[t=1795411975.994][rebase] ino=2 size=1073741824 free=1048576 cost_before=8133568 taken=71/1048000 rechunked=2326553 base_read=1689240 reused_entries=4335 reused_nodes=156 nodes_loaded=11 splice_ms=39.8
+[t=1795411975.999][rebase] ino=3 size=1073741824 free=1048576 cost_before=6374272 taken=80/1043520 rechunked=2400822 base_read=1878252 reused_entries=8688 reused_nodes=169 nodes_loaded=24 splice_ms=43.8
+[t=1795411976.028][rebase] ino=3 size=1073741824 free=1048576 cost_before=5866496 taken=41/1046016 rechunked=1740813 base_read=935857 reused_entries=4354 reused_nodes=182 nodes_loaded=11 splice_ms=25.3
+[t=1795411976.033][rebase] ino=2 size=1073741824 free=1048576 cost_before=7085184 taken=54/1045184 rechunked=1923741 base_read=1223004 reused_entries=3966 reused_nodes=158 nodes_loaded=9 splice_ms=35.0
+[t=1795411976.043][rebase] ino=3 size=1073741824 free=1048576 cost_before=6386560 taken=6/1048256 rechunked=1145837 base_read=135033 reused_entries=1118 reused_nodes=186 nodes_loaded=6 splice_ms=11.7
+[t=1795411976.112][rebase] ino=3 size=1073741824 free=1048576 cost_before=6386176 taken=130/1044224 rechunked=3141654 base_read=2759438 reused_entries=9590 reused_nodes=167 nodes_loaded=25 splice_ms=62.2
+[t=1795411976.130][rebase] ino=2 size=1073741824 free=1048576 cost_before=6564800 taken=201/1039680 rechunked=3991406 base_read=4240073 reused_entries=13093 reused_nodes=142 nodes_loaded=27 splice_ms=92.1
+[t=1795411976.165][rebase] ino=3 size=1073741824 free=1048640 cost_before=6398912 taken=108/1041792 rechunked=2786804 base_read=2388758 reused_entries=8534 reused_nodes=173 nodes_loaded=22 splice_ms=51.9
+[t=1795411976.187][rebase] ino=3 size=1073741824 free=1048576 cost_before=5861888 taken=15/1047680 rechunked=1278380 base_read=302305 reused_entries=2770 reused_nodes=187 nodes_loaded=7 splice_ms=17.1
+[t=1795411976.248][rebase] ino=2 size=1073741824 free=1048640 cost_before=7089216 taken=250/1036288 rechunked=5059171 base_read=5575843 reused_entries=14655 reused_nodes=143 nodes_loaded=27 splice_ms=112.5
+[t=1795411976.249][rebase] ino=3 size=1073741824 free=1048576 cost_before=6402752 taken=133/1043968 rechunked=2935463 base_read=2643505 reused_entries=9236 reused_nodes=173 nodes_loaded=21 splice_ms=57.5
+[t=1795411976.280][rebase] ino=2 size=1073741824 free=1048576 cost_before=6773248 taken=20/1047360 rechunked=1366344 base_read=449050 reused_entries=3188 reused_nodes=159 nodes_loaded=9 splice_ms=19.9
+[t=1795411976.362][rebase] ino=3 size=1073741824 free=1048576 cost_before=6182272 taken=253/1036288 rechunked=5217082 base_read=5647387 reused_entries=16530 reused_nodes=165 nodes_loaded=27 splice_ms=102.2
+[t=1795411976.394][rebase] ino=2 size=1073741824 free=1048576 cost_before=7089408 taken=235/1037504 rechunked=4986000 base_read=5560185 reused_entries=14045 reused_nodes=142 nodes_loaded=27 splice_ms=111.7
+[t=1795411976.486][rebase] ino=3 size=1073741824 free=1048640 cost_before=6407232 taken=237/1033536 rechunked=4925583 base_read=5393097 reused_entries=19586 reused_nodes=154 nodes_loaded=38 splice_ms=118.8
+[t=1795411976.509][rebase] ino=3 size=1073741824 free=1048576 cost_before=6406912 taken=17/1051328 rechunked=1326253 base_read=368181 reused_entries=1634 reused_nodes=186 nodes_loaded=7 splice_ms=16.9
+[t=1795411976.513][rebase] ino=2 size=1073741824 free=1048576 cost_before=6544384 taken=252/1036288 rechunked=5281902 base_read=5870305 reused_entries=19097 reused_nodes=140 nodes_loaded=31 splice_ms=113.4
+[t=1795411976.606][rebase] ino=2 size=1073741824 free=1048640 cost_before=7098048 taken=176/1037440 rechunked=3879875 base_read=3899011 reused_entries=13248 reused_nodes=142 nodes_loaded=22 splice_ms=88.6
+[t=1795411976.617][rebase] ino=3 size=1073741824 free=1048576 cost_before=6407296 taken=253/1036288 rechunked=4999775 base_read=5456511 reused_entries=17862 reused_nodes=158 nodes_loaded=36 splice_ms=104.2
+[t=1795411976.652][rebase] ino=2 size=1073741824 free=1048576 cost_before=6544384 taken=78/1047424 rechunked=2261860 base_read=1669833 reused_entries=5922 reused_nodes=152 nodes_loaded=11 splice_ms=40.3
+[t=1795411976.674][rebase] ino=3 size=1073741824 free=1048576 cost_before=6407296 taken=118/1041088 rechunked=2900959 base_read=2593068 reused_entries=6624 reused_nodes=178 nodes_loaded=16 splice_ms=52.0
+[t=1795411976.758][rebase] ino=3 size=1073741824 free=1048576 cost_before=6898176 taken=136/1043776 rechunked=3099664 base_read=2861824 reused_entries=9782 reused_nodes=166 nodes_loaded=30 splice_ms=59.4
+[t=1795411976.805][rebase] ino=3 size=1073741824 free=1048576 cost_before=7455872 taken=112/1041472 rechunked=2847017 base_read=2487765 reused_entries=8754 reused_nodes=175 nodes_loaded=19 splice_ms=42.2
+[t=1795411976.872][rebase] ino=3 size=1073741824 free=1048576 cost_before=6898176 taken=141/1043392 rechunked=3285213 base_read=3165881 reused_entries=10306 reused_nodes=164 nodes_loaded=33 splice_ms=62.2
+[t=1795411976.938][rebase] ino=3 size=1073741824 free=1048640 cost_before=7460096 taken=160/1038464 rechunked=3433763 base_read=3461494 reused_entries=11696 reused_nodes=173 nodes_loaded=21 splice_ms=62.2
+[t=1795411976.989][rebase] ino=3 size=1073741824 free=1048576 cost_before=6898112 taken=95/1046400 rechunked=2420891 base_read=1919862 reused_entries=10709 reused_nodes=177 nodes_loaded=20 splice_ms=45.4
+[t=1795411983.731][rebase] ino=5 size=1073741824 free=8388608 cost_before=31459840 taken=783/8211584 rechunked=19976459 base_read=16187779 reused_entries=9290 reused_nodes=157 nodes_loaded=16 splice_ms=652.8
+[t=1795411983.814][rebase] ino=2 size=1073741824 free=8388608 cost_before=6053568 taken=699/6008832 rechunked=17340599 base_read=15731683 reused_entries=91162 reused_nodes=28 nodes_loaded=151 splice_ms=700.8
+[t=1795411983.862][rebase] ino=3 size=1073741824 free=8388608 cost_before=6423872 taken=789/6373376 rechunked=19373326 base_read=17915925 reused_entries=91063 reused_nodes=27 nodes_loaded=190 splice_ms=737.0
+[t=1795411983.863][rebase] ino=4 size=1073741824 free=8388608 cost_before=22698816 taken=1017/8323584 rechunked=24232020 base_read=22107658 reused_entries=18359 reused_nodes=133 nodes_loaded=45 splice_ms=785.8
+[t=1795411984.405][rebase] ino=5 size=1073741824 free=8388608 cost_before=23071232 taken=975/8326272 rechunked=23428624 base_read=20755925 reused_entries=15448 reused_nodes=134 nodes_loaded=39 splice_ms=667.2
+[t=1795411984.522][rebase] ino=4 size=1073741824 free=8388608 cost_before=14310208 taken=1171/8313728 rechunked=26866815 base_read=25612805 reused_entries=30058 reused_nodes=110 nodes_loaded=65 splice_ms=643.8
+[t=1795411984.817][rebase] ino=4 size=1073741824 free=8388608 cost_before=5794624 taken=675/5751424 rechunked=16499256 base_read=14748692 reused_entries=45479 reused_nodes=107 nodes_loaded=76 splice_ms=290.1
+[t=1795411984.849][rebase] ino=5 size=1073741824 free=8388608 cost_before=14682624 taken=1395/8299392 rechunked=30127072 base_read=30420138 reused_entries=31752 reused_nodes=105 nodes_loaded=68 splice_ms=437.8
+[t=1795411985.001][rebase] ino=5 size=1073741824 free=8388608 cost_before=6294016 taken=538/6259584 rechunked=15221065 base_read=12310897 reused_entries=35146 reused_nodes=111 nodes_loaded=62 splice_ms=148.5
+[t=1795411985.036][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795411985.069][commit-cut] finish_ms=33
+S7 threads=4 serialize=false file_mib=1024 write_mib=128 peak_rss_mib=230 vmhwm_mib=230 cap_mib=256 within_cap=true slowest_write_ms=546.8 rebase_steps=454 max_dirty_mib=64 rss_start_mib=41 rss_after_writes_mib=207 commit_every_s=30 commits=2 commit_hold_max_ms=2.1 commit_total_max_ms=89.4
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+baseline only: flusher lag and pause curve need Phase 20
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 56.27s
+
+=== done
+4.00 3.21 1.79 2/901 762
+host_uptime_end: 21:33  up 32 days,  1:53, 8 users, load averages: 19.14 22.39 26.16
+EXIT=0

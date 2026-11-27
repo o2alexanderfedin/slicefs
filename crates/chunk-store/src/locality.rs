@@ -58,8 +58,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
+use crate::sync::{Mutex, MutexGuard, Rank};
 use crate::{Loc, ObjectId};
 
 /// The packs in the cache (least recently used goes first).
@@ -133,7 +133,6 @@ struct State {
 }
 
 /// See the module doc.
-#[derive(Default)]
 pub(crate) struct LocalityCache {
     state: Mutex<State>,
     hits: AtomicU64,
@@ -148,9 +147,21 @@ pub(crate) const fn max_idx_len(header: usize, entry: usize) -> u64 {
     (header + MAX_ENTRIES * entry + 4) as u64
 }
 
+impl Default for LocalityCache {
+    fn default() -> Self {
+        LocalityCache {
+            state: Mutex::new(Rank::Store, State::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            fills: AtomicU64::new(0),
+            fills_dropped: AtomicU64::new(0),
+        }
+    }
+}
+
 impl LocalityCache {
-    fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock()
     }
 
     /// The cached place of `id`, if a cached pack has it.
@@ -400,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn the_ram_stays_within_the_bounds() {
         let c = LocalityCache::default();
         let per = MAX_ENTRIES / 4 + 1;

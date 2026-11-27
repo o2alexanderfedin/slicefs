@@ -1,10 +1,10 @@
-/// Integration tests for the `slicefs gc` offline GC command.
-///
-/// Covers:
-/// - `run_gc` on a store with dead entries compacts segments and reports stats
-/// - `run_gc` on a clean store (no dead entries) reports 0 removed
-/// - `run_gc` on a locked store with no running mount fails (no mount takes the request)
-/// - CLI parses `gc` subcommand with store path argument
+//! Integration tests for the `slicefs gc` offline GC command.
+//!
+//! Covers:
+//! - `run_gc` on a store with dead entries compacts segments and reports stats
+//! - `run_gc` on a clean store (no dead entries) reports 0 removed
+//! - `run_gc` on a locked store with no running mount fails (no mount takes the request)
+//! - CLI parses `gc` subcommand with store path argument
 
 use std::path::PathBuf;
 
@@ -23,6 +23,7 @@ const S_IFREG: u32 = 0o100_000;
 
 /// Helper: create a seeded store with one committed file and WAL shut down.
 fn make_seeded_store(store_dir: &TempDir) {
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 
@@ -42,6 +43,7 @@ fn make_seeded_store(store_dir: &TempDir) {
 
 /// Helper: create a store with a dead entry (created then unlinked before commit).
 fn make_store_with_dead_entries(store_dir: &TempDir) {
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     let segs_dir = store_dir.path().join("segments");
     std::fs::create_dir_all(&segs_dir).unwrap();
 

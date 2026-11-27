@@ -1,0 +1,170 @@
+# host: tar of the committed tree at 1ca0f2c; docker mount form, volume slicefs-target-p21, mode pjdfstest (release build, pjdfstest.sh), SLICEFS_WORKERS=4
+Linux 531a6e82b871 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+5.15 4.88 4.67 5/944 20
+SLICEFS_WORKERS=4
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:33:1
+   |
+33 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:22:1
+   |
+22 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:24:1
+   |
+24 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:29:1
+   |
+29 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:31:1
+   |
+31 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: unreachable pattern
+   --> crates/chunk-store/src/pack_io.rs:491:34
+    |
+491 |         Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+    |         ----------------------   ^^^^^^^^^^^^^^^^^^^ no value can reach this
+    |         |
+    |         matches all the relevant values
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/metadata/src/store.rs:842:32
+    |
+842 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |                                ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+842 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+842 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+    |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1451:32
+     |
+1451 |             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |                                ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1451 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+1451 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1457:26
+     |
+1457 |         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |                          ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1457 -         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+1457 +         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+     |
+
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1507:25
+     |
+1507 |         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+     = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+     |
+1507 -         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1507 +         self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1522:25
+     |
+1522 |         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |                         ^^^^^^^^^^^^
+     |
+help: replace the use of the deprecated method
+     |
+1522 -         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1522 +         self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+     |
+
+warning: unused dependency `sha2-compress`
+  --> crates/slicefs-cli/Cargo.toml:31:1
+   |
+31 | sha2-compress  = { workspace = true }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `sha2-compress`
+== mounts start at 45 s
+workers-line: Workers: 4 (set)
+open/25.t (2 GiB sparse write) rc=0 (137 = killed at 600s): Result: PASS 
+daemon alive after run: yes
+/tmp/pjd/m is a mountpoint
+Files=237, Tests=8792, 190 wallclock secs ( 2.30 usr  0.37 sys + 34.91 cusr 30.20 csys = 67.78 CPU)
+Result: PASS
+--- failing test files:
+pjdfstest exit=0; end at 245 s
+# host: exit=0, wall time 245 s

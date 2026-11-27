@@ -1,0 +1,21 @@
+# red run at 80be137: check_not_ancestor returns Ok at once (planted, not committed)
+# share of picks inside the own subtree: 1/2 (as planned); run 1 of 3 (full output), runs 2 and 3 below
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.02s
+     Running tests/rename_ancestor_tests.rs (target/debug/deps/rename_ancestor_tests-38dc9ed14579505d)
+running 1 test
+test stress_cross_directory_directory_renames_keep_one_tree ... FAILED
+failures:
+---- stress_cross_directory_directory_renames_keep_one_tree stdout ----
+thread 'stress_cross_directory_directory_renames_keep_one_tree' (134975162) panicked at crates/slicefs-cli/tests/rename_ancestor_tests.rs:263:9:
+assertion `left == right` failed: seed 0x2102: directory 2 is reached from the root None times
+  left: None
+ right: Some(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+failures:
+    stress_cross_directory_directory_renames_keep_one_tree
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.02s
+error: test failed, to rerun pass `-p slicefs-cli --test rename_ancestor_tests`
+# run 2: assertion `left == right` failed: seed 0x2102: directory 2 is reached from the root None times
+# run 2: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.02s
+# run 3: assertion `left == right` failed: seed 0x2102: directory 2 is reached from the root None times
+# run 3: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.02s

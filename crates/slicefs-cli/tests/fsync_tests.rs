@@ -1,10 +1,10 @@
-/// Integration tests for fsync/fdatasync FUSE callback.
-///
-/// Covers:
-///   - fsync with buffered writes flushes to CAS and updates manifest
-///   - fsync with no buffered writes is a no-op (returns Ok)
-///   - fdatasync (datasync=true) is identical to fsync (same code path)
-///   - fsync followed by simulated crash (drop without destroy) + reload from segments shows data present
+//! Integration tests for fsync/fdatasync FUSE callback.
+//!
+//! Covers:
+//!   - fsync with buffered writes flushes to CAS and updates manifest
+//!   - fsync with no buffered writes is a no-op (returns Ok)
+//!   - fdatasync (datasync=true) is identical to fsync (same code path)
+//!   - fsync followed by simulated crash (drop without destroy) + reload from segments shows data present
 
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
@@ -137,7 +137,7 @@ fn test_fsync_crash_durability() {
     assert!(found_ino > 1, "file inode should be > 1");
 }
 
-// ── #3: fsync on a Buffered handle must not re-hash the whole buffer ─────────
+// ── #3: fsync on an overlay handle must not re-hash the whole file ───────────
 
 fn buffered_file(fs: &SliceFsFilesystem, name: &str, mib: u64) -> (u64, u64) {
     let (ino, fh) = fs.test_create(1, name, S_IFREG | 0o644, 0, 0, 0).unwrap();
@@ -145,7 +145,7 @@ fn buffered_file(fs: &SliceFsFilesystem, name: &str, mib: u64) -> (u64, u64) {
     for i in 0..mib {
         fs.test_write(fh, i << 20, &chunk).unwrap();
     }
-    fs.test_write(fh, 0, b"rewrite").unwrap(); // backward write: Buffered mode
+    fs.test_write(fh, 0, b"rewrite").unwrap(); // backward write: Overlay mode
     assert!(!fs.test_is_streaming(fh));
     (ino, fh)
 }

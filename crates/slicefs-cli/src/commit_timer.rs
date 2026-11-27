@@ -15,12 +15,14 @@
 //! root record) runs after the gate is released, so FUSE requests wait only
 //! for the cut.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use chunk_store::sync::raw::RwLock;
+
 use crate::filesystem::SliceFsFilesystem;
+use crate::stop::StopSignal;
 use slicefs_traits::metadata::MetaError;
 
 use crate::util::ts;
@@ -42,49 +44,77 @@ pub struct CommitTimes {
 /// One timed commit: a clean cut of the open files (#20) under the exclusive
 /// gate, then the rest of the commit.
 pub fn timed_commit(fs: &SliceFsFilesystem, gate: &RwLock<()>) -> Result<CommitTimes, MetaError> {
+    Ok(commit(fs, gate, false)?.expect("a commit that does not check the shutdown always runs"))
+}
+
+/// The commit of the timer: `timed_commit` that does no commit and returns
+/// `Ok(None)` when the file system is shut down
+/// (`SliceFsFilesystem::shutdown`). The check runs again with the
+/// exclusive gate held: a timer that waited for the gate while the destroy
+/// work held it shared gets the gate only after that work, when the write
+/// log is shut down and the active pack is sealed.
+pub fn commit_unless_shut_down(fs: &SliceFsFilesystem, gate: &RwLock<()>) -> Result<Option<CommitTimes>, MetaError> {
+    commit(fs, gate, true)
+}
+
+/// `timed_commit`; with `check_shutdown`, `Ok(None)` and no commit when the
+/// file system is shut down (see `commit_unless_shut_down`).
+fn commit(fs: &SliceFsFilesystem, gate: &RwLock<()>, check_shutdown: bool) -> Result<Option<CommitTimes>, MetaError> {
+    if check_shutdown && fs.is_shut_down() {
+        return Ok(None);
+    }
     // Sync the objects so far before the gate: writes go on while
     // it runs, and the sync inside the commit (pre_root_sync) then
     // has only the bytes written since (#108). An error here is
     // seen again by that sync, which fails the commit.
     let _ = fs.content().sync();
     let w = Instant::now();
+    // The gate's rank entry, for the span of the hold (D-16).
+    let rank = chunk_store::sync::rank::enter(chunk_store::sync::Rank::Gate);
+    // Counted while it waits for the gate (a test hook sees the queued commit).
+    let waiting = fs.exclusive_wait();
     let all = gate.write().unwrap_or_else(|e| e.into_inner());
+    drop(waiting);
+    if check_shutdown && fs.is_shut_down() {
+        return Ok(None);
+    }
     let gate_wait = w.elapsed();
     let t = Instant::now();
     // Only the generation switch runs under the gate (#108).
     let cut = fs.commit_cut_begin();
     drop(all);
+    drop(rank);
     let hold = t.elapsed();
     fs.commit_cut_finish(cut?)?;
-    Ok(CommitTimes { gate_wait, hold, total: w.elapsed() })
+    Ok(Some(CommitTimes { gate_wait, hold, total: w.elapsed() }))
 }
 
-/// Start the timer thread. It stops when `shutdown` is set or the store is dropped.
+/// Start the timer thread. It stops at once when `shutdown` is stopped, the store is
+/// dropped, or a commit finds the file system shut down.
 pub fn spawn_commit_timer(
     fs: Weak<SliceFsFilesystem>,
     gate: Arc<RwLock<()>>,
     interval: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<StopSignal>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("slicefs-commit".into())
         .spawn(move || loop {
-            let start = Instant::now();
-            while start.elapsed() < interval {
-                if shutdown.load(Ordering::SeqCst) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(100).min(interval));
+            // A stop wakes the wait at once.
+            if shutdown.wait(interval) {
+                return;
             }
             let Some(fs) = fs.upgrade() else { return };
-            if shutdown.load(Ordering::SeqCst) {
+            if shutdown.is_stopped() {
                 return;
             }
             if !fs.meta().has_uncommitted_changes() {
                 continue;
             }
-            match timed_commit(&fs, &gate) {
-                Ok(t) => eprintln!("[{}][t={}][commit-timer] committed: gate_wait_ms={} hold_ms={} total_ms={} relog_bytes={}",
+            match commit_unless_shut_down(&fs, &gate) {
+                // The file system is shut down: no commit is left to do.
+                Ok(None) => return,
+                Ok(Some(t)) => eprintln!("[{}][t={}][commit-timer] committed: gate_wait_ms={} hold_ms={} total_ms={} relog_bytes={}",
                     ts(), crate::util::epoch(), t.gate_wait.as_millis(), t.hold.as_millis(), t.total.as_millis(),
                     fs.test_last_relog_bytes()),
                 Err(e) => eprintln!("[{}][commit-timer] commit failed: {}", ts(), e),
@@ -96,6 +126,7 @@ pub fn spawn_commit_timer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use crate::filesystem::SliceFsFilesystem;
     use metadata::store::DictMetadataStore;
     use slicefs_traits::metadata::MetadataStore;
@@ -118,7 +149,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
         let fs = Arc::new(SliceFsFilesystem::new(DictMetadataStore::new(io.clone()), io.clone(), None));
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = crate::stop::StopSignal::new();
         let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(200), stop.clone());
 
         let (ino, fh) = fs.test_create(1, "f", 0o100_644, 0o022, 0, 0).unwrap();
@@ -143,7 +174,7 @@ mod tests {
         // No change: no new commit.
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(fs.meta().current_root(), Some(root));
-        stop.store(true, Ordering::SeqCst);
+        stop.stop();
         h.join().unwrap();
     }
 
@@ -157,6 +188,45 @@ mod tests {
         let fs = Arc::new(SliceFsFilesystem::new(meta, io, Some(dir.to_path_buf())));
         fs.meta().commit().unwrap();
         fs
+    }
+
+    // IN-01 of the Phase 20 review: a commit of the timer that gets the gate
+    // after `shutdown()` (it waited for the gate while the destroy work ran)
+    // does no commit. The destroy work committed, then shut down the write
+    // log and sealed the active pack. Before the fix the timer called
+    // `timed_commit`, which made a full commit here.
+    #[test]
+    fn no_timed_commit_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_on_disk(dir.path());
+        let (ino, fh) = fs.test_create(1, "f", 0o100_644, 0o022, 0, 0).unwrap();
+        fs.test_write(fh, 0, b"down").unwrap();
+        fs.test_release(ino, fh).unwrap();
+        assert!(fs.shutdown(), "the destroy commit succeeded");
+        let root = fs.meta().current_root();
+        let r = commit_unless_shut_down(&fs, &fs.commit_gate());
+        assert!(matches!(r, Ok(None)), "no timed commit after shutdown: {:?}", r.map(|t| t.map(|t| t.total)));
+        assert_eq!(fs.meta().current_root(), root, "the root of the destroy work stays");
+    }
+
+    // IN-01: the timer loop after `shutdown()`. A change after the destroy
+    // work makes the timer try a commit; it makes none, and the timer ends.
+    #[test]
+    fn the_timer_does_not_commit_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = fs_on_disk(dir.path());
+        assert!(fs.shutdown(), "the destroy commit succeeded");
+        let root = fs.meta().current_root();
+        fs.test_create(1, "late", 0o100_644, 0o022, 0, 0).unwrap();
+        assert!(fs.meta().has_uncommitted_changes(), "a change after the destroy work");
+        let stop = crate::stop::StopSignal::new();
+        let h = spawn_commit_timer(Arc::downgrade(&fs), fs.commit_gate(), Duration::from_millis(50), stop.clone());
+        let ended = wait_until(Duration::from_secs(10), || h.is_finished());
+        stop.stop();
+        h.join().unwrap();
+        assert!(ended, "the timer ended when it found the file system shut down");
+        assert!(fs.meta().has_uncommitted_changes(), "the timer made no commit");
+        assert_eq!(fs.meta().current_root(), root, "the root of the destroy work stays");
     }
 
     // #108 / S5: a timed commit holds the gate exclusively only to switch the

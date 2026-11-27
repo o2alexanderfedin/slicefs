@@ -1,0 +1,71 @@
+name: Release
+
+# The release gate. Run it by hand (Actions > Release > Run workflow): pick
+# main in "Use workflow from" (other refs fail) and give the new version.
+# It runs the full test workflow (ci.yml) and every safety gate (safety.yml)
+# on the head commit of that branch at start time, and it creates and pushes
+# the annotated tag on that same commit only when all of them pass. A failed
+# gate means no tag.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New tag, for example v2.3.0"
+        required: true
+
+permissions:
+  contents: read
+
+# One release at a time; a second run waits, it does not cancel the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release only from main
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "release from main only, not $GITHUB_REF"; exit 1; }
+      - name: Version format and tag not taken
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+            || { echo "bad version: $VERSION"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION exists"; exit 1
+          fi
+
+  tests:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  safety:
+    needs: check
+    uses: ./.github/workflows/safety.yml
+
+  tag:
+    name: create tag
+    needs: [tests, safety]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Tag the checked commit
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" "$SHA" -m "Release $VERSION"
+          git push origin "refs/tags/$VERSION"

@@ -1,0 +1,12 @@
+# gate 24-04 on the work tree of Task 3 (head 702074e plus the run.sh and README changes), 2026-11-26T20:15:54Z
+# timeout 900 cargo test -p prolly -p prolly-bench (exit 0)
+     Running unittests src/lib.rs (target/debug/deps/prolly-dbc94d535b0e16ef)
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-84d2d526e43801fb)
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/smoke.rs (target/debug/deps/smoke-1fb74d5d2350df6d)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+# RUST_STABLE=stable timeout 1800 scripts/safety/clippy.sh (exit 0)
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=32 tokens=134 result=ok

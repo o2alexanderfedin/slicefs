@@ -5,24 +5,23 @@
 //! for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
-//!   1. `inode_map`
-//!   2. `io`
-//!   3. `inode_data`
-//!   4. `dir_data`
-//!   5. `manifest_data`
-//!   6. `xattr_data`
-//!   7. `refcounts`
+//!   `inode_map`, then one `inode_live` shard, then `inode_data`;
+//!   one `dir_live` shard, then `dir_data`. The other maps are taken alone.
+//!   No hot-path call holds the `io` lock; a commit takes it briefly.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
 
+use chunk_store::lock_stats::{self, Site};
+use chunk_store::sync::{self, Rank};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
-use crate::store_io::{NodeRead, NodeWrite};
+use crate::store_io::{NodeRead, NodeReader, NodeWrite, NodeWriter};
+use chunk_store::ChunkStore;
 use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, MetadataStore};
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
-use crate::wal::{WalCut, WalEntry, WalError, WalStrategy};
+use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
 use crate::inode_map::{InodeMap, intern_inode_map, load_inode_map};
@@ -32,11 +31,11 @@ use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
                    list_xattr_names, remove_xattr_entry};
 
 // S_IFDIR bit mask (POSIX directory type)
-const S_IFMT: u32 = 0o0170_000;
+const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
 /// little-endian. Each `*_DATA` field is the key of a serialized map.
-mod root_rec {
+pub(crate) mod root_rec {
     use super::KEY_BYTES as D;
     pub const INODE_MAP: usize = 0;
     pub const ROOT_DIR_INO: usize = INODE_MAP + D;
@@ -53,7 +52,7 @@ mod root_rec {
 }
 
 /// One entry of a `u64` <-> digest map: a `u64` and a digest.
-const MAP_ENTRY: usize = 8 + KEY_BYTES;
+pub(crate) const MAP_ENTRY: usize = 8 + KEY_BYTES;
 
 /// Longest directory entry name in bytes (statfs reports namelen 255).
 const NAME_MAX: usize = 255;
@@ -80,16 +79,20 @@ const DIRTY_FLUSH: usize = 8;
 struct Live<T> {
     map: HashMap<u64, T>,
     dirty: std::collections::HashSet<u64>,
-    /// Entries that a commit took at its cut (#108) and writes with the gate
-    /// released. Until it installs their digests, the digest maps hold an
-    /// older one, so these stay in the cache. A change after the cut takes
-    /// the entry out (it is dirty again, and newer).
-    flushing: std::collections::HashSet<u64>,
+    /// Entries that a commit (at its cut, #108) or a cache flush took and now
+    /// writes with no lock held, each with the ticket of its take. Until the
+    /// writer installs their digests, the digest maps hold an older one, so
+    /// these stay in the cache. A change after the take removes the entry
+    /// (it is dirty again, and newer); a later take gives it a new ticket.
+    /// A writer installs its digest only if the entry still has its ticket.
+    flushing: HashMap<u64, u64>,
+    /// The last ticket given.
+    tickets: u64,
 }
 
 impl<T> Default for Live<T> {
     fn default() -> Self {
-        Live { map: HashMap::new(), dirty: Default::default(), flushing: Default::default() }
+        Live { map: HashMap::new(), dirty: Default::default(), flushing: HashMap::new(), tickets: 0 }
     }
 }
 
@@ -108,28 +111,150 @@ impl<T> Live<T> {
     /// Drop the entries that are already written.
     fn evict_clean(&mut self) {
         let (dirty, flushing) = (&self.dirty, &self.flushing);
-        self.map.retain(|ino, _| dirty.contains(ino) || flushing.contains(ino));
+        self.map.retain(|ino, _| dirty.contains(ino) || flushing.contains_key(ino));
+    }
+
+    /// A take failed (a commit): what is in flight is dirty again.
+    fn requeue(&mut self) {
+        let flushing: Vec<u64> = self.flushing.drain().map(|(ino, _)| ino).collect();
+        self.dirty.extend(flushing);
+    }
+
+    /// True if `ino` still has the ticket `t` of a take (not changed or
+    /// removed since): it is no longer in flight, and the caller installs
+    /// the digest it wrote.
+    fn settle(&mut self, ino: u64, t: u64) -> bool {
+        if self.flushing.get(&ino) == Some(&t) {
+            self.flushing.remove(&ino);
+            true
+        } else {
+            false
+        }
     }
 }
 
 impl<T: Clone> Live<T> {
-    /// The dirty entries, for a commit: they move to `flushing`.
-    fn take_dirty(&mut self) -> Vec<(u64, T)> {
-        let dirty: Vec<u64> = self.dirty.drain().collect();
-        let mut out = Vec::with_capacity(dirty.len());
-        for ino in dirty {
+    /// The dirty entries, plus the entries in flight if `in_flight` (a
+    /// commit must have them all): each goes in flight with a new ticket.
+    fn take(&mut self, in_flight: bool) -> Vec<(u64, u64, T)> {
+        let mut inos: Vec<u64> = self.dirty.drain().collect();
+        if in_flight {
+            inos.extend(self.flushing.keys().copied());
+        }
+        let mut out = Vec::with_capacity(inos.len());
+        for ino in inos {
             if let Some(v) = self.map.get(&ino) {
-                out.push((ino, v.clone()));
-                self.flushing.insert(ino);
+                self.tickets += 1;
+                self.flushing.insert(ino, self.tickets);
+                out.push((ino, self.tickets, v.clone()));
             }
         }
         out
     }
+}
 
-    /// A commit failed: what it took is dirty again.
-    fn requeue(&mut self) {
-        let flushing: Vec<u64> = self.flushing.drain().collect();
-        self.dirty.extend(flushing);
+/// Shards of the inode and the directory cache: threads that work on
+/// inodes of different shards take different locks.
+const SHARDS: usize = 32;
+
+/// A cache split by inode number into `SHARDS` locks (`Rank::Store`). A
+/// thread holds at most one shard of a cache at a time. `len` and `dirty`
+/// count over all shards; a shard guard updates them before it unlocks.
+struct Sharded<T> {
+    shards: Vec<sync::Mutex<Live<T>>>,
+    len: AtomicUsize,
+    dirty: AtomicUsize,
+}
+
+/// One locked shard (derefs to its `Live`).
+struct Shard<'a, T> {
+    g: sync::MutexGuard<'a, Live<T>>,
+    of: &'a Sharded<T>,
+    /// `map.len()` and `dirty.len()` when it was locked.
+    at: (usize, usize),
+}
+
+impl<T> Sharded<T> {
+    fn new(site: Site) -> Self {
+        Sharded {
+            shards: (0..SHARDS).map(|_| lk(Live::default()).timed(site)).collect(),
+            len: AtomicUsize::new(0),
+            dirty: AtomicUsize::new(0),
+        }
+    }
+
+    /// The shard of `ino`, locked.
+    fn lock(&self, ino: u64) -> Shard<'_, T> {
+        self.lock_at((ino % SHARDS as u64) as usize)
+    }
+
+    fn lock_at(&self, i: usize) -> Shard<'_, T> {
+        let g = self.shards[i].lock();
+        let at = (g.map.len(), g.dirty.len());
+        Shard { g, of: self, at }
+    }
+
+    /// Cached entries, over all shards.
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Relaxed)
+    }
+
+    /// Dirty entries, over all shards.
+    fn dirty(&self) -> usize {
+        self.dirty.load(Ordering::Relaxed)
+    }
+
+    /// `Live::evict_clean` on each shard, one at a time.
+    fn evict_clean(&self) {
+        for i in 0..SHARDS {
+            self.lock_at(i).evict_clean();
+        }
+    }
+
+    /// `Live::requeue` on each shard, one at a time.
+    fn requeue(&self) {
+        for i in 0..SHARDS {
+            self.lock_at(i).requeue();
+        }
+    }
+}
+
+impl<T: Clone> Sharded<T> {
+    /// What a commit writes: `Live::take(true)` of each shard.
+    fn take_all(&self) -> Vec<(u64, u64, T)> {
+        let mut out = Vec::new();
+        for i in 0..SHARDS {
+            out.extend(self.lock_at(i).take(true));
+        }
+        out
+    }
+}
+
+impl<T> std::ops::Deref for Shard<'_, T> {
+    type Target = Live<T>;
+    fn deref(&self) -> &Live<T> {
+        &self.g
+    }
+}
+
+impl<T> std::ops::DerefMut for Shard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Live<T> {
+        &mut self.g
+    }
+}
+
+impl<T> Drop for Shard<'_, T> {
+    // Runs before the guard field unlocks, so the counts move under the lock.
+    fn drop(&mut self) {
+        fn moved(c: &AtomicUsize, old: usize, new: usize) {
+            if new > old {
+                c.fetch_add(new - old, Ordering::Relaxed);
+            } else if old > new {
+                c.fetch_sub(old - new, Ordering::Relaxed);
+            }
+        }
+        moved(&self.of.len, self.at.0, self.g.map.len());
+        moved(&self.of.dirty, self.at.1, self.g.dirty.len());
     }
 }
 
@@ -150,7 +275,7 @@ pub enum CommitFault {
 /// operation that came after the cut (#108).
 pub struct PreparedCommit<'a> {
     /// One commit at a time, from the cut to the root: roots stay in order.
-    _serial: MutexGuard<'a, ()>,
+    _serial: sync::MutexGuard<'a, ()>,
     store: &'a DictMetadataStore,
     /// The root is logged. Else (an error, or dropped unfinished) the inodes
     /// and directories it took are dirty again.
@@ -158,8 +283,9 @@ pub struct PreparedCommit<'a> {
     changes: u64,
     /// `wal_fail_seq` at the cut: failures up to it end with this root.
     fail_seq: u64,
-    inodes: Vec<(u64, InodeMeta)>,
-    dirs: Vec<(u64, DirList)>,
+    /// With the ticket of each take (see `Live::flushing`).
+    inodes: Vec<(u64, u64, InodeMeta)>,
+    dirs: Vec<(u64, u64, DirList)>,
     inode_map: InodeMap,
     inode_data: BTreeMap<u64, ObjectKey>,
     dir_data: BTreeMap<u64, ObjectKey>,
@@ -176,8 +302,8 @@ pub struct PreparedCommit<'a> {
 impl Drop for PreparedCommit<'_> {
     fn drop(&mut self) {
         if !self.done {
-            self.store.inode_live.lock().unwrap().requeue();
-            self.store.dir_live.lock().unwrap().requeue();
+            self.store.inode_live.requeue();
+            self.store.dir_live.requeue();
         }
     }
 }
@@ -188,56 +314,65 @@ fn check_name(name: &str) -> Result<(), MetaError> {
     }
     Ok(())
 }
-const S_IFDIR: u32 = 0o0040_000;
+const S_IFDIR: u32 = 0o0_040_000;
 
 /// Concrete `MetadataStore`; its nodes are in the chunk store (`StoreIo`).
 ///
 /// All operations are lock-safe and `Send + Sync`.
 ///
-/// Locking order (always acquire in this order to prevent deadlocks):
-///   1. `inode_map`
-///   2. `io`
-///   3. `inode_data`
-///   4. `dir_data`
-///   5. `manifest_data`
-///   6. `xattr_data`
-///   7. `refcounts`
+/// Locking order: see the module comment.
+/// A lock of the store internals (rank 6, see `chunk_store::sync`).
+fn lk<T>(v: T) -> sync::Mutex<T> {
+    sync::Mutex::new(Rank::Store, v)
+}
+
 /// A sync run before a root is logged (see `DictMetadataStore::set_pre_root_sync`).
 pub type PreRootSync = Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
 
 pub struct DictMetadataStore {
     /// Node store — used for all put_node/get_node calls.
     io: Arc<Mutex<StoreIo>>,
+    /// The chunk store of `io`: hot-path node reads and writes use it with
+    /// no lock held (`NodeReader`, a `NodeWriter` per call).
+    cs: Arc<ChunkStore>,
+    /// Hot-path node puts since the last commit sync, and the first put
+    /// error since then: the next commit syncs them, or fails with the error
+    /// (the `StoreIo` lock is not on the hot path).
+    unsynced_puts: AtomicU64,
+    put_error: sync::Mutex<Option<std::io::Error>>,
     /// Inode-number allocator + mapping table.
-    inode_map: Mutex<InodeMap>,
+    inode_map: sync::Mutex<InodeMap>,
     /// Maps inode number → current inode data `ObjectKey`.
-    inode_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    inode_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Maps directory inode number → entry list `ObjectKey` as of the last flush.
     /// A directory in `dir_live` can be newer than its digest here.
-    dir_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    dir_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Decoded entry lists of the directories in use, with a dirty flag.
     /// Changes go here; `commit()` writes the dirty ones and updates `dir_data`.
     /// Without this, each create re-wrote the whole entry list (O(n) per entry).
-    /// Lock order: `dir_live` before `io`.
-    dir_live: Mutex<Live<DirList>>,
+    /// Sharded by inode number. Lock order: a `dir_live` shard, `dir_data`.
+    /// No shard lock is held across a node read, a hash or a put.
+    dir_live: Sharded<DirList>,
     /// Inodes in use, with a dirty flag. `inode_data` (and `inode_map`) hold the
     /// digest as of the last flush; a dirty inode here is newer. `commit()`
-    /// writes the dirty ones. Lock order: `inode_map`, `inode_live`, `io`, `inode_data`.
-    inode_live: Mutex<Live<InodeMeta>>,
+    /// writes the dirty ones. Sharded by inode number. Lock order:
+    /// `inode_map`, an `inode_live` shard, `inode_data`. No shard lock is held
+    /// across a node read, a hash or a put.
+    inode_live: Sharded<InodeMeta>,
     /// Count of mutations so far, and its value at the last commit: the
     /// commit timer commits only when they differ.
     changes: AtomicU64,
     committed_changes: AtomicU64,
     /// Maps file inode number → current manifest `ObjectKey`.
-    manifest_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    manifest_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Maps inode number → xattr set `ObjectKey` (only for inodes with xattrs).
-    xattr_data: Mutex<BTreeMap<u64, ObjectKey>>,
+    xattr_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Called in `commit()` after the metadata objects are synced and before
     /// the root is logged: makes the file content (chunk store) durable.
-    pre_root_sync: Mutex<Option<PreRootSync>>,
+    pre_root_sync: sync::Mutex<Option<PreRootSync>>,
     /// Reference counts for content `ObjectKey`s.
     /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
-    refcounts: Mutex<BTreeMap<ObjectKey, u64>>,
+    refcounts: sync::Mutex<BTreeMap<ObjectKey, u64>>,
     /// Running total of logical bytes — sum of all inode `size` fields.
     ///
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
@@ -252,7 +387,7 @@ pub struct DictMetadataStore {
     /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
     ///
     /// Set via `set_wal()` after construction. When None, mutations are not logged.
-    wal: Mutex<Option<Arc<dyn WalStrategy>>>,
+    wal: sync::Mutex<Option<Arc<dyn WalStrategy>>>,
     /// Count of failed appends to the write log, and the count that the last
     /// root covers. While they differ, the log may have a torn record, and
     /// records after it cannot be read. Until the next commit (which starts
@@ -262,17 +397,19 @@ pub struct DictMetadataStore {
     wal_fail_seq: AtomicU64,
     wal_fail_cleared: AtomicU64,
     /// One commit at a time (see `PreparedCommit`). Lock order: the commit
-    /// gate of the file system, then this.
-    commit_lock: Mutex<()>,
+    /// gate of the file system, then this. The cut runs with this lock held
+    /// and takes the file system's own locks (cells, short maps), so it has
+    /// `Rank::Rename` (rank 2: below them, above the gate), not the store rank.
+    commit_lock: sync::Mutex<()>,
     /// Test fault: the next `finish_commit` stops with an error at this
     /// point (see `test_fail_next_commit_at`); 0: none.
     commit_fault: std::sync::atomic::AtomicU8,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
-    last_root: Mutex<Option<ObjectKey>>,
+    last_root: sync::Mutex<Option<ObjectKey>>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
-    snapshots_by_version: Mutex<HashMap<u64, SnapshotEntry>>,
+    snapshots_by_version: sync::Mutex<HashMap<u64, SnapshotEntry>>,
     /// Snapshot name → version mapping — O(1) name lookup (FIX-04).
-    snapshots_by_name: Mutex<HashMap<String, u64>>,
+    snapshots_by_name: sync::Mutex<HashMap<String, u64>>,
 }
 
 impl DictMetadataStore {
@@ -281,8 +418,9 @@ impl DictMetadataStore {
         let mut inode_map = InodeMap::new();
 
         // Build root inode + dir entries via put_node, then flush
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
         let (root_inode_digest, root_dir_digest) = {
-            let mut io_guard = io.lock().unwrap();
+            let mut io_guard = lock_stats::lock(&io, Site::Io);
             let mut fsa = &mut *io_guard;
             // Use current process uid/gid so the mounting user can write to root.
             // On non-unix, falls back to 0/0 (callers like `seed` update root inode
@@ -316,27 +454,30 @@ impl DictMetadataStore {
 
         DictMetadataStore {
             io,
-            inode_map: Mutex::new(inode_map),
-            inode_data: Mutex::new(inode_data),
-            dir_data: Mutex::new(dir_data),
-            dir_live: Mutex::new(Live::default()),
-            inode_live: Mutex::new(Live::default()),
+            cs,
+            unsynced_puts: AtomicU64::new(0),
+            put_error: lk(None),
+            inode_map: lk(inode_map).timed(Site::InodeMap),
+            inode_data: lk(inode_data).timed(Site::InodeData),
+            dir_data: lk(dir_data).timed(Site::DirData),
+            dir_live: Sharded::new(Site::DirLive),
+            inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: Mutex::new(BTreeMap::new()),
-            xattr_data: Mutex::new(BTreeMap::new()),
-            pre_root_sync: Mutex::new(None),
-            refcounts: Mutex::new(BTreeMap::new()),
+            manifest_data: lk(BTreeMap::new()).timed(Site::ManifestData),
+            xattr_data: lk(BTreeMap::new()).timed(Site::XattrData),
+            pre_root_sync: lk(None),
+            refcounts: lk(BTreeMap::new()).timed(Site::Refcounts),
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
-            wal: Mutex::new(None),
+            wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: Mutex::new(()),
+            commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
-            last_root: Mutex::new(None),
-            snapshots_by_version: Mutex::new(HashMap::new()),
-            snapshots_by_name: Mutex::new(HashMap::new()),
+            last_root: lk(None),
+            snapshots_by_version: lk(HashMap::new()),
+            snapshots_by_name: lk(HashMap::new()),
         }
     }
 }
@@ -363,7 +504,7 @@ impl DictMetadataStore {
     /// a block reaches saturation.
     pub fn increment_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock().unwrap();
+        let mut rc = self.refcounts.lock();
         let val = rc.entry(*digest).or_insert(0);
         if *val == u64::MAX {
             // Already saturated — no-op.
@@ -386,7 +527,7 @@ impl DictMetadataStore {
     /// no-op — immortal blocks are never freed.
     pub fn decrement_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock().unwrap();
+        let mut rc = self.refcounts.lock();
         if let Some(count) = rc.get_mut(digest) {
             // Saturated blocks are immortal — decrement is a no-op.
             if *count == u64::MAX {
@@ -402,7 +543,7 @@ impl DictMetadataStore {
 
     /// Return the current reference count for `digest`, or `0` if not tracked.
     pub fn get_refcount(&self, digest: &ObjectKey) -> u64 {
-        let rc = self.refcounts.lock().unwrap();
+        let rc = self.refcounts.lock();
         rc.get(digest).copied().unwrap_or(0)
     }
 
@@ -412,7 +553,7 @@ impl DictMetadataStore {
     /// A non-zero count here indicates the GC dead-letter queue has accumulated
     /// blocks; this is surfaced as a warning in `slicefs scrub`.
     pub fn saturated_refcount_count(&self) -> usize {
-        let rc = self.refcounts.lock().unwrap();
+        let rc = self.refcounts.lock();
         rc.values().filter(|&&v| v == u64::MAX).count()
     }
 
@@ -437,13 +578,13 @@ impl DictMetadataStore {
     ///
     /// Replaces any previously set WAL (the old one is dropped; not flushed).
     pub fn set_wal(&mut self, wal: Box<dyn WalStrategy>) {
-        *self.wal.lock().unwrap() = Some(Arc::from(wal));
+        *self.wal.lock() = Some(Arc::from(wal));
     }
 
     /// Set the sync that `commit()` runs before it logs a root (see
     /// `pre_root_sync`).
     pub fn set_pre_root_sync(&self, f: PreRootSync) {
-        *self.pre_root_sync.lock().unwrap() = Some(f);
+        *self.pre_root_sync.lock() = Some(f);
     }
 
     /// Flush all buffered WAL mutations to disk and call sync_all.
@@ -466,7 +607,7 @@ impl DictMetadataStore {
     ///
     /// Should be called before dropping the store (e.g., in `destroy()`).
     pub fn shutdown_wal(&self) -> Result<(), WalError> {
-        if let Some(ref w) = *self.wal.lock().unwrap() {
+        if let Some(w) = self.wal_handle() {
             w.shutdown()?;
         }
         Ok(())
@@ -494,12 +635,20 @@ impl DictMetadataStore {
         }
     }
 
+    /// Take the next new inode number and insert nothing, so a caller can
+    /// lock the number's stripe before the inode is linked (mkdir, D-08),
+    /// then create it with `create_directory_at`. A number reserved and not
+    /// used is skipped, as a failed create skips one; replay never sees it.
+    pub fn reserve_ino(&self) -> InodeId {
+        self.inode_map.lock().allocate_ino()
+    }
+
     /// Make the next new inode number at least `ino` (never lower). Replay
     /// of the write log calls this before each create: a request that failed
     /// after it took an inode number (for example EEXIST) logged nothing, so
     /// replay skips that number the same way the live mount did.
     pub fn advance_next_ino(&self, ino: InodeId) {
-        let mut m = self.inode_map.lock().unwrap();
+        let mut m = self.inode_map.lock();
         if m.next_ino() < ino {
             m.set_next_ino(ino);
         }
@@ -508,18 +657,52 @@ impl DictMetadataStore {
     /// Append a file system request to the write log (#20). Durable after the
     /// next `flush_wal` (fsync) or commit; a commit makes it part of a root.
     pub fn log_op(&self, bytes: Vec<u8>) {
-        self.log_wal_entry(&WalEntry::Op { bytes });
+        let lsn = self.log_append(bytes);
+        self.log_write_out(lsn);
+    }
+
+    /// First half of `log_op` (LOCK-04): put the record in the write log's
+    /// memory queue and return its LSN. Memory only (a copy and a short
+    /// queue lock), so a request calls it under the locks of its apply.
+    /// `None`: no write log, or the append failed (then fsync fails until
+    /// the next commit).
+    pub fn log_append(&self, bytes: Vec<u8>) -> Option<Lsn> {
+        let w = self.wal_handle()?;
+        match w.append(&WalEntry::Op { bytes }) {
+            Ok(lsn) => Some(lsn),
+            Err(e) => {
+                self.note_wal_failure(&e);
+                None
+            }
+        }
+    }
+
+    /// Second half of `log_op`: write the records up to `lsn` out (PerOp:
+    /// into the segment file and the kernel). A request calls it after it
+    /// released its apply locks and before it replies. Does nothing for
+    /// `None`.
+    pub fn log_write_out(&self, lsn: Option<Lsn>) {
+        let (Some(lsn), Some(w)) = (lsn, self.wal_handle()) else { return };
+        if let Err(e) = w.write_out(lsn) {
+            self.note_wal_failure(&e);
+        }
+    }
+
+    /// The in-memory state is already correct. A failed append or write-out
+    /// is reported by every later flush_wal (fsync) until the next commit
+    /// starts a new segment (#20).
+    fn note_wal_failure(&self, e: &WalError) {
+        eprintln!("write log append failed (fsync fails until the next commit): {e}");
+        self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
     }
 
     fn log_wal_entry(&self, entry: &WalEntry) {
-        if let Some(ref w) = *self.wal.lock().unwrap() {
-            // The in-memory state is already correct. A failed append is
-            // reported by every later flush_wal (fsync) until the next
-            // commit rotates the log (#20).
-            if let Err(e) = w.log_mutation(entry) {
-                eprintln!("write log append failed (fsync fails until the next commit): {e}");
-                self.wal_fail_seq.fetch_add(1, Ordering::SeqCst);
-            }
+        // A clone of the handle: the `wal` slot lock is not held while the
+        // log writes or syncs.
+        if let Some(w) = self.wal_handle()
+            && let Err(e) = w.log_mutation(entry)
+        {
+            self.note_wal_failure(&e);
         }
     }
 
@@ -535,125 +718,306 @@ impl DictMetadataStore {
         })
     }
 
+    /// The shard of directory `ino`, locked, with its entry list cached. A
+    /// cold list is read with no lock held and cached only if it is still
+    /// absent and its digest did not change meanwhile (see `cached_inode`).
+    fn cached_dir(&self, ino: InodeId) -> Result<Shard<'_, DirList>, MetaError> {
+        let mut cold: Option<(ObjectKey, DirList)> = None;
+        loop {
+            let mut live = self.dir_live.lock(ino);
+            if live.map.contains_key(&ino) {
+                return Ok(live);
+            }
+            let digest = self.dir_data.lock().get(&ino).copied()
+                .ok_or(MetaError::NotADirectory(ino))?;
+            if let Some((d, list)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, list);
+                return Ok(live);
+            }
+            drop(live);
+            let list = DirList::load(&mut self.reader(), &digest)?;
+            cold = Some((digest, list));
+        }
+    }
+
     /// Run `f` on the cached entry list of directory `ino` (read from the store
     /// on first use). `f` returns `(result, changed)`; a changed list is marked
-    /// dirty and written by the next flush.
+    /// dirty and written by the next flush. The flush and the eviction run
+    /// after the shard lock is released.
     fn with_dir<R>(
         &self,
         ino: InodeId,
         f: impl FnOnce(&mut DirList) -> Result<(R, bool), MetaError>,
     ) -> Result<R, MetaError> {
-        let mut live = self.dir_live.lock().unwrap();
-        if !live.map.contains_key(&ino) {
-            let digest = self.dir_data.lock().unwrap().get(&ino).copied()
-                .ok_or(MetaError::NotADirectory(ino))?;
-            let list = {
-                let mut io_guard = self.io.lock().unwrap();
-                DirList::load(&mut *io_guard, &digest)?
-            };
-            live.map.insert(ino, list);
-        }
-        let (r, changed) = f(live.map.get_mut(&ino).expect("inserted above"))?;
+        let mut live = self.cached_dir(ino)?;
+        let (r, changed) = f(live.map.get_mut(&ino).expect("cached_dir caches it"))?;
         if changed {
             live.mark_dirty(ino);
         }
-        let (flush, full) = (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > DIR_CACHE_MAX);
         drop(live);
+        let (flush, full) = (self.dir_live.dirty() >= DIRTY_FLUSH, self.dir_live.len() > DIR_CACHE_MAX);
         if flush || full {
             self.flush_dirs();
         }
         if full {
-            self.dir_live.lock().unwrap().evict_clean();
+            self.dir_live.evict_clean();
         }
         Ok(r)
     }
 
-    /// Current metadata of `ino`: the cached copy, or read from the store.
-    fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        if let Some(m) = self.inode_live.lock().unwrap().map.get(&ino) {
-            return Ok(m.clone());
+    /// The inode cache, locked, with `ino` in it. A cold inode is read with
+    /// no cache lock held; it is cached only if it is still absent and its
+    /// digest did not change meanwhile (else a delete or a newer flush in
+    /// between would be undone). Lock order: `inode_map`, `inode_live`,
+    /// `inode_data`.
+    fn cached_inode(&self, ino: InodeId) -> Result<Shard<'_, InodeMeta>, MetaError> {
+        let mut cold: Option<(ObjectKey, InodeMeta)> = None;
+        loop {
+            let mut live = self.inode_live.lock(ino);
+            if live.map.contains_key(&ino) {
+                return Ok(live);
+            }
+            let digest = self.inode_data.lock().get(&ino).copied()
+                .ok_or(MetaError::NotFound(ino))?;
+            if let Some((d, meta)) = cold.take()
+                && d == digest
+            {
+                live.map.insert(ino, meta);
+                return Ok(live);
+            }
+            drop(live);
+            let meta = load_inode(&mut self.reader(), &digest)?;
+            cold = Some((digest, meta));
         }
-        let digest = self.inode_data.lock().unwrap().get(&ino).copied()
-            .ok_or(MetaError::NotFound(ino))?;
-        let meta = {
-            let mut io_guard = self.io.lock().unwrap();
-            load_inode(&mut *io_guard, &digest)?
-        };
-        let full = {
-            let mut live = self.inode_live.lock().unwrap();
-            // A concurrent update may have cached a newer copy meanwhile; keep it.
-            live.map.entry(ino).or_insert_with(|| meta.clone());
-            live.map.len() > INODE_CACHE_MAX
-        };
-        if full {
-            self.flush_inodes();
-            self.inode_live.lock().unwrap().evict_clean();
-        }
-        Ok(meta)
     }
 
-    /// Cache `meta` as the new (dirty) state of its inode.
-    fn store_meta(&self, meta: &InodeMeta) {
-        let (flush, full) = {
-            let mut live = self.inode_live.lock().unwrap();
-            live.map.insert(meta.ino, meta.clone());
-            live.mark_dirty(meta.ino);
-            (live.dirty.len() >= DIRTY_FLUSH, live.map.len() > INODE_CACHE_MAX)
-        };
+    /// After a change of the inode cache, with no cache lock held: write the
+    /// dirty entries (`flush`), and drop the clean ones when it is `full`.
+    fn trim_inodes(&self, flush: bool, full: bool) {
         if flush || full {
             self.flush_inodes();
         }
         if full {
-            self.inode_live.lock().unwrap().evict_clean();
+            self.inode_live.evict_clean();
         }
+    }
+
+    /// Current metadata of `ino`: the cached copy, or read from the store.
+    fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
+        let live = self.cached_inode(ino)?;
+        let meta = live.map[&ino].clone();
+        drop(live);
+        self.trim_inodes(false, self.inode_live.len() > INODE_CACHE_MAX);
+        Ok(meta)
+    }
+
+    /// Change inode `ino` in one hold of its cache lock (D-05): `f` gets the
+    /// current metadata, and what it leaves is the new (dirty) state. Two
+    /// threads that change one inode never lose a change. `logical_bytes`
+    /// follows the size change in the same hold. `f` must not call the store
+    /// or take a lock. `NotFound` if there is no such inode.
+    pub fn modify_inode<R>(&self, ino: InodeId, f: impl FnOnce(&mut InodeMeta) -> R) -> Result<R, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        let mut live = self.cached_inode(ino)?;
+        let m = live.map.get_mut(&ino).expect("cached_inode caches it");
+        let old_size = m.size;
+        let r = f(m);
+        debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
+        let new_size = m.size;
+        live.mark_dirty(ino);
+        self.add_size(old_size, new_size);
+        drop(live);
+        self.trim_inodes(self.inode_live.dirty() >= DIRTY_FLUSH, self.inode_live.len() > INODE_CACHE_MAX);
+        Ok(r)
+    }
+
+    /// `logical_bytes` after an inode size went from `old` to `new`
+    /// (saturating: never below 0).
+    fn add_size(&self, old: u64, new: u64) {
+        if new > old {
+            self.logical_bytes.fetch_add(new - old, Ordering::Relaxed);
+        } else if old > new {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(old - new))
+            }).ok();
+        }
+    }
+
+    /// Cache `meta` as a new dirty inode: number `at` (`AlreadyExists` if
+    /// it is taken; new numbers are above it afterwards), or a new number.
+    /// The number is taken and the inode cached under `inode_map`, so no
+    /// number is given twice. A new inode is only in the cache until a flush.
+    fn insert_inode(&self, at: Option<InodeId>, meta: &InodeMeta) -> Result<InodeId, MetaError> {
+        let mut map = self.inode_map.lock();
+        let ino = at.unwrap_or_else(|| map.allocate_ino());
+        let mut live = self.inode_live.lock(ino);
+        if at.is_some() {
+            if map.get(ino).is_some() || live.map.contains_key(&ino)
+                || self.inode_data.lock().contains_key(&ino)
+            {
+                return Err(MetaError::AlreadyExists(ino));
+            }
+            if map.next_ino() <= ino {
+                map.set_next_ino(ino.saturating_add(1));
+            }
+        }
+        let mut m = meta.clone();
+        m.ino = ino;
+        let size = m.size;
+        live.map.insert(ino, m);
+        live.mark_dirty(ino);
+        drop(live);
+        drop(map);
+        self.add_size(0, size);
+        self.inode_count.fetch_add(1, Ordering::Relaxed);
+        self.trim_inodes(self.inode_live.dirty() >= DIRTY_FLUSH, self.inode_live.len() > INODE_CACHE_MAX);
+        Ok(ino)
+    }
+
+    /// `create_directory` with number `at`, or a new number.
+    fn make_directory(
+        &self,
+        parent_ino: InodeId,
+        name: &str,
+        at: Option<InodeId>,
+        meta: &InodeMeta,
+    ) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        // Validate parent exists and is a directory
+        check_name(name)?;
+        let parent_meta = self.get_inode(parent_ino)?;
+        if parent_meta.mode & S_IFMT != S_IFDIR {
+            return Err(MetaError::NotADirectory(parent_ino));
+        }
+        if !self.is_dir(parent_ino) {
+            return Err(MetaError::NotADirectory(parent_ino));
+        }
+        let mut dir_meta = meta.clone();
+        // Ensure mode has directory type bit
+        if dir_meta.mode & S_IFMT != S_IFDIR {
+            dir_meta.mode |= S_IFDIR;
+        }
+        // Take the number first; `inode_map` is released before the parent
+        // directory is read or changed (it may come from disk).
+        let ino = self.insert_inode(at, &dir_meta)?;
+        // Then the name: if it already exists, the new inode goes again.
+        if let Err(e) = self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true))) {
+            let _ = self.delete_inode(ino);
+            return Err(e);
+        }
+        {
+            let mut live = self.dir_live.lock(ino);
+            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
+            live.mark_dirty(ino);
+        }
+        // The parent gains a link (the ".." of the new directory).
+        self.modify_inode(parent_ino, |m| m.nlinks += 1)?;
+        Ok(ino)
     }
 
     /// Write every dirty cached inode; record its digest in `inode_data` and `inode_map`.
     fn flush_inodes(&self) {
-        let mut inode_map = self.inode_map.lock().unwrap();
-        let mut live = self.inode_live.lock().unwrap();
-        if live.dirty.is_empty() {
-            return;
-        }
-        let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = &mut *io_guard;
-        let mut inode_data = self.inode_data.lock().unwrap();
-        let live = &mut *live;
-        for ino in live.dirty.drain() {
-            if let Some(meta) = live.map.get(&ino) {
-                let digest = intern_inode(&mut fsa, meta);
-                inode_data.insert(ino, digest);
-                inode_map.insert(ino, digest);
+        self.flush_inodes_between(|| ());
+    }
+
+    /// `flush_inodes`, shard by shard: take the dirty entries (they go in
+    /// flight), write them with no shard lock held, then install each digest
+    /// only if the entry still has the ticket of this take (it was not
+    /// changed or deleted meanwhile; else a late install would bring back
+    /// an older or a deleted inode). `between` runs once, after the first
+    /// write and before its install (a test hook point).
+    fn flush_inodes_between(&self, between: impl FnOnce()) {
+        let mut between = Some(between);
+        for i in 0..SHARDS {
+            let taken = self.inode_live.lock_at(i).take(false);
+            if taken.is_empty() {
+                continue;
+            }
+            let mut w = self.writer();
+            let written: Vec<(u64, u64, ObjectKey)> =
+                taken.into_iter().map(|(ino, t, meta)| (ino, t, intern_inode(&mut w, &meta))).collect();
+            self.kept(w);
+            if let Some(f) = between.take() {
+                f();
+            }
+            let mut inode_map = self.inode_map.lock();
+            let mut live = self.inode_live.lock_at(i);
+            let mut inode_data = self.inode_data.lock();
+            for (ino, t, d) in written {
+                if live.settle(ino, t) {
+                    inode_data.insert(ino, d);
+                    inode_map.insert(ino, d);
+                }
             }
         }
     }
 
     /// True if `ino` is a directory known to the store.
     fn is_dir(&self, ino: InodeId) -> bool {
-        self.dir_live.lock().unwrap().map.contains_key(&ino)
-            || self.dir_data.lock().unwrap().contains_key(&ino)
+        self.dir_live.lock(ino).map.contains_key(&ino)
+            || self.dir_data.lock().contains_key(&ino)
     }
 
-    /// Write every dirty cached directory and record its digest in `dir_data`.
+    /// Write every dirty cached directory and record its digest in
+    /// `dir_data`; shard by shard, as `flush_inodes_between` does.
     fn flush_dirs(&self) {
-        let mut live = self.dir_live.lock().unwrap();
-        if live.dirty.is_empty() {
-            return;
-        }
-        let mut io_guard = self.io.lock().unwrap();
-        let mut fsa = &mut *io_guard;
-        let mut dir_data = self.dir_data.lock().unwrap();
-        let live = &mut *live;
-        for ino in live.dirty.drain() {
-            if let Some(list) = live.map.get(&ino) {
-                dir_data.insert(ino, list.intern(&mut fsa));
+        for i in 0..SHARDS {
+            let taken = self.dir_live.lock_at(i).take(false);
+            if taken.is_empty() {
+                continue;
+            }
+            let mut w = self.writer();
+            let written: Vec<(u64, u64, ObjectKey)> =
+                taken.into_iter().map(|(ino, t, list)| (ino, t, list.intern(&mut w))).collect();
+            self.kept(w);
+            let mut live = self.dir_live.lock_at(i);
+            let mut dir_data = self.dir_data.lock();
+            for (ino, t, d) in written {
+                if live.settle(ino, t) {
+                    dir_data.insert(ino, d);
+                }
             }
         }
     }
 
+    /// A node writer for one hot-path call (no lock held); give it back to
+    /// `kept` after the puts.
+    fn writer(&self) -> NodeWriter {
+        NodeWriter::new(Arc::clone(&self.cs))
+    }
+
+    /// Node reads with no lock held.
+    fn reader(&self) -> NodeReader {
+        NodeReader(Arc::clone(&self.cs))
+    }
+
+    /// Count the puts of `w` for the next commit sync, and keep its first
+    /// put error (the next commit returns it).
+    fn kept(&self, mut w: NodeWriter) {
+        self.unsynced_puts.fetch_add(w.puts(), Ordering::Relaxed);
+        if let Err(e) = w.result() {
+            let mut k = self.put_error.lock();
+            if k.is_none() {
+                *k = Some(e);
+            }
+        }
+    }
+
+    /// For a commit that syncs the chunk store next: the put error kept
+    /// since the last commit, else the hot-path puts count as synced.
+    fn begin_put_sync(&self) -> std::io::Result<()> {
+        if let Some(e) = self.put_error.lock().take() {
+            return Err(e);
+        }
+        self.unsynced_puts.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// The write log, if any (a clone: no lock is held while it works).
     fn wal_handle(&self) -> Option<Arc<dyn WalStrategy>> {
-        self.wal.lock().unwrap().as_ref().map(Arc::clone)
+        self.wal.lock().as_ref().map(Arc::clone)
     }
 
     /// Make the next `finish_commit` stop with an error at `at`, as a crash
@@ -673,7 +1037,7 @@ impl DictMetadataStore {
     /// Wait until no commit is between `begin_commit` and the end of
     /// `finish_commit`.
     pub fn wait_for_commit(&self) {
-        drop(self.commit_lock.lock().unwrap());
+        drop(self.commit_lock.lock());
     }
 
     /// First half of a commit (#108), run while no request changes the store
@@ -683,7 +1047,7 @@ impl DictMetadataStore {
     /// generation. Fast: no node is written and nothing is synced. Waits for
     /// a commit still in `finish_commit`.
     pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
-        let serial = self.commit_lock.lock().unwrap();
+        let serial = self.commit_lock.lock();
         let wal = self.wal_handle();
         // The log first: if it cannot cut, nothing has changed.
         let cut = match &wal {
@@ -697,14 +1061,14 @@ impl DictMetadataStore {
         // this commit holds their requests. Later ones are not cleared by it.
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
-        let dirs = self.dir_live.lock().unwrap().take_dirty();
-        let inode_map = self.inode_map.lock().unwrap().clone();
-        let inodes = self.inode_live.lock().unwrap().take_dirty();
-        let inode_data = self.inode_data.lock().unwrap().clone();
-        let dir_data = self.dir_data.lock().unwrap().clone();
-        let manifest_data = self.manifest_data.lock().unwrap().clone();
-        let xattr_data = self.xattr_data.lock().unwrap().clone();
-        let refcounts = self.refcounts.lock().unwrap().clone();
+        let dirs = self.dir_live.take_all();
+        let inode_map = self.inode_map.lock().clone();
+        let inodes = self.inode_live.take_all();
+        let inode_data = self.inode_data.lock().clone();
+        let dir_data = self.dir_data.lock().clone();
+        let manifest_data = self.manifest_data.lock().clone();
+        let xattr_data = self.xattr_data.lock().clone();
+        let refcounts = self.refcounts.lock().clone();
         Ok(PreparedCommit {
             _serial: serial,
             store: self,
@@ -739,21 +1103,21 @@ impl DictMetadataStore {
     }
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
-        let cs = Arc::clone(self.io.lock().unwrap().store());
-        let mut w = crate::store_io::NodeWriter::new(Arc::clone(&cs));
+        let cs = Arc::clone(&self.cs);
+        let mut w = NodeWriter::new(Arc::clone(&cs));
         // Write the changed directories and inodes, so the digest maps are current.
         let mut new_inodes = Vec::with_capacity(p.inodes.len());
-        for (ino, meta) in &p.inodes {
+        for (ino, t, meta) in &p.inodes {
             let d = intern_inode(&mut w, meta);
             p.inode_data.insert(*ino, d);
             p.inode_map.insert(*ino, d);
-            new_inodes.push((*ino, d));
+            new_inodes.push((*ino, *t, d));
         }
         let mut new_dirs = Vec::with_capacity(p.dirs.len());
-        for (ino, list) in &p.dirs {
+        for (ino, t, list) in &p.dirs {
             let d = list.intern(&mut w);
             p.dir_data.insert(*ino, d);
-            new_dirs.push((*ino, d));
+            new_dirs.push((*ino, *t, d));
         }
 
         // Serialize the state into a root record (layout: `root_rec`):
@@ -789,35 +1153,34 @@ impl DictMetadataStore {
         // The nodes are stored: the caches may forget the entries that were
         // not changed again since the cut.
         {
-            let mut inode_map = self.inode_map.lock().unwrap();
-            let mut live = self.inode_live.lock().unwrap();
-            let mut inode_data = self.inode_data.lock().unwrap();
-            for (ino, d) in new_inodes {
-                if live.flushing.remove(&ino) {
-                    inode_data.insert(ino, d);
+            let mut inode_map = self.inode_map.lock();
+            for (ino, t, d) in new_inodes {
+                let mut live = self.inode_live.lock(ino);
+                if live.settle(ino, t) {
+                    self.inode_data.lock().insert(ino, d);
                     inode_map.insert(ino, d);
                 }
             }
         }
-        {
-            let mut live = self.dir_live.lock().unwrap();
-            let mut dir_data = self.dir_data.lock().unwrap();
-            for (ino, d) in new_dirs {
-                if live.flushing.remove(&ino) {
-                    dir_data.insert(ino, d);
-                }
+        for (ino, t, d) in new_dirs {
+            let mut live = self.dir_live.lock(ino);
+            if live.settle(ino, t) {
+                self.dir_data.lock().insert(ino, d);
             }
         }
 
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20). A put error of
-        // a request since the last commit fails the commit too.
-        self.io.lock().unwrap().begin_commit_sync()
+        // a request since the last commit fails the commit too: hot-path puts
+        // (kept in the store) and puts of other `StoreIo` users.
+        self.begin_put_sync()
+            .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
+        lock_stats::lock(&self.io, Site::Io).begin_commit_sync()
             .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         // The file content that the root refers to must be durable too.
-        let pre = self.pre_root_sync.lock().unwrap().clone();
+        let pre = self.pre_root_sync.lock().clone();
         if let Some(f) = pre {
             f().map_err(|e| MetaError::Corrupted(format!("commit: content sync failed: {e}")))?;
         }
@@ -849,7 +1212,7 @@ impl DictMetadataStore {
         }
 
         // Update last_root so background GC can use it
-        *self.last_root.lock().unwrap() = Some(root_digest);
+        *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
         Ok(root_digest)
     }
@@ -860,7 +1223,7 @@ impl DictMetadataStore {
     }
 
     pub fn current_root(&self) -> Option<ObjectKey> {
-        *self.last_root.lock().unwrap()
+        *self.last_root.lock()
     }
 
     /// Load a snapshot list after store reconstruction from segment replay.
@@ -868,8 +1231,8 @@ impl DictMetadataStore {
     /// Called by `mount.rs::load_store` after `load_store_from_segments` returns
     /// the snapshot list. Replaces whatever is in memory (typically empty).
     pub fn set_snapshots(&mut self, snapshots: Vec<SnapshotEntry>) {
-        let mut by_ver = self.snapshots_by_version.lock().unwrap();
-        let mut by_name = self.snapshots_by_name.lock().unwrap();
+        let mut by_ver = self.snapshots_by_version.lock();
+        let mut by_name = self.snapshots_by_name.lock();
         *by_ver = snapshots.iter().map(|s| (s.version, s.clone())).collect();
         *by_name = snapshots
             .iter()
@@ -889,7 +1252,7 @@ impl DictMetadataStore {
 
         // Compute next version — O(1) from HashMap keys.
         let version = {
-            let by_ver = self.snapshots_by_version.lock().unwrap();
+            let by_ver = self.snapshots_by_version.lock();
             by_ver.keys().max().copied().unwrap_or(0) + 1
         };
 
@@ -911,11 +1274,11 @@ impl DictMetadataStore {
 
         // Insert into both indexes.
         {
-            let mut by_ver = self.snapshots_by_version.lock().unwrap();
+            let mut by_ver = self.snapshots_by_version.lock();
             by_ver.insert(entry.version, entry.clone());
         }
         if let Some(ref n) = entry.name {
-            let mut by_name = self.snapshots_by_name.lock().unwrap();
+            let mut by_name = self.snapshots_by_name.lock();
             by_name.insert(n.clone(), entry.version);
         }
 
@@ -924,7 +1287,7 @@ impl DictMetadataStore {
 
     /// Return all snapshots sorted by version ascending.
     pub fn list_snapshots(&self) -> Vec<SnapshotEntry> {
-        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let by_ver = self.snapshots_by_version.lock();
         let mut snaps: Vec<SnapshotEntry> = by_ver.values().cloned().collect();
         snaps.sort_by_key(|s| s.version);
         snaps
@@ -938,12 +1301,12 @@ impl DictMetadataStore {
     /// Returns the matching entry, or `None`.
     pub fn find_snapshot(&self, reference: &str) -> Option<SnapshotEntry> {
         if let Ok(version) = reference.parse::<u64>() {
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version.lock().get(&version).cloned()
         } else {
-            let by_name = self.snapshots_by_name.lock().unwrap();
+            let by_name = self.snapshots_by_name.lock();
             let version = *by_name.get(reference)?;
             drop(by_name);
-            self.snapshots_by_version.lock().unwrap().get(&version).cloned()
+            self.snapshots_by_version.lock().get(&version).cloned()
         }
     }
 
@@ -952,7 +1315,7 @@ impl DictMetadataStore {
     /// Includes every snapshot root plus the current committed root (if any).
     /// Used by both background GC and offline `slicefs gc`.
     pub fn snapshot_roots(&self) -> Vec<ObjectKey> {
-        let by_ver = self.snapshots_by_version.lock().unwrap();
+        let by_ver = self.snapshots_by_version.lock();
         let mut roots: Vec<ObjectKey> = by_ver.values().map(|s| s.root).collect();
         drop(by_ver);
         if let Some(root) = self.current_root() {
@@ -970,34 +1333,83 @@ impl DictMetadataStore {
     ///
     /// Also updates `last_root` so `current_root()` reflects the change immediately.
     pub fn commit_root(&self, root: ObjectKey) -> Result<(), MetaError> {
-        let _serial = self.commit_lock.lock().unwrap();
-        *self.last_root.lock().unwrap() = Some(root);
+        let _serial = self.commit_lock.lock();
+        *self.last_root.lock() = Some(root);
         self.log_wal_entry(&WalEntry::RootUpdate { root });
         self.rotate_wal(root);
         Ok(())
     }
 }
 
+impl DictMetadataStore {
+    /// Store the manifest node of `blocks` and return its digest, with no
+    /// lock held (hash and put; the Phase B of a rebase step, D-02). A put
+    /// error is kept for the next commit, as for every node write.
+    pub fn prepare_manifest(&self, blocks: &[ObjectKey]) -> Result<ObjectKey, MetaError> {
+        let mut w = self.writer();
+        let digest = intern_manifest(&mut w, blocks);
+        self.kept(w);
+        Ok(digest)
+    }
+
+    /// The manifest digest of `ino`, if it has one: memory only, under the
+    /// short manifest map lock.
+    pub fn manifest_digest(&self, ino: InodeId) -> Option<ObjectKey> {
+        self.manifest_data.lock().get(&ino).copied()
+    }
+
+    /// The entries of the manifest node `digest` (a node read, no lock of
+    /// this store held across it).
+    pub fn manifest_entries(&self, digest: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
+        load_manifest(&mut self.reader(), digest)
+    }
+
+    /// Make `digest` (from `prepare_manifest`) the manifest of `ino`: memory
+    /// only, under the short manifest map lock.
+    pub fn set_manifest_digest(&self, ino: InodeId, digest: ObjectKey) -> Result<(), MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.manifest_data.lock().insert(ino, digest);
+        Ok(())
+    }
+
+    /// Change the xattr set of `ino` with `f`: the set is read and stored
+    /// with no lock held; the new digest goes in only if the old one is
+    /// still current (else `f` runs again on the newer set), so a change
+    /// that ran meanwhile is not lost.
+    fn change_xattrs(
+        &self,
+        ino: InodeId,
+        mut f: impl FnMut(&mut Vec<(String, Vec<u8>)>) -> Result<(), MetaError>,
+    ) -> Result<(), MetaError> {
+        loop {
+            let old = self.xattr_data.lock().get(&ino).copied();
+            let mut xattrs = match old {
+                Some(d) => load_xattrs(&mut self.reader(), &d)?,
+                None => vec![],
+            };
+            f(&mut xattrs)?;
+            let mut w = self.writer();
+            let new = intern_xattrs(&mut w, &xattrs);
+            self.kept(w);
+            let mut map = self.xattr_data.lock();
+            if map.get(&ino).copied() == old {
+                map.insert(ino, new);
+                return Ok(());
+            }
+        }
+    }
+}
+
 impl MetadataStore for DictMetadataStore {
     fn create_inode(&self, meta: &InodeMeta) -> Result<InodeId, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut inode_map = self.inode_map.lock().unwrap();
-        let ino = inode_map.allocate_ino();
-        let mut full_meta = meta.clone();
-        full_meta.ino = ino;
-        drop(inode_map);
         // The inode is written at the next flush; until then only the cache has it.
-        self.store_meta(&full_meta);
+        self.insert_inode(None, meta)
+    }
 
-        // Track logical bytes: add this inode's size to running total.
-        if full_meta.size > 0 {
-            self.logical_bytes.fetch_add(full_meta.size, Ordering::Relaxed);
-        }
-
-        // Track inode count.
-        self.inode_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(ino)
+    fn create_inode_at(&self, ino: InodeId, meta: &InodeMeta) -> Result<InodeId, MetaError> {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.insert_inode(Some(ino), meta)
     }
 
     fn get_inode(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
@@ -1005,24 +1417,9 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn update_inode(&self, meta: &InodeMeta) -> Result<(), MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        let ino = meta.ino;
-
-        // Capture old size before replacing the digest, so we can adjust logical_bytes.
-        let old_size = self.load_meta(ino)?.size;
-        self.store_meta(meta);
-
-        // Adjust logical_bytes by the size delta (saturating arithmetic prevents underflow).
-        let new_size = meta.size;
-        if new_size > old_size {
-            self.logical_bytes.fetch_add(new_size - old_size, Ordering::Relaxed);
-        } else if old_size > new_size {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(old_size - new_size))
-            }).ok();
-        }
-
-        Ok(())
+        // The whole value is replaced (see `modify_inode` for a change of a
+        // few fields that must not lose a concurrent one).
+        self.modify_inode(meta.ino, |m| *m = meta.clone())
     }
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
@@ -1030,25 +1427,34 @@ impl MetadataStore for DictMetadataStore {
         // Capture size before removing so we can decrement logical_bytes.
         let size = self.load_meta(ino)?.size;
 
-        self.inode_live.lock().unwrap().remove(ino);
-        self.inode_data.lock().unwrap().remove(&ino);
-        self.inode_map.lock().unwrap().remove(ino);
+        // The cache entry and the digest go in one hold of the cache lock:
+        // a cold load that runs meanwhile then cannot cache the inode again.
+        {
+            let mut inode_map = self.inode_map.lock();
+            let mut live = self.inode_live.lock(ino);
+            live.remove(ino);
+            self.inode_data.lock().remove(&ino);
+            inode_map.remove(ino);
+        }
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
-        self.manifest_data.lock().unwrap().remove(&ino);
-        self.xattr_data.lock().unwrap().remove(&ino);
-        self.dir_live.lock().unwrap().remove(ino);
-        self.dir_data.lock().unwrap().remove(&ino);
+        self.manifest_data.lock().remove(&ino);
+        self.xattr_data.lock().remove(&ino);
+        {
+            let mut live = self.dir_live.lock(ino);
+            live.remove(ino);
+            self.dir_data.lock().remove(&ino);
+        }
 
         // Decrement logical_bytes by the deleted inode's size.
         if size > 0 {
-            self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                 Some(cur.saturating_sub(size))
             }).ok();
         }
 
         // Decrement inode count (saturating to avoid underflow).
-        self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+        self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
 
@@ -1061,47 +1467,17 @@ impl MetadataStore for DictMetadataStore {
         name: &str,
         meta: &InodeMeta,
     ) -> Result<InodeId, MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        // Validate parent exists and is a directory
-        check_name(name)?;
-        let parent_meta = self.get_inode(parent_ino)?;
-        if parent_meta.mode & S_IFMT != S_IFDIR {
-            return Err(MetaError::NotADirectory(parent_ino));
-        }
-        if !self.is_dir(parent_ino) {
-            return Err(MetaError::NotADirectory(parent_ino));
-        }
+        self.make_directory(parent_ino, name, None, meta)
+    }
 
-        // Allocate new inode number
-        let mut inode_map = self.inode_map.lock().unwrap();
-        let ino = inode_map.allocate_ino();
-        let mut dir_meta = meta.clone();
-        dir_meta.ino = ino;
-        // Ensure mode has directory type bit
-        if dir_meta.mode & S_IFMT != S_IFDIR {
-            dir_meta.mode |= S_IFDIR;
-        }
-
-        // Add the name to the parent first: if it already exists, nothing changed.
-        self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))?;
-
-        drop(inode_map);
-        self.store_meta(&dir_meta);
-        {
-            let mut live = self.dir_live.lock().unwrap();
-            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
-            live.mark_dirty(ino);
-        }
-
-        // Increment parent nlinks (for the .. backlink from new subdir)
-        let mut parent_meta = self.get_inode(parent_ino)?;
-        parent_meta.nlinks += 1;
-        self.update_inode(&parent_meta)?;
-
-        // Track inode count for the new directory inode.
-        self.inode_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(ino)
+    fn create_directory_at(
+        &self,
+        parent_ino: InodeId,
+        name: &str,
+        ino: InodeId,
+        meta: &InodeMeta,
+    ) -> Result<InodeId, MetaError> {
+        self.make_directory(parent_ino, name, Some(ino), meta)
     }
 
     fn list_directory(&self, ino: InodeId) -> Result<Vec<DirEntry>, MetaError> {
@@ -1126,107 +1502,48 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        let digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = &mut *io_guard;
-            intern_manifest(&mut fsa, blocks)
-        };
-        self.manifest_data.lock().unwrap().insert(ino, digest);
-        Ok(())
+        let digest = self.prepare_manifest(blocks)?;
+        self.set_manifest_digest(ino, digest)
     }
 
     fn get_manifest(&self, ino: InodeId) -> Result<Vec<ObjectKey>, MetaError> {
-        let manifest_data = self.manifest_data.lock().unwrap();
+        let manifest_data = self.manifest_data.lock();
         let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
         drop(manifest_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        load_manifest(&mut *io_guard, &digest)
+        load_manifest(&mut self.reader(), &digest)
     }
 
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        // Load existing xattrs for this inode (or empty vec if none yet)
-        let mut xattrs = {
-            let xattr_data = self.xattr_data.lock().unwrap();
-            if let Some(digest) = xattr_data.get(&ino).copied() {
-                drop(xattr_data);
-                let mut io_guard = self.io.lock().unwrap();
-                load_xattrs(&mut *io_guard, &digest)?
-            } else {
-                vec![]
-            }
-        };
-
-        set_xattr_entry(&mut xattrs, name, value);
-
-        let new_digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = &mut *io_guard;
-            intern_xattrs(&mut fsa, &xattrs)
-        };
-
-        self.xattr_data.lock().unwrap().insert(ino, new_digest);
-        Ok(())
+        self.change_xattrs(ino, |xattrs| {
+            set_xattr_entry(xattrs, name, value);
+            Ok(())
+        })
     }
 
     fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
-        let xattr_data = self.xattr_data.lock().unwrap();
-        let digest = match xattr_data.get(&ino).copied() {
-            Some(d) => d,
-            None => return Err(MetaError::NotFound(ino)),
-        };
-        drop(xattr_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
-        drop(io_guard);
-
+        let digest = self.xattr_data.lock().get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
+        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
         get_xattr_entry(&xattrs, name).ok_or(MetaError::NotFound(ino))
     }
 
     fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
-        let xattr_data = self.xattr_data.lock().unwrap();
-        let digest = match xattr_data.get(&ino).copied() {
+        let digest = match self.xattr_data.lock().get(&ino).copied() {
             Some(d) => d,
             None => return Ok(vec![]),
         };
-        drop(xattr_data);
-
-        let mut io_guard = self.io.lock().unwrap();
-        let xattrs = load_xattrs(&mut *io_guard, &digest)?;
-        drop(io_guard);
-
+        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
         Ok(list_xattr_names(&xattrs))
     }
 
     fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let xattr_data = self.xattr_data.lock().unwrap();
-        let digest = match xattr_data.get(&ino).copied() {
-            Some(d) => d,
-            None => return Err(MetaError::NotFound(ino)),
-        };
-        drop(xattr_data);
-
-        let mut xattrs = {
-            let mut io_guard = self.io.lock().unwrap();
-            load_xattrs(&mut *io_guard, &digest)?
-        };
-
-        if !remove_xattr_entry(&mut xattrs, name) {
+        if !self.xattr_data.lock().contains_key(&ino) {
             return Err(MetaError::NotFound(ino));
         }
-
-        let new_digest = {
-            let mut io_guard = self.io.lock().unwrap();
-            let mut fsa = &mut *io_guard;
-            intern_xattrs(&mut fsa, &xattrs)
-        };
-
-        self.xattr_data.lock().unwrap().insert(ino, new_digest);
-        Ok(())
+        self.change_xattrs(ino, |xattrs| {
+            if remove_xattr_entry(xattrs, name) { Ok(()) } else { Err(MetaError::NotFound(ino)) }
+        })
     }
 
     fn root_ino(&self) -> InodeId {
@@ -1264,25 +1581,156 @@ pub(crate) fn referenced(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
 ) -> Result<(Vec<ObjectKey>, Vec<ObjectKey>), MetaError> {
-    let bytes = (io).get_node(root)
-        .map_err(|e| crate::store_io::node_err("root node", root, e))?;
-    check_root_len(bytes.len())?;
+    let (mut nodes, mut content) = (Vec::new(), Vec::new());
+    for_each_referenced(io, root, &mut |r, k| {
+        match r {
+            Ref::Node => nodes.push(k),
+            Ref::Content => content.push(k),
+        }
+        Ok(())
+    })?;
+    Ok((nodes, content))
+}
+
+/// What a key of [`for_each_referenced`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Ref {
+    /// A metadata node (see [`referenced_roots`]).
+    Node,
+    /// A file content key (see [`content_keys`]).
+    Content,
+}
+
+/// Call `f` with each key that the root record `root` refers to, without a
+/// list of them (the GC mark, #207). A key can come more than once. The
+/// map and manifest nodes are read in windows of [`WALK_WINDOW`] bytes of
+/// whole entries, never whole: RAM does not grow with the entry count.
+pub(crate) fn for_each_referenced(
+    io: &mut impl crate::store_io::NodeRead,
+    root: &ObjectKey,
+    f: &mut dyn FnMut(Ref, ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    let cs = io.chunk_store();
+    let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let (inodes, dirs, manifests, xattrs) = (
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
         at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
     );
-    let mut out = vec![*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs,
-                       at(root_rec::REFCOUNTS)];
+    for k in [*root, at(root_rec::INODE_MAP), inodes, dirs, manifests, xattrs, at(root_rec::REFCOUNTS)] {
+        f(Ref::Node, k)?;
+    }
     for map in [inodes, dirs, xattrs] {
-        out.extend(load_u64_digest_map(io, &map)?.into_values());
+        for_each_map_value(cs, &map, &mut |k| f(Ref::Node, k))?;
     }
-    let mut content = Vec::new();
-    for manifest in load_u64_digest_map(io, &manifests)?.into_values() {
-        out.push(manifest);
-        content.extend(load_manifest(io, &manifest)?);
+    for_each_map_value(cs, &manifests, &mut |manifest| {
+        f(Ref::Node, manifest)?;
+        for_each_manifest_key(cs, &manifest, &mut |k| f(Ref::Content, k))
+    })
+}
+
+/// About how many keys [`for_each_referenced`] gives for `root`, from the
+/// sizes of its four maps (no map is read): the 7 nodes of the root, one
+/// key per map entry, and one content key per manifest (a file with more
+/// extents gives more). For the temp space check of the GC mark.
+pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
+    const WHAT: &str = "u64-digest map node";
+    let cs = io.chunk_store();
+    let bytes = read_root(cs, root)?;
+    let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
+    let mut keys = 7u64;
+    for (off, per) in [(root_rec::INODE_DATA, 1), (root_rec::DIR_DATA, 1), (root_rec::XATTR_DATA, 1), (root_rec::MANIFEST_DATA, 2)] {
+        let key = at(off);
+        let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
+            .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
+        keys = keys.saturating_add((r.len().saturating_sub(8) / MAP_ENTRY as u64).saturating_mul(per));
     }
-    Ok((out, content))
+    Ok(keys)
+}
+
+/// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
+/// time (rounded down to whole entries). Tiny in tests, so that a small
+/// node takes many windows.
+const WALK_WINDOW: usize = if cfg!(test) { 100 } else { 1 << 20 };
+
+/// The bytes of the root record `root`; its size is checked before the read.
+fn read_root(cs: &ChunkStore, root: &ObjectKey) -> Result<Vec<u8>, MetaError> {
+    let err = |e| crate::store_io::node_err("root node", root, e);
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(root)).map_err(err)?;
+    check_root_len(usize::try_from(r.len()).unwrap_or(usize::MAX))?;
+    let bytes = r.read(cs, 0, root_rec::SIZE).map_err(err)?;
+    check_root_len(bytes.len())?;
+    Ok(bytes)
+}
+
+/// Call `f` with each `rec`-byte record of the node `r` (key `key`) from
+/// `off` to its end, read in windows of whole records. The caller checks
+/// that the length fits.
+fn for_each_window(
+    cs: &ChunkStore,
+    r: &mut chunk_store::file::FileReader,
+    what: &str,
+    mut off: u64,
+    rec: usize,
+    f: &mut dyn FnMut(&[u8]) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    let key = crate::store_io::to_key(r.key());
+    let per = WALK_WINDOW.max(rec) / rec * rec;
+    let end = r.len();
+    while off < end {
+        let n = (per as u64).min(end - off) as usize;
+        let buf = r.read(cs, off, n).map_err(|e| crate::store_io::node_err(what, &key, e))?;
+        if buf.len() != n {
+            return Err(MetaError::Corrupted(format!("{what} {key:?}: short read at {off}")));
+        }
+        for one in buf.chunks_exact(rec) {
+            f(one)?;
+        }
+        off += n as u64;
+    }
+    Ok(())
+}
+
+/// Call `f` with the key of each entry of the u64-digest map node `key`, in
+/// the stored order. The checks of [`load_u64_digest_map`], but the node
+/// is read in windows.
+fn for_each_map_value(
+    cs: &ChunkStore,
+    key: &ObjectKey,
+    f: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    const WHAT: &str = "u64-digest map node";
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(key))
+        .map_err(|e| crate::store_io::node_err(WHAT, key, e))?;
+    let len = r.len();
+    let head = if len >= 8 { r.read(cs, 0, 8).map_err(|e| crate::store_io::node_err(WHAT, key, e))? } else { Vec::new() };
+    if head.len() < 8 {
+        return Err(MetaError::Corrupted(format!("u64-digest map: expected at least 8 bytes, got {len}")));
+    }
+    let (count, expected) = map_size(&head);
+    if expected.map(|e| e as u64) != Some(len) {
+        return Err(MetaError::Corrupted(format!("u64-digest map: {len} bytes cannot hold {count} entries")));
+    }
+    for_each_window(cs, &mut r, WHAT, 8, MAP_ENTRY, &mut |e| f(parse_key(&e[8..MAP_ENTRY])))
+}
+
+/// Call `f` with each key of the manifest node `key` (the checks of
+/// [`load_manifest`], but the node is read in windows).
+fn for_each_manifest_key(
+    cs: &ChunkStore,
+    key: &ObjectKey,
+    f: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
+) -> Result<(), MetaError> {
+    const WHAT: &str = "manifest node";
+    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(key))
+        .map_err(|e| crate::store_io::node_err(WHAT, key, e))?;
+    let len = r.len();
+    if !len.is_multiple_of(KEY_BYTES as u64) {
+        return Err(MetaError::Corrupted(format!(
+            "manifest: expected a multiple of {KEY_BYTES} bytes, got {len}"
+        )));
+    }
+    for_each_window(cs, &mut r, WHAT, 0, KEY_BYTES, &mut |e| f(ObjectKey::read(e, 0)))
 }
 
 /// Error unless `len` is the size of a root record.
@@ -1365,10 +1813,10 @@ impl DictMetadataStore {
     /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
-        let mut io_guard = io.lock().unwrap();
+        let mut io_guard = lock_stats::lock(&io, Site::Io);
 
         // Read root record bytes
-        let bytes = (&mut *io_guard).get_node(root)
+        let bytes = (*io_guard).get_node(root)
             .map_err(|e| crate::store_io::node_err("root node", root, e))?;
 
         check_root_len(bytes.len())?;
@@ -1404,31 +1852,35 @@ impl DictMetadataStore {
             )));
         }
 
+        let cs = Arc::clone(io_guard.store());
         drop(io_guard);
 
         Ok(DictMetadataStore {
             io,
-            inode_map: Mutex::new(inode_map),
-            inode_data: Mutex::new(inode_data),
-            dir_data: Mutex::new(dir_data),
-            dir_live: Mutex::new(Live::default()),
-            inode_live: Mutex::new(Live::default()),
+            cs,
+            unsynced_puts: AtomicU64::new(0),
+            put_error: lk(None),
+            inode_map: lk(inode_map).timed(Site::InodeMap),
+            inode_data: lk(inode_data).timed(Site::InodeData),
+            dir_data: lk(dir_data).timed(Site::DirData),
+            dir_live: Sharded::new(Site::DirLive),
+            inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: Mutex::new(manifest_data),
-            xattr_data: Mutex::new(xattr_data),
-            pre_root_sync: Mutex::new(None),
-            refcounts: Mutex::new(refcounts),
+            manifest_data: lk(manifest_data).timed(Site::ManifestData),
+            xattr_data: lk(xattr_data).timed(Site::XattrData),
+            pre_root_sync: lk(None),
+            refcounts: lk(refcounts).timed(Site::Refcounts),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
-            wal: Mutex::new(None),
+            wal: lk(None).timed(Site::Wal),
             wal_fail_seq: AtomicU64::new(0),
             wal_fail_cleared: AtomicU64::new(0),
-            commit_lock: Mutex::new(()),
+            commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
-            last_root: Mutex::new(Some(*root)),
-            snapshots_by_version: Mutex::new(HashMap::new()),
-            snapshots_by_name: Mutex::new(HashMap::new()),
+            last_root: lk(Some(*root)),
+            snapshots_by_version: lk(HashMap::new()),
+            snapshots_by_name: lk(HashMap::new()),
         })
     }
 }
@@ -1495,6 +1947,7 @@ mod map_decode_tests {
     // A map node with an entry count whose size overflows is corrupt
     // metadata: an error, never a panic or a wrapped length.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_map_with_an_overflowing_count_is_corrupt() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
@@ -1512,17 +1965,19 @@ mod map_decode_tests {
 mod tests {
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn new_store_root_dir_has_current_times() {
         let dir = tempfile::TempDir::new().unwrap();
         let before = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         let store = DictMetadataStore::new(Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap())));
         let root = store.get_inode(1).unwrap();
-        assert!(root.mtime_sec as i64 >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
-        assert!(root.ctime_sec as i64 >= before, "root ctime {}", root.ctime_sec);
+        assert!(root.mtime_sec >= before, "root mtime {} (epoch 0 shows as 1969)", root.mtime_sec);
+        assert!(root.ctime_sec >= before, "root ctime {}", root.ctime_sec);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
         let tmp = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(tmp.path()).unwrap()));
@@ -1543,11 +1998,11 @@ mod tests {
             store.unlink(dir, "f0").unwrap();
         }
         // The caches stayed bounded, and every change is still visible.
-        assert!(store.inode_live.lock().unwrap().map.len() <= INODE_CACHE_MAX + 1);
-        assert!(store.dir_live.lock().unwrap().map.len() <= DIR_CACHE_MAX + 1);
+        assert!(store.inode_live.len() <= INODE_CACHE_MAX + 1);
+        assert!(store.dir_live.len() <= DIR_CACHE_MAX + 1);
         // Dirty entries are written in batches, so the final commit stays small.
-        assert!(store.inode_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
-        assert!(store.dir_live.lock().unwrap().dirty.len() < DIRTY_FLUSH);
+        assert!(store.inode_live.dirty() < DIRTY_FLUSH);
+        assert!(store.dir_live.dirty() < DIRTY_FLUSH);
         let check = |s: &DictMetadataStore| {
             for (dir, name, ino, size) in &expect {
                 if name == "f0" {
@@ -1588,6 +2043,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_delete_inode_drops_manifest_xattrs_and_dir_entries() {
         // Leftover per-inode map entries keep deleted content reachable for GC.
         let (_d, store) = make_store();
@@ -1605,6 +2061,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_names_longer_than_name_max_are_rejected() {
         let (_d, store) = make_store();
         let ok = "a".repeat(255);
@@ -1618,6 +2075,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_new_has_root_dir() {
         let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
@@ -1628,6 +2086,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_crud() {
         let (_dir, store) = make_store();
 
@@ -1656,6 +2115,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_directory_shows_in_parent() {
         let (_dir, store) = make_store();
         let dir_meta = new_dir_meta();
@@ -1675,6 +2135,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_lookup_and_link() {
         let (_dir, store) = make_store();
 
@@ -1690,6 +2151,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_unlink_removes_entry() {
         let (_dir, store) = make_store();
 
@@ -1703,6 +2165,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_manifest_round_trip() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1714,12 +2177,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_root_ino_is_one() {
         let (_dir, store) = make_store();
         assert_eq!(store.root_ino(), 1);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_commit_returns_nonzero_digest() {
         let (_dir, store) = make_store();
         let digest = store.commit().unwrap();
@@ -1727,6 +2192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_delete_nonexistent_returns_not_found() {
         let (_dir, store) = make_store();
         let result = store.delete_inode(9999);
@@ -1734,6 +2200,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_under_nonexistent_parent_returns_not_found() {
         let (_dir, store) = make_store();
         let result = store.create_directory(9999, "sub", &new_dir_meta());
@@ -1742,6 +2209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_under_file_returns_not_a_directory() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1754,6 +2222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_set_get() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1763,6 +2232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_list() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1778,6 +2248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_remove() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1788,6 +2259,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_overwrite() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1798,6 +2270,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_on_directory() {
         let (_dir, store) = make_store();
         // Set xattr on the root directory inode (ino=1)
@@ -1807,6 +2280,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_large_value() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1818,6 +2292,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_list_empty() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1826,6 +2301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_get_not_found() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1834,6 +2310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_remove_not_found() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1842,6 +2319,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_update_nonexistent_returns_not_found() {
         let (_dir, store) = make_store();
         let mut meta = new_file_meta();
@@ -1851,6 +2329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_numbers_are_monotonic() {
         let (_dir, store) = make_store();
         let ino1 = store.create_inode(&new_file_meta()).unwrap();
@@ -1861,6 +2340,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_link_duplicate_name_rejected() {
         let (_dir, store) = make_store();
         let ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1870,6 +2350,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_list_directory_non_dir_returns_error() {
         let (_dir, store) = make_store();
         // Inode 9999 doesn't exist as a directory
@@ -1880,6 +2361,7 @@ mod tests {
     // ── persistence round-trip tests (Task 2) ─────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_commit_and_reload() {
         let (_dir, store) = make_store();
 
@@ -1926,6 +2408,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_stability_across_reload() {
         let (_dir, store) = make_store();
 
@@ -1955,6 +2438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_directory_stable_across_reload() {
         let (_dir, store) = make_store();
         let sub1 = store.create_directory(1, "alpha", &new_dir_meta()).unwrap();
@@ -1971,6 +2455,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_manifest_stable_across_reload() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -1986,6 +2471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_xattr_stable_across_reload() {
         let (_dir, store) = make_store();
         let file_ino = store.create_inode(&new_file_meta()).unwrap();
@@ -2001,6 +2487,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_filestorage_persistence_round_trip() {
         // This test proves POSIX-10: inode numbers are stable across a full
         // commit + load_from_root cycle backed by file storage.
@@ -2033,6 +2520,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_empty_store_commit_reload() {
         let (_dir, store) = make_store();
         let root = store.commit().unwrap();
@@ -2054,6 +2542,7 @@ mod tests {
     /// This proves the seed command's design is sound: file content and metadata
     /// can share the same Io backend, and nothing is lost on a round-trip.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_io_accessor_content_survives_reload() {
         let (_dir, store) = make_store();
 
@@ -2083,13 +2572,14 @@ mod tests {
 
         // Verify the content bytes are retrievable from the node store via get_node.
         let mut io_guard = reloaded.io().lock().unwrap();
-        let read_back = (&mut *io_guard).get_node(&content_digest).expect("content missing");
+        let read_back = (*io_guard).get_node(&content_digest).expect("content missing");
         assert_eq!(read_back, content.as_slice());
     }
 
     // ── Snapshot method tests ──────────────────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_returns_entry() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2106,6 +2596,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_auto_increments_version() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2123,6 +2614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_list_snapshots_sorted_by_version() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2144,6 +2636,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_by_version_string() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2162,6 +2655,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_by_name() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2178,6 +2672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_find_snapshot_returns_none_for_unknown() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2193,6 +2688,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshot_roots_includes_all_roots() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2211,6 +2707,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshot_roots_no_snapshots_returns_current_root() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2227,6 +2724,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_snapshots_survive_segment_replay() {
         use crate::wal::{WalConfig, create_wal};
         use crate::segment::load_store_from_segments;
@@ -2252,6 +2750,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_set_snapshots_loads_snapshot_list() {
         use crate::snapshot::SnapshotEntry;
         let (_dir, store) = make_store();
@@ -2282,6 +2781,7 @@ mod tests {
 
     /// FIX-03: find_snapshot by version string uses O(1) lookup.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_find_by_version_o1() {
         let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
@@ -2298,6 +2798,7 @@ mod tests {
 
     /// FIX-04: find_snapshot by name uses O(1) lookup.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_find_by_name_o1() {
         let (_dir, mut store) = make_store();
         store.set_snapshots(vec![
@@ -2313,6 +2814,7 @@ mod tests {
 
     /// Scale test: 10,000 snapshots — find_snapshot must complete in under 1ms.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_10k_snapshots_under_1ms() {
         let snaps: Vec<_> = (1u64..=10_000)
             .map(|v| make_snapshot(v, None))
@@ -2334,6 +2836,7 @@ mod tests {
 
     /// create_snapshot adds to both indexes.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_snapshot_adds_to_both_indexes() {
         use crate::wal::{WalConfig, create_wal};
         use tempfile::TempDir;
@@ -2355,6 +2858,7 @@ mod tests {
 
     /// set_snapshots populates both by_version and by_name indexes correctly.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_set_snapshots_populates_both_indexes() {
         let snaps = vec![
             make_snapshot(10, Some("ten")),
@@ -2365,7 +2869,7 @@ mod tests {
         store.set_snapshots(snaps);
 
         assert_eq!(store.find_snapshot("10").unwrap().version, 10);
-        assert_eq!(store.find_snapshot("twenty").is_none(), true);
+        assert!(store.find_snapshot("twenty").is_none());
         assert_eq!(store.find_snapshot("ten").unwrap().version, 10);
         assert_eq!(store.find_snapshot("thirty").unwrap().version, 30);
         assert!(store.find_snapshot("20").is_some());  // unnamed, find by version
@@ -2374,6 +2878,7 @@ mod tests {
 
     /// list_snapshots returns sorted by version (existing behavior preserved).
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_hashmap_list_snapshots_sorted() {
         let snaps = vec![
             make_snapshot(3, None),
@@ -2393,13 +2898,14 @@ mod tests {
     // ── Saturating refcount tests (FIX-01) ────────────────────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_refcount_saturates() {
         let (_dir, store) = make_store();
         let digest: ObjectKey = ObjectKey::example(0xDE);
 
         // Manually set refcount to u64::MAX - 1
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(digest, u64::MAX - 1);
         }
 
@@ -2415,13 +2921,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_refcount_decrement_saturated() {
         let (_dir, store) = make_store();
         let digest: ObjectKey = ObjectKey::example(0xAB);
 
         // Set refcount to u64::MAX directly
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(digest, u64::MAX);
         }
 
@@ -2432,6 +2939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_saturated_refcount_count() {
         let (_dir, store) = make_store();
         let d1: ObjectKey = ObjectKey::example(0x01);
@@ -2441,7 +2949,7 @@ mod tests {
         let d5: ObjectKey = ObjectKey::example(0x05);
 
         {
-            let mut rc = store.refcounts.lock().unwrap();
+            let mut rc = store.refcounts.lock();
             rc.insert(d1, u64::MAX); // saturated
             rc.insert(d2, u64::MAX); // saturated
             rc.insert(d3, 5);        // normal
@@ -2456,6 +2964,7 @@ mod tests {
     // ── inode_count AtomicU64 tests (FIX-02 store layer) ─────────────────────
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_empty() {
         let (_dir, store) = make_store();
         // Fresh store has root inode (ino=1) — count should be 1
@@ -2464,6 +2973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_tracks_lifecycle() {
         let (_dir, store) = make_store();
         // Create 3 inodes (inos 2, 3, 4) — total = 1 root + 3 = 4
@@ -2479,7 +2989,251 @@ mod tests {
             "after deleting 1 inode, count should be 3");
     }
 
+    // D-05: four threads that each add 1 to nlinks 500 times lose no change.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn atomic_modify_inode_loses_no_change() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        let start = store.get_inode(ino).unwrap().nlinks;
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..500 {
+                        store.modify_inode(ino, |m| m.nlinks += 1).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(store.get_inode(ino).unwrap().nlinks, start + 2000);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn missing_inode_modify_inode_is_not_found_and_creates_nothing() {
+        let (_d, store) = make_store();
+        assert!(matches!(store.modify_inode(99, |m| m.size = 5), Err(MetaError::NotFound(99))));
+        assert!(matches!(store.get_inode(99), Err(MetaError::NotFound(99))));
+        assert_eq!(store.inode_count(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn size_change_in_modify_inode_moves_logical_bytes() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.modify_inode(ino, |m| m.size = 1000).unwrap();
+        assert_eq!(store.logical_bytes(), 1000);
+        store.modify_inode(ino, |m| m.size = 300).unwrap();
+        assert_eq!(store.logical_bytes(), 300);
+        assert_eq!(store.modify_inode(ino, |m| m.size).unwrap(), 300);
+    }
+
+    // D-08 (store side): a create with a given number.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn create_inode_at_takes_the_number_and_raises_the_allocator() {
+        let (_d, store) = make_store();
+        assert_eq!(store.create_inode_at(7, &new_file_meta()).unwrap(), 7);
+        assert_eq!(store.get_inode(7).unwrap().ino, 7);
+        assert!(store.create_inode(&new_file_meta()).unwrap() >= 8);
+        assert!(matches!(store.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
+        assert!(matches!(store.create_inode_at(1, &new_file_meta()), Err(MetaError::AlreadyExists(1))));
+        // Taken after a commit and a reload too (the digest maps have it).
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert!(matches!(reloaded.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
+        assert_eq!(store.inode_count(), 3);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn create_directory_at_adds_the_entry_or_nothing() {
+        let (_d, store) = make_store();
+        let root_links = store.get_inode(1).unwrap().nlinks;
+        assert_eq!(store.create_directory_at(1, "d", 9, &new_dir_meta()).unwrap(), 9);
+        assert_eq!(store.lookup(1, "d").unwrap(), 9);
+        let names: Vec<(String, u64)> = store.list_directory(9).unwrap().into_iter().map(|e| (e.name, e.ino)).collect();
+        assert!(names.contains(&(".".into(), 9)) && names.contains(&("..".into(), 1)), "{names:?}");
+        assert_eq!(store.get_inode(1).unwrap().nlinks, root_links + 1);
+        assert!(store.create_directory(1, "e", &new_dir_meta()).unwrap() >= 10);
+        let count = store.inode_count();
+        // A taken number: nothing is added.
+        assert!(matches!(store.create_directory_at(1, "x", 9, &new_dir_meta()), Err(MetaError::AlreadyExists(9))));
+        assert!(store.lookup(1, "x").is_err());
+        // An existing name: the number stays free, nothing is added.
+        assert!(store.create_directory_at(1, "d", 20, &new_dir_meta()).is_err());
+        assert!(matches!(store.get_inode(20), Err(MetaError::NotFound(20))));
+        assert_eq!(store.lookup(1, "d").unwrap(), 9);
+        assert_eq!(store.inode_count(), count);
+        assert_eq!(store.get_inode(1).unwrap().nlinks, root_links + 2);
+    }
+
+    /// A store on a `MemIo` chunk store (for its hold knobs); also its `io`.
+    fn mem_store(mem: &chunk_store::mem::MemIo) -> (Arc<Mutex<StoreIo>>, DictMetadataStore) {
+        let cs = chunk_store::ChunkStore::open_with(Arc::new(mem.clone()), chunk_store::Options::default()).unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", Arc::new(cs))));
+        (Arc::clone(&io), DictMetadataStore::new(io))
+    }
+
+    /// The longest wait of a test for one step.
+    const LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    // LOCK-01: thread A loads a directory that is not cached, and its pack
+    // read is held. Thread B changes a cached inode, creates one, and looks
+    // up a name in another (cached) directory: none of it waits for A.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn cold_dir_load_does_not_block_other_inodes() {
+        use chunk_store::mem::{Hold, MemIo};
+        use std::sync::mpsc;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let a_dir = store.create_directory(1, "a", &new_dir_meta()).unwrap();
+        let b_dir = store.create_directory(1, "b", &new_dir_meta()).unwrap();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        store.link(a_dir, "n", f).unwrap();
+        store.link(b_dir, "m", f).unwrap();
+        let shard = |ino: u64| ino % SHARDS as u64;
+        assert!(shard(a_dir) != shard(b_dir) && shard(a_dir) != shard(f), "other shards");
+        let root = store.commit().unwrap();
+        // A new store from the root: every cache is empty.
+        let store = DictMetadataStore::load_from_root(io, &root).unwrap();
+        assert_eq!(store.lookup(b_dir, "m").unwrap(), f);
+        store.get_inode(f).unwrap();
+        mem.hold_pack_reads(true);
+        std::thread::scope(|s| {
+            let (ta, ra) = mpsc::channel();
+            let store = &store;
+            s.spawn(move || {
+                let _ = ta.send(store.lookup(a_dir, "n"));
+            });
+            let parked = mem.wait_parked(Hold::PackReads, 1, LIMIT);
+            let (tb, rb) = mpsc::channel();
+            s.spawn(move || {
+                let changed = store.modify_inode(f, |m| m.nlinks += 1).is_ok();
+                let created = store.create_inode(&new_file_meta()).is_ok();
+                let _ = tb.send((changed, created, store.lookup(b_dir, "m").ok()));
+            });
+            let b = rb.recv_timeout(LIMIT);
+            let a_waited = ra.try_recv().is_err();
+            mem.hold_pack_reads(false);
+            assert!(parked, "A is in the held pack read");
+            assert_eq!(b.expect("B finished while A loaded a cold directory"), (true, true, Some(f)));
+            assert!(a_waited, "A was still in the cold load while B ran");
+            assert_eq!(ra.recv_timeout(LIMIT).expect("A ends after the release").unwrap(), f);
+        });
+    }
+
+    // Pitfall 7: a flush wrote inode X with no lock held, and X is deleted
+    // before the flush installs its digest. The late install must not bring
+    // X back. The hook point runs on this thread: no timing.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn flush_install_does_not_resurrect_a_deleted_inode() {
+        let (_d, store) = make_store();
+        let x = store.create_inode(&new_file_meta()).unwrap();
+        store.flush_inodes_between(|| store.delete_inode(x).unwrap());
+        assert!(matches!(store.get_inode(x), Err(MetaError::NotFound(_))));
+        assert!(!store.inode_data.lock().contains_key(&x));
+        assert!(store.inode_map.lock().get(x).is_none());
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert!(matches!(reloaded.get_inode(x), Err(MetaError::NotFound(_))));
+    }
+
+    // A commit took X (size 1) at its cut, then X changed (size 2) and a
+    // flush took it. Before the flush installs, the commit installs its
+    // older digest. The older digest must not end up as the current one.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn late_older_install_does_not_overwrite_a_newer_change() {
+        let (_d, store) = make_store();
+        let x = store.create_inode(&new_file_meta()).unwrap();
+        store.modify_inode(x, |m| m.size = 1).unwrap();
+        let p = store.begin_commit().unwrap();
+        store.modify_inode(x, |m| m.size = 2).unwrap();
+        let st = &store;
+        st.flush_inodes_between(move || {
+            st.finish_commit(p).unwrap();
+        });
+        // Drop the clean entries: X is read back through its digest.
+        store.inode_live.evict_clean();
+        assert_eq!(store.get_inode(x).unwrap().size, 2);
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(reloaded.get_inode(x).unwrap().size, 2);
+    }
+
+    // LOCK-01: thread A reads a manifest node and its pack read is held.
+    // Thread B changes another inode and stores another manifest: no
+    // `StoreIo` lock (or other lock) makes it wait for A.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn manifest_read_does_not_block_inode_changes() {
+        use chunk_store::mem::{Hold, MemIo};
+        use std::sync::mpsc;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let f1 = store.create_inode(&new_file_meta()).unwrap();
+        let f2 = store.create_inode(&new_file_meta()).unwrap();
+        store.set_manifest(f1, &[ObjectKey::example(1)]).unwrap();
+        let root = store.commit().unwrap();
+        let store = DictMetadataStore::load_from_root(io, &root).unwrap();
+        store.get_inode(f2).unwrap();
+        mem.hold_pack_reads(true);
+        std::thread::scope(|s| {
+            let store = &store;
+            let (ta, ra) = mpsc::channel();
+            s.spawn(move || {
+                let _ = ta.send(store.get_manifest(f1));
+            });
+            let parked = mem.wait_parked(Hold::PackReads, 1, LIMIT);
+            let (tb, rb) = mpsc::channel();
+            s.spawn(move || {
+                let changed = store.modify_inode(f2, |m| m.size = 10).is_ok();
+                let stored = store.set_manifest(f2, &[ObjectKey::example(2)]).is_ok();
+                let _ = tb.send((changed, stored));
+            });
+            let b = rb.recv_timeout(LIMIT);
+            let a_waited = ra.try_recv().is_err();
+            mem.hold_pack_reads(false);
+            assert!(parked, "A is in the held pack read");
+            assert_eq!(b.expect("B finished while A read a manifest"), (true, true));
+            assert!(a_waited, "A was still in the manifest read while B ran");
+            let got = ra.recv_timeout(LIMIT).expect("A ends after the release").unwrap();
+            assert_eq!(got, vec![ObjectKey::example(1)]);
+        });
+        assert_eq!(store.get_manifest(f2).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    // T-19-10: a node put error on the hot path is returned by the next
+    // commit; and a commit syncs every node that the hot path put.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn hot_path_put_error_fails_the_next_commit_and_puts_are_synced() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        store.commit().unwrap();
+        mem.set_space_left(Some(0));
+        store.set_manifest(f, &[ObjectKey::example(1)]).unwrap();
+        mem.set_space_left(None);
+        assert!(store.commit().is_err(), "the kept put error fails the commit");
+        store.set_manifest(f, &[ObjectKey::example(2)]).unwrap();
+        let root = store.commit().unwrap();
+        // Only what is durable is left after a crash: the root and the
+        // manifest that the hot path put must read back.
+        mem.crash();
+        let cs = chunk_store::ChunkStore::open_with(Arc::new(mem.clone()), chunk_store::Options::default()).unwrap();
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", Arc::new(cs))));
+        let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
+        assert_eq!(reloaded.get_manifest(f).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_inode_count_after_reload() {
         let (_dir, store) = make_store();
         // Create 2 inodes
@@ -2496,5 +3250,50 @@ mod tests {
         assert_eq!(reloaded.inode_count(), count_before,
             "inode_count should match original after load_from_root round-trip");
     }
-}
+    /// The walk of the GC mark reads the map and manifest nodes in tiny
+    /// windows (in tests) and gives the keys of the whole-node loads.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn the_windowed_walk_gives_the_keys_of_the_whole_nodes() {
+        let (_dir, store) = make_store();
+        let r = store.root_ino();
+        for i in 0..40u32 {
+            let ino = store.create_inode(&new_file_meta()).unwrap();
+            store.link(r, &format!("f{i}"), ino).unwrap();
+            let parts: Vec<_> = (0..(i % 7)).map(|j| ObjectKey::example(1000 + i * 10 + j)).collect();
+            store.set_manifest(ino, &parts).unwrap();
+            if i % 3 == 0 {
+                store.set_xattr(ino, "user.a", b"x").unwrap();
+            }
+        }
+        let root = store.commit().unwrap();
+        let mut io = NodeReader(Arc::clone(store.io().lock().unwrap().store()));
+        // The keys of whole-node loads, as the mark had them before #207.
+        let bytes = io.get_node(&root).unwrap();
+        let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
+        let mut want = vec![root, at(root_rec::INODE_MAP), at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
+                            at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
+        for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
+            want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
+        }
+        let mut want_content = Vec::new();
+        for m in load_u64_digest_map(&mut io, &at(root_rec::MANIFEST_DATA)).unwrap().into_values() {
+            want.push(m);
+            want_content.extend(load_manifest(&mut io, &m).unwrap());
+        }
+        let (nodes, content) = referenced(&mut io, &root).unwrap();
+        assert_eq!(nodes, want);
+        assert_eq!(content, want_content);
+        assert!(want.len() > 3 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
 
+        // A map node whose count does not fit its length is refused.
+        let mut bad = 3u64.to_le_bytes().to_vec();
+        bad.extend_from_slice(&[0u8; MAP_ENTRY * 2]);
+        let bad = crate::store_io::put_value(io.chunk_store(), &bad).unwrap();
+        let e = for_each_map_value(io.chunk_store(), &bad, &mut |_| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("cannot hold 3 entries"), "{e}");
+        let short = crate::store_io::put_value(io.chunk_store(), &[1, 2, 3]).unwrap();
+        assert!(for_each_map_value(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
+        assert!(for_each_manifest_key(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
+    }
+}

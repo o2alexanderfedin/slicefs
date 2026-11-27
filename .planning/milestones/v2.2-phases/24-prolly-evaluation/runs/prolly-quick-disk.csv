@@ -1,0 +1,13 @@
+mode,run,phase,apparent_bytes,alloc_bytes,files
+whole,1,start,296937832,296976384,12
+whole,1,end,356646923,357199872,15
+flat,1,start,2847385,2850816,1
+flat,1,end,4949337,4952064,1
+prolly,1,start,3036144,3039232,1
+prolly,1,end,4705831,4706304,1
+whole,median,start,296937832,296976384,12
+whole,median,end,356646923,357199872,15
+flat,median,start,2847385,2850816,1
+flat,median,end,4949337,4952064,1
+prolly,median,start,3036144,3039232,1
+prolly,median,end,4705831,4706304,1

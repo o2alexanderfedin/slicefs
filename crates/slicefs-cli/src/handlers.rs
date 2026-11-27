@@ -11,9 +11,14 @@
 //! without requiring fuser types (which cannot be constructed in unit tests).
 
 
+use std::time::{Duration, Instant};
+
 use fuser::FileAttr;
 
-use crate::filesystem::{inode_to_file_attr, SliceFsFilesystem};
+use crate::filesystem::{clear_store_busy, inode_to_file_attr, take_store_busy, Admit, SliceFsFilesystem};
+use crate::util::ts;
+use metadata::wal::Lsn;
+use slicefs_traits::metadata::InodeMeta;
 
 // ── Result enums ─────────────────────────────────────────────────────────────
 
@@ -101,9 +106,9 @@ pub enum LockResult {
 // ── Handler functions ─────────────────────────────────────────────────────────
 
 /// One logged request (#20): freezes the clock while the request runs (all
-/// its times are equal and replayable), and `log` appends its record after
-/// it succeeded. During replay the clock is frozen already and nothing is
-/// logged.
+/// its times are equal and replayable). Its record is appended in the lock
+/// hold of its apply (`sink`, D-08) and written out before the reply.
+/// During replay the clock is frozen already and nothing is logged.
 struct Logged {
     _clock: Option<crate::oplog::Clock>,
     time: (i64, u32),
@@ -120,8 +125,16 @@ fn logged() -> Logged {
 }
 
 impl Logged {
-    fn log(&self, fs: &SliceFsFilesystem, op: crate::oplog::Op) {
-        fs.log_record(crate::oplog::Record { time: self.time, op });
+    /// The log callback of a namespace request (D-08): the fs function
+    /// calls it in the lock hold of its apply; it appends the record and
+    /// keeps the LSN in `lsn`, which the handler writes out after the call,
+    /// before the reply. A no-op while the log is replayed.
+    fn sink<'a>(&'a self, fs: &'a SliceFsFilesystem, lsn: &'a mut Option<Lsn>) -> impl FnMut(crate::oplog::Op) + 'a {
+        move |op| {
+            if let Some(l) = fs.log_append(crate::oplog::Record { time: self.time, op }) {
+                *lsn = Some(l);
+            }
+        }
     }
 }
 
@@ -167,50 +180,46 @@ pub fn handle_read(
 }
 
 /// Handle `open`: open inode `ino` with `flags`.
+/// A write open with `O_TRUNC` appends its `Truncate` record in the cell
+/// hold of the truncate (D-08); it is written out here, before the reply.
 pub fn handle_open(fs: &SliceFsFilesystem, ino: u64, flags: i32) -> OpenResult {
     let l = logged();
-    match fs.test_open(ino, flags) {
-        Ok((fh, is_write)) => {
-            if is_write && flags & libc::O_TRUNC != 0 {
-                l.log(fs, crate::oplog::Op::Truncate { ino });
-            }
-            OpenResult::Ok(fh, is_write)
-        }
+    let (r, lsn) = fs.open_logged(ino, flags, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok((fh, is_write)) => OpenResult::Ok(fh, is_write),
         Err(errno) => OpenResult::Error(errno),
     }
 }
 
-/// Handle `release`: finalize write state for `fh` of inode `ino`.
+/// Handle `release`: finalize write state for `fh` of inode `ino`. Only the
+/// release that finalized the cell (the last write handle) appends a
+/// `Release` record, in its last cell hold; it is written out here.
 pub fn handle_release(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     let l = logged();
-    let is_write = fs.ino_of_fh(fh).is_some();
-    match fs.test_release_full(ino, fh) {
-        Ok(()) => {
-            if is_write {
-                l.log(fs, crate::oplog::Op::Release { ino });
-            }
-            EmptyResult::Ok
-        }
+    let (r, lsn) = fs.release_logged(ino, fh, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
-/// Handle `flush`: flush write buffer for `fh` without closing the handle.
-pub fn handle_flush(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
+/// Handle `flush`: write the streamed content of `fh` into its manifest
+/// without closing the handle (`flush_cell`).
+/// Only a flush that did work appends a `Flush` record, in the hold of its
+/// install; it is written out here.
+pub fn handle_flush(fs: &SliceFsFilesystem, _ino: u64, fh: u64) -> EmptyResult {
     let l = logged();
-    let is_write = fs.ino_of_fh(fh).is_some();
-    match fs.test_flush(ino, fh) {
-        Ok(()) => {
-            if is_write {
-                l.log(fs, crate::oplog::Op::Flush { ino });
-            }
-            EmptyResult::Ok
-        }
+    let (r, lsn) = fs.flush_logged(fh, Some(l.time));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(_) => EmptyResult::Error(libc::EIO),
     }
 }
 
-/// Handle `fsync`: flush and sync write buffer for `fh`.
+/// Handle `fsync`: as `flush`, then sync the write log.
 pub fn handle_fsync(fs: &SliceFsFilesystem, ino: u64, fh: u64) -> EmptyResult {
     // Write the manifest (logged as a flush), then make the log durable: the
     // sync covers this file's records and the flush record itself (#20).
@@ -287,13 +296,10 @@ pub fn handle_setxattr(
     value: &[u8],
 ) -> EmptyResult {
     let l = logged();
-    match fs.test_setxattr(ino, name, value) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.setxattr_logged(ino, name, value, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `removexattr`: remove extended attribute `name` from inode `ino`.
@@ -303,11 +309,11 @@ pub fn handle_removexattr(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.test_removexattr(ino, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Removexattr { ino, name: name.to_string() });
-            EmptyResult::Ok
-        }
+    let mut lsn = None;
+    let r = fs.removexattr_logged(ino, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(()) => EmptyResult::Ok,
         Err(e) if e == libc::ENOENT => EmptyResult::Error(libc::ENODATA),
         Err(errno) => EmptyResult::Error(errno),
     }
@@ -320,20 +326,106 @@ pub fn handle_write(
     offset: u64,
     data: &[u8],
 ) -> WriteResult {
+    handle_write_flags(fs, fh, offset, data, 0)
+}
+
+/// `handle_write` with the open flags of the request: with `O_APPEND` (or
+/// on a handle opened with it) the write goes to the end of file and
+/// `offset` is ignored (D-12).
+pub fn handle_write_flags(
+    fs: &SliceFsFilesystem,
+    fh: u64,
+    offset: u64,
+    data: &[u8],
+    flags: i32,
+) -> WriteResult {
+    handle_write_admitted(fs, fh, offset, data, flags, Admit { pay: true })
+}
+
+/// `handle_write_flags` with the answer of `throttle_write` (Phase 20): the
+/// caller ran the throttle before it took the commit gate. With
+/// `admit.pay` false the write does not pay for the budget.
+pub fn handle_write_admitted(
+    fs: &SliceFsFilesystem,
+    fh: u64,
+    offset: u64,
+    data: &[u8],
+    flags: i32,
+    admit: Admit,
+) -> WriteResult {
     fs.note_write();
     let l = logged();
-    match fs.test_write(fh, offset, data) {
-        Ok(n) => {
-            if let Some(ino) = fs.ino_of_fh(fh) {
-                l.log(fs, crate::oplog::Op::Write { ino, offset, data: data[..n as usize].to_vec() });
-            }
-            WriteResult::Ok(n)
-        }
+    // The record is appended in the cell-lock hold of the apply (D-08); it
+    // is written out here, with no cell lock held, before the reply.
+    let (r, lsn) = fs.write_logged_admitted(fh, offset, data, flags, Some(l.time), admit);
+    fs.log_write_out(lsn);
+    match r {
+        Ok((n, _)) => WriteResult::Ok(n),
         Err(e) => WriteResult::Error(e),
     }
 }
 
+// The POSIX lock types as i32. libc gives them as c_short on macOS and as
+// c_int on Linux, so the cast is needed on one platform only.
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_RD: i32 = libc::F_RDLCK as i32;
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_WR: i32 = libc::F_WRLCK as i32;
+#[allow(clippy::unnecessary_cast, reason = "c_short on macOS, already i32 on Linux")]
+pub(crate) const LOCK_UN: i32 = libc::F_UNLCK as i32;
+
+/// The first pause between two attempts of a write that met a busy store.
+const BUSY_PAUSE_MIN: Duration = Duration::from_millis(50);
+/// The longest pause between two attempts (the pause doubles for each one).
+const BUSY_PAUSE_MAX: Duration = Duration::from_secs(1);
+
+/// The entry of one write request (the FUSE write job, the S7 harness and the
+/// tests): `attempt` makes one try. It takes the commit gate for its own span
+/// and returns with the gate released (the FUSE job:
+/// `serve(handle_write_admitted)`), so no lock is held while this waits.
+///
+/// If the try ends in EIO because a store wait ended in a busy error (a slow
+/// pack seal or background sync, issue #170), nothing of the write was
+/// applied (the error comes before the apply and the log record, also for
+/// `O_APPEND`: the end of file is read again in each try). This function then
+/// pauses, with no lock held, and calls `attempt` again, as long as a new try
+/// starts before `SliceFsFilesystem::store_busy_limit` has passed since the
+/// first one and the file system is not shut down. Each try waits for the
+/// store itself, up to the store wait limit. After that limit the last EIO
+/// goes to the caller. Any other result goes to the caller at once.
+pub fn handle_write_retrying(fs: &SliceFsFilesystem, mut attempt: impl FnMut() -> WriteResult) -> WriteResult {
+    let start = Instant::now();
+    let limit = fs.store_busy_limit();
+    let mut pause = BUSY_PAUSE_MIN;
+    let mut tries = 0u32;
+    loop {
+        clear_store_busy();
+        let r = attempt();
+        if !matches!(r, WriteResult::Error(libc::EIO)) || !take_store_busy() {
+            return r;
+        }
+        let waited = start.elapsed();
+        if waited >= limit || fs.is_shut_down() {
+            eprintln!("[{}][FUSE] write: the chunk store stayed busy for {:.1} s ({tries} new tries); the write fails with EIO", ts(), waited.as_secs_f64());
+            return r;
+        }
+        tries += 1;
+        fs.count_store_busy_retry();
+        if tries == 1 {
+            eprintln!("[{}][FUSE] write: the chunk store is busy (a slow seal or sync); the write waits and tries again for up to {:.0} s", ts(), limit.as_secs_f64());
+        }
+        debug_assert!(
+            chunk_store::sync::rank::held().is_empty(),
+            "a write pause with a lock held: {:?}",
+            chunk_store::sync::rank::held()
+        );
+        std::thread::sleep(pause.min(limit - waited));
+        pause = (pause * 2).min(BUSY_PAUSE_MAX);
+    }
+}
+
 /// Handle `create`: create a new file named `name` in `parent` and open it.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_create(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -344,13 +436,31 @@ pub fn handle_create(
     gid: u32,
     flags: i32,
 ) -> CreateResult {
+    handle_create_at(fs, parent, name, mode, umask, uid, gid, flags, None)
+}
+
+/// `handle_create` at inode `ino` (replay: the logged number; `None`: the
+/// next free one). The `Create` record is appended in the parent-stripe
+/// hold that opens the handle, and written out before the reply (D-08).
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+pub fn handle_create_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    uid: u32,
+    gid: u32,
+    flags: i32,
+    ino: Option<u64>,
+) -> CreateResult {
     fs.note_write();
     let l = logged();
-    match fs.test_create_full(parent, name, mode, umask, uid, gid, flags) {
-        Ok((ino, fh, meta)) => {
-            l.log(fs, crate::oplog::Op::Create { parent, name: name.to_string(), mode, umask, uid, gid, flags, ino });
-            CreateResult::Ok(ino, fh, inode_to_file_attr(&meta))
-        }
+    let mut lsn = None;
+    let r = fs.create_full_logged(parent, name, mode, umask, uid, gid, flags, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok((ino, fh, meta)) => CreateResult::Ok(ino, fh, inode_to_file_attr(&meta)),
         Err(errno) => CreateResult::Error(errno),
     }
 }
@@ -365,17 +475,31 @@ pub fn handle_mkdir(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_mkdir_at(fs, parent, name, mode, umask, uid, gid, None)
+}
+
+/// `handle_mkdir` at inode `ino` (replay); logged in the hold of the parent's
+/// and the new directory's stripes.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+pub fn handle_mkdir_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_mkdir_full(parent, name, mode, umask, uid, gid) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Mkdir { parent, name: name.to_string(), mode, umask, uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.mkdir_logged(parent, name, mode, umask, uid, gid, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `mknod`: create a new node (regular file) named `name` in `parent`.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_mknod(
     fs: &SliceFsFilesystem,
     parent: u64,
@@ -386,14 +510,27 @@ pub fn handle_mknod(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_mknod_at(fs, parent, name, mode, umask, rdev, uid, gid, None)
+}
+
+/// `handle_mknod` at inode `ino` (replay); logged in the parent-stripe hold.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+pub fn handle_mknod_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    name: &str,
+    mode: u32,
+    umask: u32,
+    rdev: u32,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_mknod_rdev(parent, name, mode, rdev, uid, gid, umask) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.mknod_logged(parent, name, mode, rdev, uid, gid, umask, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `symlink`: create a symbolic link named `link_name` in `parent` pointing to `target`.
@@ -405,12 +542,38 @@ pub fn handle_symlink(
     uid: u32,
     gid: u32,
 ) -> EntryResult {
+    handle_symlink_at(fs, parent, link_name, target, uid, gid, None)
+}
+
+/// `handle_symlink` at inode `ino` (replay); logged in the parent-stripe hold.
+pub fn handle_symlink_at(
+    fs: &SliceFsFilesystem,
+    parent: u64,
+    link_name: &str,
+    target: &str,
+    uid: u32,
+    gid: u32,
+    ino: Option<u64>,
+) -> EntryResult {
     let l = logged();
-    match fs.test_symlink_full(parent, link_name, target, uid, gid) {
-        Ok((ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Symlink { parent, name: link_name.to_string(), target: target.to_string(), uid, gid, ino });
-            EntryResult::Ok(ino, inode_to_file_attr(&meta))
-        }
+    let mut lsn = None;
+    let r = fs.symlink_logged(parent, link_name, target, uid, gid, ino, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
+}
+
+/// The reply of a request that gives nothing back.
+fn empty(r: Result<(), i32>) -> EmptyResult {
+    match r {
+        Ok(()) => EmptyResult::Ok,
+        Err(errno) => EmptyResult::Error(errno),
+    }
+}
+
+/// The reply of a request that gives an inode.
+fn entry(r: Result<(u64, InodeMeta), i32>) -> EntryResult {
+    match r {
+        Ok((ino, meta)) => EntryResult::Ok(ino, inode_to_file_attr(&meta)),
         Err(errno) => EntryResult::Error(errno),
     }
 }
@@ -431,13 +594,10 @@ pub fn handle_link(
     newname: &str,
 ) -> EntryResult {
     let l = logged();
-    match fs.test_link_full(ino, newparent, newname) {
-        Ok((new_ino, meta)) => {
-            l.log(fs, crate::oplog::Op::Link { ino, newparent, newname: newname.to_string() });
-            EntryResult::Ok(new_ino, inode_to_file_attr(&meta))
-        }
-        Err(errno) => EntryResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.link_logged(ino, newparent, newname, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    entry(r)
 }
 
 /// Handle `unlink`: remove the directory entry `name` from `parent`.
@@ -447,13 +607,10 @@ pub fn handle_unlink(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_unlink(parent, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Unlink { parent, name: name.to_string() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.unlink_logged(parent, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `rmdir`: remove the empty directory `name` from `parent`.
@@ -463,13 +620,10 @@ pub fn handle_rmdir(
     name: &str,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_rmdir(parent, name) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Rmdir { parent, name: name.to_string() });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.rmdir_logged(parent, name, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `rename`: rename `name` in `parent` to `newname` in `newparent`.
@@ -482,18 +636,16 @@ pub fn handle_rename(
     flags: u32,
 ) -> EmptyResult {
     let l = logged();
-    match fs.simulate_rename(parent, name, newparent, newname, flags) {
-        Ok(()) => {
-            l.log(fs, crate::oplog::Op::Rename { parent, name: name.to_string(), newparent, newname: newname.to_string(), flags });
-            EmptyResult::Ok
-        }
-        Err(errno) => EmptyResult::Error(errno),
-    }
+    let mut lsn = None;
+    let r = fs.rename_logged(parent, name, newparent, newname, flags, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    empty(r)
 }
 
 /// Handle `setattr`: update inode attributes for `ino`.
 ///
 /// `mtime` is `Some((sec, nsec))` if mtime should be updated.
+#[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
 pub fn handle_setattr(
     fs: &SliceFsFilesystem,
     ino: u64,
@@ -507,11 +659,12 @@ pub fn handle_setattr(
 ) -> AttrResult {
     fs.note_write();
     let l = logged();
-    match fs.test_setattr_full(ino, mode, uid, gid, size, fh, atime, mtime) {
-        Ok(inode) => {
-            l.log(fs, crate::oplog::Op::Setattr { ino, mode, uid, gid, size, atime, mtime });
-            AttrResult::Ok(inode_to_file_attr(&inode))
-        }
+    let mut lsn = None;
+    // A size change logs its own record in its cell hold (see `setattr_logged`).
+    let r = fs.setattr_logged(ino, mode, uid, gid, size, fh, atime, mtime, &mut l.sink(fs, &mut lsn));
+    fs.log_write_out(lsn);
+    match r {
+        Ok(inode) => AttrResult::Ok(inode_to_file_attr(&inode)),
         Err(errno) => AttrResult::Error(errno),
     }
 }
@@ -522,7 +675,7 @@ pub fn handle_getlk(
     end: u64,
     pid: u32,
 ) -> LockResult {
-    LockResult::Ok(start, end, libc::F_UNLCK as i32, pid)
+    LockResult::Ok(start, end, LOCK_UN, pid)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1191,7 +1344,7 @@ mod tests {
             LockResult::Ok(start, end, typ, pid) => {
                 assert_eq!(start, 0);
                 assert_eq!(end, 100);
-                assert_eq!(typ, libc::F_UNLCK as i32);
+                assert_eq!(typ, LOCK_UN);
                 assert_eq!(pid, 42);
             }
         }

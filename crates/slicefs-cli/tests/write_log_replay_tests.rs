@@ -3,18 +3,17 @@
 //! replaying the log must give the same file system as before the crash:
 //! names, types, modes, owners, sizes, times, link counts, xattrs, content.
 
-use std::collections::BTreeMap;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use metadata::segment::load_store_from_segments;
-use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
-use metadata::wal::{create_wal, WalConfig};
+use common::{dump, dump_open, new_fs_with, reload_and_replay, reload_and_replay_with, segment_paths};
+use metadata::wal::WalConfig;
 use slicefs_cli::filesystem::SliceFsFilesystem;
-use slicefs_cli::handlers::{self as h, CreateResult, EmptyResult, EntryResult, OpenResult, WriteResult};
+use slicefs_cli::handlers::{self as h, AttrResult, CreateResult, EmptyResult, EntryResult, OpenResult, WriteResult};
 use slicefs_cli::oplog;
-use slicefs_traits::metadata::{InodeMeta, MetadataStore};
+use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
 const S_IFREG: u32 = 0o100_000;
@@ -22,86 +21,6 @@ const S_IFDIR: u32 = 0o040_000;
 
 fn new_fs(store: &Path) -> SliceFsFilesystem {
     new_fs_with(store, WalConfig::PerOp)
-}
-
-fn new_fs_with(store: &Path, config: WalConfig) -> SliceFsFilesystem {
-    std::fs::create_dir_all(store.join("segments")).unwrap();
-    let wal = create_wal(config, store, 1).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::new(io.clone());
-    meta.set_wal(wal);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    fs.meta().commit().unwrap();
-    fs
-}
-
-/// What a mount after a crash does: the last root, then replay the log.
-fn reload_and_replay(store: &Path) -> SliceFsFilesystem {
-    reload_and_replay_with(store, |_| {})
-}
-
-/// `reload_and_replay` with `setup` run on the new file system before replay.
-fn reload_and_replay_with(store: &Path, setup: impl FnOnce(&SliceFsFilesystem)) -> SliceFsFilesystem {
-    let (root, snaps) = load_store_from_segments(&store.join("segments")).unwrap();
-    let io = Arc::new(Mutex::new(StoreIo::open(store).unwrap()));
-    let mut meta = DictMetadataStore::load_from_root(io.clone(), &root.unwrap()).unwrap();
-    meta.set_snapshots(snaps);
-    // A new segment after the last one, as a mount makes.
-    let next = segment_paths(store).last()
-        .and_then(|p| p.file_name()?.to_str()?.strip_prefix("segment-")?.strip_suffix(".seg")?.parse::<u64>().ok())
-        .map_or(1, |n| n + 1);
-    let wal = create_wal(WalConfig::PerOp, store, next).unwrap();
-    meta.set_wal(wal);
-    let fs = SliceFsFilesystem::new(meta, io, Some(store.to_path_buf()));
-    setup(&fs);
-    // The mount's replay: it streams the log (#106).
-    oplog::replay_log(&fs, &store.join("segments")).unwrap();
-    fs
-}
-
-/// Path -> description of every entry under the root.
-fn dump(fs: &SliceFsFilesystem) -> BTreeMap<String, String> {
-    dump_by(fs, |ino| fs.meta().get_inode(ino).unwrap())
-}
-
-/// `dump` as stat sees it: a file with an open write handle shows the size
-/// and times of that handle (its overlay is not in the inode until release).
-fn dump_open(fs: &SliceFsFilesystem) -> BTreeMap<String, String> {
-    dump_by(fs, |ino| fs.test_getattr(ino).unwrap())
-}
-
-fn dump_by(fs: &SliceFsFilesystem, inode: impl Fn(u64) -> InodeMeta) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    let mut todo = vec![(1u64, String::new())];
-    while let Some((dir, path)) = todo.pop() {
-        for e in fs.meta().list_directory(dir).unwrap() {
-            if e.name == "." || e.name == ".." {
-                continue;
-            }
-            let p = format!("{path}/{}", e.name);
-            let m = inode(e.ino);
-            let mut xattrs: Vec<(String, Vec<u8>)> = fs.meta().list_xattrs(e.ino).unwrap_or_default()
-                .into_iter().map(|n| { let v = fs.meta().get_xattr(e.ino, &n).unwrap(); (n, v) }).collect();
-            xattrs.sort();
-            let body = match m.mode & 0o170_000 {
-                S_IFDIR => { todo.push((e.ino, p.clone())); String::new() }
-                S_IFREG => format!("content={:x?}", blake(&fs.test_read(e.ino, 0, m.size as u32 + 1).unwrap())),
-                0o120_000 => format!("target={}", fs.simulate_readlink(e.ino).unwrap()),
-                _ => String::new(),
-            };
-            out.insert(p, format!(
-                "ino={} mode={:o} uid={} gid={} size={} nlinks={} mtime={}.{} ctime={}.{} atime={}.{} xattrs={:?} {body}",
-                e.ino, m.mode, m.uid, m.gid, m.size, m.nlinks, m.mtime_sec, m.mtime_nsec, m.ctime_sec, m.ctime_nsec,
-                m.atime_sec, m.atime_nsec, xattrs
-            ));
-        }
-    }
-    out
-}
-
-fn blake(data: &[u8]) -> u64 {
-    // A short content fingerprint (FNV-1a) keeps the dump readable.
-    data.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x1_0000_0001_b3))
 }
 
 fn data(seed: u64, n: usize) -> Vec<u8> {
@@ -275,7 +194,7 @@ fn a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming() {
         let _gate = fs.commit_gate();
         fs.commit_cut().unwrap();
         write(&fs, fh, 1 << 20, b); // the late write fills the gap
-        assert!(fs.test_is_streaming(fh), "the cut must not push the handle into Buffered mode");
+        assert!(fs.test_is_streaming(fh), "the cut must not push the handle into an overlay");
         assert_eq!(fs.test_read(ino, 0, want.len() as u32 + 1).unwrap(), want);
         fsync(&fs, ino, fh);
         std::mem::forget(fs);
@@ -322,7 +241,7 @@ fn two_write_handles_on_one_file_share_their_writes() {
     });
 }
 
-// A commit logs the bytes of a Buffered handle again (they are only in RAM).
+// A commit logs the bytes of an overlay handle again (they are only in RAM).
 // After a crash, replay must give the file the mtime of its last write and
 // the ctime of its last change, not the time of the commit or of the replay.
 #[test]
@@ -336,7 +255,7 @@ fn a_commit_keeps_the_times_of_a_buffered_file() {
             let _t = oplog::Clock::freeze_at((1_700_000_000, 0));
             let (ino, fh) = create(&fs, 1, "buf.bin");
             write(&fs, fh, 0, &data(10, 50_000));
-            write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+            write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Overlay
             (ino, fh)
         };
         assert!(!fs.test_is_streaming(fh));
@@ -375,7 +294,7 @@ fn fsynced_buffered_bytes_survive_a_commit_and_a_crash() {
         let fs = new_fs_with(dir.path(), WalConfig::FlushOnFsync);
         let (ino, fh) = create(&fs, 1, "buf.bin");
         write(&fs, fh, 0, &data(11, 2_000));
-        write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Buffered
+        write(&fs, fh, 100, &[0xEE; 300]); // not sequential: Overlay
         assert!(!fs.test_is_streaming(fh));
         fsync(&fs, ino, fh);
         fs.commit_cut().unwrap();
@@ -934,19 +853,6 @@ enum Window {
     GcDuringFinish,
 }
 
-/// The segment files of `store`, by id.
-fn segment_paths(store: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<(u64, PathBuf)> = std::fs::read_dir(store.join("segments")).unwrap()
-        .filter_map(|e| {
-            let p = e.unwrap().path();
-            let n: u64 = p.file_name()?.to_str()?.strip_prefix("segment-")?.strip_suffix(".seg")?.parse().ok()?;
-            Some((n, p))
-        })
-        .collect();
-    v.sort();
-    v.into_iter().map(|(_, p)| p).collect()
-}
-
 /// Files in the old generation (closed, an overlay, a streaming handle with
 /// pending bytes, a directory of new files), a commit cut, requests after
 /// the cut (in the next generation, some fsynced), then the commit stopped
@@ -1110,17 +1016,25 @@ fn a_crash_between_the_cut_and_the_root_replays() {
         for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot,
                   Window::RootTorn, Window::RootHeaderOnly, Window::RootEmpty, Window::Done,
                   Window::GcDuringFinish] {
-            let dir = TempDir::new().unwrap();
-            let live = {
-                let fs = new_fs_with(dir.path(), config.clone());
-                cut_window_scenario(&fs, dir.path(), w);
-                fs.meta().flush_wal().unwrap();
-                let d = dump_open(&fs);
-                std::mem::forget(fs); // a crash with the handles open
-                d
-            };
-            let fs = reload_and_replay(dir.path());
-            assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
+            // One thread per run: a window that forgets the cut keeps its
+            // lock (a crash does), and so its entry in the thread's lock-order
+            // stack, which must not reach the next run.
+            let config = config.clone();
+            std::thread::spawn(move || {
+                let dir = TempDir::new().unwrap();
+                let live = {
+                    let fs = new_fs_with(dir.path(), config.clone());
+                    cut_window_scenario(&fs, dir.path(), w);
+                    fs.meta().flush_wal().unwrap();
+                    let d = dump_open(&fs);
+                    std::mem::forget(fs); // a crash with the handles open
+                    d
+                };
+                let fs = reload_and_replay(dir.path());
+                assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
+            })
+            .join()
+            .unwrap();
         }
     }
 }
@@ -1195,4 +1109,443 @@ fn the_log_of_a_mount_after_a_torn_cut_replays() {
     let a = fs.meta().lookup(1, "after.bin").expect("the mount's log replays");
     assert_eq!(fs.test_read(a, 0, after.len() as u32 + 1).unwrap(), after);
     assert!(fs.meta().lookup(1, "late.bin").is_err());
+}
+
+/// The ops of the write log of `store` so far (the log is synced first).
+fn logged_ops(fs: &SliceFsFilesystem, store: &Path) -> Vec<oplog::Op> {
+    fs.meta().flush_wal().unwrap();
+    let (_, _, log) = metadata::segment::scan_store_with_log(&store.join("segments")).unwrap();
+    log.records().map(|r| oplog::Record::decode(r.as_ref().unwrap()).unwrap().op).collect()
+}
+
+fn writes(ops: &[oplog::Op]) -> usize {
+    ops.iter().filter(|op| matches!(op, oplog::Op::Write { .. })).count()
+}
+
+/// D-08: two threads, each with its own write handle on one file, write
+/// the same three 4 KiB blocks in parallel. Each record is appended in the
+/// hold of its apply, so the log order is the apply order: after a crash
+/// with both handles open, replay gives the live content and size. Only
+/// the last write to each block decides the content, so the run is done 4
+/// times.
+#[test]
+fn parallel_overlapping_writes_replay_to_the_same_content() {
+    for _ in 0..4 {
+        parallel_overlapping_round();
+    }
+}
+
+fn parallel_overlapping_round() {
+    let (_dir, fs) = check_with(WalConfig::PerOp, |fs| {
+        let (ino, a) = create(fs, 1, "f");
+        let b = open_rw(fs, ino);
+        std::thread::scope(|sc| {
+            for (t, fh) in [(1u64, a), (2u64, b)] {
+                sc.spawn(move || {
+                    for i in 0..150u64 {
+                        let block = (i * 7 + t) % 3;
+                        write(fs, fh, block * 4096, &data(t * 1000 + i, 4096));
+                    }
+                });
+            }
+        });
+    });
+    let ino = fs.test_lookup(1, "f").unwrap().0;
+    assert_eq!(fs.test_getattr(ino).unwrap().size, 3 * 4096);
+}
+
+/// A write that fails before it applies (EFBIG, EBADF) appends no record.
+#[test]
+fn a_failed_write_appends_no_record() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let (_, fh) = create(&fs, 1, "f");
+    write(&fs, fh, 0, b"hello");
+    let before = writes(&logged_ops(&fs, dir.path()));
+    assert_eq!(before, 1);
+    let max = slicefs_cli::filesystem::MAX_FILE_SIZE;
+    assert!(matches!(h::handle_write(&fs, fh, max - 2, b"xyz"), WriteResult::Error(e) if e == libc::EFBIG));
+    assert!(matches!(h::handle_write(&fs, 9999, 0, b"xyz"), WriteResult::Error(e) if e == libc::EBADF));
+    assert_eq!(writes(&logged_ops(&fs, dir.path())), before, "no record for a failed write");
+}
+
+fn releases(ops: &[oplog::Op]) -> usize {
+    ops.iter().filter(|op| matches!(op, oplog::Op::Release { .. })).count()
+}
+
+/// Run `scenario`, crash (no commit), replay, and compare `dump`; the
+/// scenario gets the store path to look at the log.
+fn check_in(scenario: impl FnOnce(&SliceFsFilesystem, &Path)) {
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        scenario(&fs, dir.path());
+        fs.meta().flush_wal().unwrap();
+        let d = dump(&fs);
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        d
+    };
+    assert_eq!(dump(&reload_and_replay(dir.path())), live);
+}
+
+/// RESEARCH Pattern 3: with two write handles only the last release
+/// finalizes, so only it logs a `Release`; replay gives the live file.
+#[test]
+fn two_write_handles_release_replays() {
+    check_in(|fs, store| {
+        let (ino, a) = create(fs, 1, "f");
+        let b = open_rw(fs, ino);
+        write(fs, a, 0, &data(1, 70_000));
+        write(fs, b, 4096, &data(2, 9000));
+        release(fs, ino, a);
+        assert_eq!(releases(&logged_ops(fs, store)), 0, "A was not the last write handle");
+        write(fs, b, 100_000, &data(3, 5000));
+        release(fs, ino, b);
+        assert_eq!(releases(&logged_ops(fs, store)), 1, "B's release finalized");
+    });
+}
+
+/// An open with O_TRUNC while another write handle is open truncates the
+/// shared cell; its `Truncate` is logged in that hold, and replay gives the
+/// live file.
+#[test]
+fn an_o_trunc_open_beside_a_write_handle_replays() {
+    check_in(|fs, store| {
+        let (ino, a) = create(fs, 1, "f");
+        write(fs, a, 0, &data(4, 50_000));
+        let b = match h::handle_open(fs, ino, libc::O_RDWR | libc::O_TRUNC) {
+            OpenResult::Ok(fh, true) => fh,
+            _ => panic!("open with O_TRUNC"),
+        };
+        assert!(logged_ops(fs, store).iter().any(|op| matches!(op, oplog::Op::Truncate { .. })));
+        write(fs, b, 0, &data(5, 3000));
+        write(fs, a, 2000, &data(6, 2000));
+        release(fs, ino, a);
+        release(fs, ino, b);
+    });
+}
+
+/// A file created with O_APPEND: its replay handle must not append, or the
+/// overwrite at 0 through a second handle would land at the end.
+#[test]
+fn a_file_created_with_o_append_replays_its_overwrites() {
+    check_in(|fs, _| {
+        let (ino, ap) = match h::handle_create(fs, 1, "log", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR | libc::O_APPEND) {
+            CreateResult::Ok(ino, fh, _) => (ino, fh),
+            _ => panic!("create"),
+        };
+        write(fs, ap, 0, b"first;");
+        write(fs, ap, 0, b"second;");
+        let rw = open_rw(fs, ino);
+        write(fs, rw, 0, b"XX");
+        release(fs, ino, rw);
+        release(fs, ino, ap);
+        assert_eq!(fs.test_read(ino, 0, 64).unwrap(), b"XXrst;second;");
+    });
+}
+
+/// An xattr change of an orphan replays. The orphan was unlinked while a
+/// handle that the log does not show (a plain open) was open. In replay the
+/// unlink reclaims the inode, so its later xattr record is skipped, as a
+/// write of a gone inode is (19-09: the xattr calls refuse a missing inode).
+#[test]
+fn an_xattr_change_of_an_open_orphan_replays() {
+    let dir = TempDir::new().unwrap();
+    {
+        let fs = new_fs(dir.path());
+        let ino = match h::handle_create(&fs, 1, "f", S_IFREG | 0o644, 0o022, 0, 0, libc::O_RDWR) {
+            CreateResult::Ok(ino, fh, _) => {
+                assert!(matches!(h::handle_release(&fs, ino, fh), EmptyResult::Ok));
+                ino
+            }
+            CreateResult::Error(e) => panic!("create errno {e}"),
+        };
+        fs.commit_cut().unwrap();
+        assert!(matches!(h::handle_open(&fs, ino, libc::O_RDONLY), OpenResult::Ok(..)));
+        assert!(matches!(h::handle_unlink(&fs, 1, "f"), EmptyResult::Ok));
+        assert!(matches!(h::handle_setxattr(&fs, ino, "user.k", b"v"), EmptyResult::Ok));
+        assert!(matches!(h::handle_removexattr(&fs, ino, "user.k"), EmptyResult::Ok));
+        std::mem::forget(fs); // crash with the handle open
+    }
+    let fs = reload_and_replay(dir.path());
+    assert!(fs.meta().lookup(1, "f").is_err());
+}
+
+/// RESEARCH Pitfall 9: two creates in different stripes can append their
+/// records in reverse inode order. Replay creates each at its logged inode
+/// number, so the order does not matter, and a later create gets a number
+/// above both.
+#[test]
+fn reverse_order_creates_replay() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let rec = |name: &str, ino: u64| oplog::Record {
+        time: (1_700_000_000, 0),
+        op: oplog::Op::Create {
+            parent: 1, name: name.into(), mode: S_IFREG | 0o644, umask: 0o022, uid: 501, gid: 20, flags: libc::O_RDWR, ino,
+        },
+    }
+    .encode();
+    let stats = oplog::replay(&fs, &[rec("b", 7), rec("a", 6)]).unwrap();
+    assert_eq!(stats.applied, 2);
+    assert_eq!(fs.meta().lookup(1, "a").unwrap(), 6);
+    assert_eq!(fs.meta().lookup(1, "b").unwrap(), 7);
+    let (c, fc) = create(&fs, 1, "c");
+    release(&fs, c, fc);
+    assert!(c > 7, "a later create got {c}");
+}
+
+/// D-08 for namespace records: 4 threads run creates, links, renames
+/// between two directories, unlinks, setattrs (mode, times) and setxattrs
+/// for about 0.5 s on one small pool of names, so their requests depend on
+/// each other (a request that fails logs nothing). Two dependent records
+/// appended out of apply order make the replay stop or give another tree.
+/// After a crash, replay gives the live tree, with the inode numbers, link
+/// counts and times (also of the two directories).
+#[test]
+fn parallel_namespace_ops_replay() {
+    check(|fs| {
+        let mk = |name: &str| match h::handle_mkdir(fs, 1, name, S_IFDIR | 0o755, 0o022, 501, 20) {
+            EntryResult::Ok(i, _) => i,
+            _ => panic!("mkdir {name}"),
+        };
+        let dirs = [mk("d1"), mk("d2")];
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        std::thread::scope(|sc| {
+            for t in 0..4u64 {
+                sc.spawn(move || namespace_worker(fs, t, dirs, end));
+            }
+        });
+    });
+}
+
+/// One thread of `parallel_namespace_ops_replay`: names `n0`..`n5` in each
+/// of `dirs`, shared with the other threads.
+fn namespace_worker(fs: &SliceFsFilesystem, t: u64, dirs: [u64; 2], end: std::time::Instant) {
+    let mut x = (t + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut rnd = |n: u64| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x % n };
+    let mut n = 0u64;
+    while std::time::Instant::now() < end {
+        n += 1;
+        let (d, name) = (dirs[rnd(2) as usize], format!("n{}", rnd(6)));
+        let (d2, name2) = (dirs[rnd(2) as usize], format!("n{}", rnd(6)));
+        let found = fs.test_lookup(d, &name).ok().map(|r| r.0);
+        match (rnd(6), found) {
+            (0, _) => {
+                if let CreateResult::Ok(ino, fh, _) = h::handle_create(fs, d, &name, S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR) {
+                    write(fs, fh, 0, &data(t * 100_000 + n, 64));
+                    release(fs, ino, fh);
+                }
+            }
+            (1, Some(ino)) => { let _ = h::handle_link(fs, ino, d2, &name2); }
+            (2, _) => { let _ = h::handle_rename(fs, d, &name, d2, &name2, 0); }
+            (3, _) => { let _ = h::handle_unlink(fs, d, &name); }
+            (4, Some(ino)) => {
+                let when = Some((1_600_000_000 + n as i64, (t * 1000) as u32));
+                let _ = h::handle_setattr(fs, ino, Some(0o600 | rnd(0o100) as u32), None, None, None, None, when, when);
+            }
+            (5, Some(ino)) => { let _ = h::handle_setxattr(fs, ino, "user.k", &n.to_le_bytes()); }
+            _ => {}
+        }
+    }
+}
+
+/// A namespace request that fails appends no record.
+#[test]
+fn a_failed_namespace_op_appends_no_record() {
+    let dir = TempDir::new().unwrap();
+    let fs = new_fs(dir.path());
+    let d = match h::handle_mkdir(&fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20) { EntryResult::Ok(i, _) => i, _ => panic!() };
+    let (a, fa) = create(&fs, d, "a");
+    release(&fs, a, fa);
+    let before = logged_ops(&fs, dir.path()).len();
+    assert!(matches!(h::handle_mkdir(&fs, 1, "d", S_IFDIR | 0o755, 0o022, 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_create(&fs, d, "a", S_IFREG | 0o644, 0o022, 501, 20, libc::O_RDWR), CreateResult::Error(_)));
+    assert!(matches!(h::handle_symlink(&fs, 1, "d", "x", 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_mknod(&fs, 9999, "n", S_IFREG | 0o644, 0, 0, 501, 20), EntryResult::Error(_)));
+    assert!(matches!(h::handle_link(&fs, d, 1, "dl"), EntryResult::Error(_)), "a hard link to a directory");
+    assert!(matches!(h::handle_unlink(&fs, 1, "missing"), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_rmdir(&fs, 1, "d"), EmptyResult::Error(_)), "not empty");
+    assert!(matches!(h::handle_rename(&fs, 1, "missing", 1, "x", 0), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_setattr(&fs, 9999, Some(0o600), None, None, None, None, None, None), AttrResult::Error(_)));
+    assert!(matches!(h::handle_setattr(&fs, a, None, None, None, Some(slicefs_cli::filesystem::MAX_FILE_SIZE + 1), None, None, None), AttrResult::Error(_)));
+    assert!(matches!(h::handle_setxattr(&fs, 9999, "user.k", b"v"), EmptyResult::Error(_)));
+    assert!(matches!(h::handle_removexattr(&fs, a, "user.none"), EmptyResult::Error(_)));
+    assert_eq!(logged_ops(&fs, dir.path()).len(), before, "no record for a failed request");
+}
+
+/// A setattr of an orphan replays (19-09 note). The orphan was unlinked
+/// while a plain open, which the log does not show, kept it. In replay the
+/// unlink reclaims the inode, so its later `Setattr` record is skipped, as
+/// an xattr change of a gone inode is.
+#[test]
+fn a_setattr_of_an_open_orphan_replays() {
+    let dir = TempDir::new().unwrap();
+    {
+        let fs = new_fs(dir.path());
+        let (ino, fh) = create(&fs, 1, "f");
+        release(&fs, ino, fh);
+        fs.commit_cut().unwrap();
+        assert!(matches!(h::handle_open(&fs, ino, libc::O_RDONLY), OpenResult::Ok(..)));
+        assert!(matches!(h::handle_unlink(&fs, 1, "f"), EmptyResult::Ok));
+        assert!(matches!(h::handle_setattr(&fs, ino, Some(0o600), None, None, None, None, None, None), AttrResult::Ok(_)));
+        std::mem::forget(fs); // crash with the handle open
+    }
+    let fs = reload_and_replay(dir.path());
+    assert!(fs.meta().lookup(1, "f").is_err());
+}
+
+/// A utimens while the release of the last write handle is in its I/O phase
+/// (the flush with the cell unlocked) wins, as at a close: the flush stamps
+/// the mtime the cell has then, not the one it read before its I/O. Replay
+/// gives the same (found by `parallel_namespace_ops_replay`).
+#[test]
+fn a_utimens_during_the_close_io_is_kept() {
+    check(|fs| {
+        let (ino, fh) = create(fs, 1, "f");
+        write(fs, fh, 0, b"hello");
+        let (parked_tx, parked) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        let once = Mutex::new(Some((parked_tx, go_rx)));
+        fs.test_set_push_hook(Some(Arc::new(move || {
+            if let Some((p, g)) = once.lock().unwrap().take() {
+                p.send(()).unwrap();
+                g.recv().unwrap();
+            }
+        })));
+        let when = (1_500_000_000, 7);
+        std::thread::scope(|sc| {
+            sc.spawn(|| release(fs, ino, fh));
+            parked.recv_timeout(std::time::Duration::from_secs(10)).expect("the release parks in its I/O");
+            assert!(matches!(h::handle_setattr(fs, ino, None, None, None, None, None, None, Some(when)), AttrResult::Ok(_)));
+            go.send(()).unwrap();
+        });
+        fs.test_set_push_hook(None);
+        let m = fs.meta().get_inode(ino).unwrap();
+        assert_eq!((m.mtime_sec, m.mtime_nsec), when, "the explicit mtime");
+    });
+}
+
+/// D-08, LOCK-04: mkdir locks the stripes of the parent and of the new
+/// directory before the directory is linked. A request that finds the new
+/// name while the mkdir is parked (linked, its record not yet appended)
+/// waits for the new directory's stripe, so its `Create` record comes after
+/// the `Mkdir` record, and replay of that order never stops.
+#[test]
+fn a_create_in_a_new_directory_waits_for_its_mkdir_record() {
+    use slicefs_cli::locks::stripe;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    const ROOT: u64 = 1;
+    const LIMIT: Duration = Duration::from_secs(5);
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        // The red run needs "d" and the file in it on other stripes than
+        // the parent: else the old code already blocks on the parent's
+        // stripe. Numbers are given out in order in this one-thread setup.
+        let mut n = 0;
+        let next = loop {
+            let (ino, fh) = create(&fs, ROOT, &format!("filler{n}"));
+            release(&fs, ino, fh);
+            n += 1;
+            let next = ino + 1;
+            if stripe(next) != stripe(ROOT) && stripe(next + 1) != stripe(ROOT) {
+                break next;
+            }
+        };
+        let (parked_tx, parked) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        fs.test_set_mkdir_hook(Some(Arc::new(move || {
+            if let Some((parked, release)) = slot.lock().unwrap().take() {
+                let _ = parked.send(());
+                let _ = release.recv_timeout(LIMIT);
+            }
+        })));
+        let live = std::thread::scope(|sc| {
+            let fs = &fs;
+            let a = sc.spawn(move || match h::handle_mkdir(fs, ROOT, "d", S_IFDIR | 0o755, 0o022, 501, 20) {
+                EntryResult::Ok(i, _) => i,
+                _ => panic!("mkdir d"),
+            });
+            parked.recv_timeout(LIMIT).expect("the mkdir must park after the link");
+            let d = fs.test_lookup(ROOT, "d").expect("the new name is found during the park").0;
+            assert_eq!(d, next, "the mkdir took the next number");
+            assert_ne!(stripe(d), stripe(ROOT));
+            let (done_tx, done) = mpsc::channel();
+            let b = sc.spawn(move || {
+                let r = create(fs, d, "f");
+                done_tx.send(()).unwrap();
+                r
+            });
+            let early = done.recv_timeout(Duration::from_millis(300));
+            release_tx.send(()).unwrap();
+            assert_eq!(a.join().unwrap(), d);
+            let (f, fh) = b.join().unwrap();
+            release(fs, f, fh);
+            fs.test_set_mkdir_hook(None);
+            fs.meta().flush_wal().unwrap();
+            (dump(fs), early.is_err())
+        });
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        live
+    };
+    let (live, waited) = live;
+    let replayed = dump(&reload_and_replay(dir.path()));
+    assert_eq!(replayed, live, "replay must give the live tree");
+    assert!(waited, "the create in the new directory must wait for the mkdir's stripe");
+}
+
+/// WR-03, D-08: a size change of an inode takes the inode's stripe first,
+/// so its `Setattr` record comes after the `Create` record of a create that
+/// has linked the name but not yet logged it. Replay then gives the size
+/// the live mount showed; it skips a `Setattr` of an inode that does not
+/// exist yet.
+#[test]
+fn a_size_change_of_a_new_file_comes_after_its_create_record() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    const ROOT: u64 = 1;
+    const LIMIT: Duration = Duration::from_secs(5);
+    let dir = TempDir::new().unwrap();
+    let live = {
+        let fs = new_fs(dir.path());
+        let (parked_tx, parked) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        // The hook runs in a create after the link, before its record.
+        fs.test_set_mkdir_hook(Some(Arc::new(move || {
+            if let Some((parked, release)) = slot.lock().unwrap().take() {
+                let _ = parked.send(());
+                let _ = release.recv_timeout(LIMIT);
+            }
+        })));
+        let live = std::thread::scope(|sc| {
+            let fs = &fs;
+            let a = sc.spawn(move || create(fs, ROOT, "f"));
+            parked.recv_timeout(LIMIT).expect("the create must park after the link");
+            let f = fs.test_lookup(ROOT, "f").expect("the new name is found during the park").0;
+            let b = sc.spawn(move || h::handle_setattr(fs, f, None, None, None, Some(4096), None, None, None));
+            // Without the stripe the size change is applied (and logged)
+            // during the park; with it, it waits. Look for at most 2 s.
+            let t0 = Instant::now();
+            while fs.meta().get_inode(f).unwrap().size == 0 && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            release_tx.send(()).unwrap();
+            let (f2, fh) = a.join().unwrap();
+            assert_eq!(f2, f);
+            assert!(matches!(b.join().unwrap(), AttrResult::Ok(_)), "the size change");
+            release(fs, f, fh);
+            fs.test_set_mkdir_hook(None);
+            fs.meta().flush_wal().unwrap();
+            dump(fs)
+        });
+        std::mem::forget(fs); // a crash: no commit, no destroy
+        live
+    };
+    assert!(live.values().any(|v| v.contains("size=4096")), "the live size: {live:?}");
+    let replayed = dump(&reload_and_replay(dir.path()));
+    assert_eq!(replayed, live, "replay must give the live size");
 }

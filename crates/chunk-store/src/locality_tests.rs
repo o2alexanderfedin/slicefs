@@ -65,6 +65,7 @@ fn cache_matches_index(s: &ChunkStore) -> usize {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_rewrite_in_pack_order_hits_the_cache_with_the_places_of_the_index() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -101,6 +102,7 @@ fn a_rewrite_in_pack_order_hits_the_cache_with_the_places_of_the_index() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn hits_in_random_order_never_fill() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -133,6 +135,7 @@ fn x_is_written_again(s: &ChunkStore, x: ObjectId, dx: &[u8], objects: u64) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_gc_drops_the_cached_pack_of_a_removed_object() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -155,6 +158,7 @@ fn a_gc_drops_the_cached_pack_of_a_removed_object() {
 // that state. A fill from it would cache X, and a put of X would skip the
 // write and lose X.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_pack_that_a_gc_changed_is_never_filled_from_its_stale_idx() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -188,6 +192,7 @@ fn a_pack_that_a_gc_changed_is_never_filled_from_its_stale_idx() {
 // X (the test hook runs it). The put must see that under the lock and write
 // X again.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_cache_hit_that_gc_removed_before_the_lock_writes_again() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -203,7 +208,7 @@ fn a_cache_hit_that_gc_removed_before_the_lock_writes_again() {
     {
         let ran = Arc::clone(&ran);
         let ids = ids.clone();
-        *s.after_lookup.lock().unwrap() = Some(Box::new(move |s: &ChunkStore| {
+        *s.after_lookup.lock() = Some(Box::new(move |s: &ChunkStore| {
             gc_remove(s, &ids, x);
             ran.store(true, Ordering::SeqCst);
         }));
@@ -216,6 +221,7 @@ fn a_cache_hit_that_gc_removed_before_the_lock_writes_again() {
 // A cache hit during a GC marks the object touched, as an index hit does:
 // the GC keeps it although its mark does not have it.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_cache_hit_during_a_gc_keeps_the_object() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -236,6 +242,7 @@ fn a_cache_hit_during_a_gc_keeps_the_object() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn packs_of_an_earlier_process_are_cached_from_their_exact_idx() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -317,6 +324,7 @@ fn sweep_store(mem: &MemIo) -> (ChunkStore, HashSet<ObjectId>) {
 /// punch). After the reopen, no exact `.idx` lists a removed or moved
 /// object, and a re-write of everything in pack order loses nothing.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx() {
     let n = SWEEP_PACKS * PER_PACK;
     let mut done = false;
@@ -353,6 +361,7 @@ fn a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx() {
 /// with their `.idx` (it lists the removed objects); their `.idx` files are
 /// no longer exact.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them() {
     let n = SWEEP_PACKS * PER_PACK;
     let mem = MemIo::new();
@@ -376,6 +385,7 @@ fn a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them() {
 // that removes a copy would leave the old place in the cache of a later
 // mount.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_failed_install_after_the_copies_leaves_the_source_pack_untrusted() {
     let n = SWEEP_PACKS * PER_PACK;
     let mem = MemIo::new();
@@ -398,6 +408,7 @@ fn a_failed_install_after_the_copies_leaves_the_source_pack_untrusted() {
 
 // The clear of the exact marks fails: the GC ends before any change.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_failed_clear_ends_the_gc_before_any_change() {
     let mem = MemIo::new();
     let (s, live) = sweep_store(&mem);
@@ -419,6 +430,7 @@ fn a_failed_clear_ends_the_gc_before_any_change() {
 // selects only the pack of the new copy); the pack of the first copy is
 // below the floor, so a streak in it does not cache X.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn the_trust_floor_of_a_failed_lookup_outlives_a_crash() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -453,6 +465,7 @@ fn the_trust_floor_of_a_failed_lookup_outlives_a_crash() {
 
 // The trust floor cannot be written: the put fails and writes nothing.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_put_whose_trust_floor_fails_writes_nothing() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -474,6 +487,7 @@ fn a_put_whose_trust_floor_fails_writes_nothing() {
 // trusted, a streak in P would cache X, and a put of X would skip the
 // write and lose X.
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn a_failed_lookup_ends_the_trust_in_the_packs_so_far() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -522,6 +536,7 @@ fn a_rewrite_in_the_active_pack_tries_no_fill() {
 // and the next failed lookup still writes a new floor durably (a floor
 // that is not known on disk is never taken as high enough).
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
 fn an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup() {
     let mem = MemIo::new();
     let s = store(&mem, true);
@@ -541,7 +556,7 @@ fn an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup() {
     let y = ids[(2 * PER_PACK + 3) as usize];
     s.gc_begin().unwrap(); // seal: the put of Y makes a new pack
     s.gc_abort();
-    let next = s.inner.lock().unwrap().next_pack;
+    let next = s.inner.lock().next_pack;
     mem.fail_read_once_after(0);
     assert_eq!(s.put(&data(2 * PER_PACK + 3)).unwrap(), y);
     mem.clear_fail_reads_after();

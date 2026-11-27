@@ -45,6 +45,21 @@ bitflags! {
         /// allow parallel lookups and readdir
         const FUSE_PARALLEL_DIROPS = 1 << 18;
         /// fs handles killing suid/sgid/cap on write/chown/trunc
+        ///
+        /// The filesystem takes responsibility for clearing suid, sgid and the
+        /// `security.capability` xattr on every write, chown and truncate. No per-request
+        /// signal accompanies this: the operation itself is the signal.
+        ///
+        /// Unlike [`Self::FUSE_HANDLE_KILLPRIV_V2`] this does not set `SB_NOSEC`, so the kernel
+        /// still computes the removal and applies it through a `setattr`. What it buys is that
+        /// the kernel skips refreshing attributes first, trusting the filesystem to keep them
+        /// right.
+        ///
+        /// Note that this reaches further than the write, chown and truncate the contract names.
+        /// Negotiating either killpriv capability also stops the kernel removing privileges on
+        /// `fallocate` and `copy_file_range`, and neither carries a signal saying so, so a
+        /// filesystem that wants those to behave like a local one has to clear the bits there
+        /// itself
         const FUSE_HANDLE_KILLPRIV = 1 << 19;
         /// filesystem supports posix acls
         const FUSE_POSIX_ACL = 1 << 20;
@@ -63,6 +78,24 @@ bitflags! {
         /// filesystem supports submounts
         const FUSE_SUBMOUNTS = 1 << 27;
         /// fs handles killing suid/sgid/cap on write/chown/trunc (v2)
+        ///
+        /// As with [`Self::FUSE_HANDLE_KILLPRIV`], clearing the `security.capability` xattr on
+        /// every write, chown and truncate is the filesystem's job and carries no per-request
+        /// signal. This capability additionally sets `SB_NOSEC`, which stops the kernel doing
+        /// it, though only for an inode whose attributes are cached: fuse clears `S_NOSEC` on
+        /// every attribute refresh, since another client may have set the xattr meanwhile. A
+        /// filesystem therefore cannot rely on the kernel having done it.
+        ///
+        /// What v2 adds is finer control over suid and sgid alone, matching what the VFS would
+        /// have done: they are cleared on a write or truncate only when the caller lacks
+        /// `CAP_FSETID`, and sgid only when the file is group-executable. The kernel reports
+        /// the cases it wants cleared through the `kill_suid_gid` argument of
+        /// [`Filesystem::setattr`](crate::Filesystem::setattr),
+        /// [`open`](crate::Filesystem::open) and [`create`](crate::Filesystem::create), and
+        /// through [`WriteFlags::FUSE_WRITE_KILL_SUIDGID`](crate::WriteFlags) on a write.
+        /// Honoring those covers suid and sgid only, not file capabilities, and only the
+        /// operations that carry a signal: see [`Self::FUSE_HANDLE_KILLPRIV`] for the ones that
+        /// do not
         const FUSE_HANDLE_KILLPRIV_V2 = 1 << 28;
         /// extended setxattr support
         const FUSE_SETXATTR_EXT = 1 << 29;
@@ -93,6 +126,14 @@ bitflags! {
         /// kernel supports request timeout
         const FUSE_REQUEST_TIMEOUT = 1 << 42;
 
+        /// filesystem supports the `RENAME_SWAP` flag of `renamex_np(2)`.
+        /// Requesting this also selects macFUSE's extended `fuse_rename_in` layout
+        #[cfg(target_os = "macos")]
+        const FUSE_RENAME_SWAP = 1 << 25;
+        /// filesystem supports the `RENAME_EXCL` flag of `renamex_np(2)`.
+        /// Requesting this also selects macFUSE's extended `fuse_rename_in` layout
+        #[cfg(target_os = "macos")]
+        const FUSE_RENAME_EXCL = 1 << 26;
         /// pre-allocate space for a file
         #[cfg(target_os = "macos")]
         const FUSE_ALLOCATE = 1 << 27;

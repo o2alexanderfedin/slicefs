@@ -2,16 +2,22 @@
 //!
 //! Parses the CLI arguments and dispatches to the appropriate subcommand.
 
-use slicefs_cli::{cli, gc, mount, scrub, seed, snapshot, stats, unmount};
+use slicefs_cli::{cli, gc, mount, rehash, scrub, seed, snapshot, stats, unmount};
 use clap::Parser;
 use cli::{Cli, Cmd};
 
 fn main() {
+    // The allocator first, before any thread starts, for every command:
+    // the offline ones (seed, gc, rehash, scrub, ...) free large blocks
+    // too (#207). `mount` sets it again and logs the value.
+    slicefs_cli::alloc_tune::tune_at_start();
     let cli = Cli::parse();
     let json = cli.json;
 
+    let dirty = cli.command.dirty_config();
     match cli.command {
-        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash } => {
+        Cmd::Mount { mountpoint, store, noatime, allow_other, cache_size, wal_strategy, snapshot, auto_snapshot, backend, force, commit_interval, gc_interval, compression, hash, chunk_profile, workers, .. } => {
+            let dirty = dirty.expect("mount has dirty values");
             if let Err(e) = mount::run_mount(
                 &store,
                 &mountpoint,
@@ -27,6 +33,9 @@ fn main() {
                 gc_interval,
                 compression,
                 hash.as_deref(),
+                chunk_profile,
+                dirty,
+                workers,
             ) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
@@ -46,8 +55,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Seed { store, source_dir, hash } => {
-            if let Err(e) = seed::run_seed(&store, &source_dir, hash.as_deref()) {
+        Cmd::Seed { store, source_dir, hash, chunk_profile } => {
+            if let Err(e) = seed::run_seed_with(&store, &source_dir, hash.as_deref(), chunk_profile) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
@@ -62,6 +71,16 @@ fn main() {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
                     eprintln!("slicefs gc error: {e}");
+                }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Rehash { to, dry_run, store } => {
+            if let Err(e) = rehash::run_rehash(&store, &to, dry_run) {
+                if json {
+                    eprintln!("{{\"error\": \"{e}\"}}");
+                } else {
+                    eprintln!("slicefs rehash error: {e}");
                 }
                 std::process::exit(1);
             }

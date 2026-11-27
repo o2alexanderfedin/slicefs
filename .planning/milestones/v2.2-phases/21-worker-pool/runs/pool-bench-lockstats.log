@@ -1,0 +1,182 @@
+# pool-bench lock-stats runs at 4 and 8 workers (owner request): Docker mount form, tar stream of the committed clean tree at 76a1974 (code of 7853542), lock-stats release build in /target/lockstats, store volume slicefs-pool-bench. The lock recorder adds a shared mutex per lock event: the throughput of these runs is not part of the bench tables.
+# host load before: 17.37 17.09 15.14
+Linux f1b30b9e6e9f 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+3.03 3.67 2.36 1/793 20
+== lock-stats build, POOL_BENCH_N=4 POOL_BENCH_ROUNDS=1
+nproc 32
+uname -r 7.2.12-orbstack-00394-gbecdd6130068
+loadavg 1.43 3.16 2.25 1/801 38
+clients=16 file_mib=64 files_per_client=250
+detail n=4 round=1 trace=off arena=default mount=a pool: workers=4 jobs=2145 max_weight=1048576 max_queue_wait_ms=72 queue_max=8 jobs_per_worker=526,545,522,552
+detail n=4 round=1 trace=off arena=default mount=a steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=store count=368342 wait_p99_us=90.9 wait_max_us=4231.2 hold_p99_us=26.0 hold_max_us=3467.3
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1663.0 hold_max_us=1663.0
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=wal count=2195 wait_p99_us=0.0 wait_max_us=0.1 hold_p99_us=0.5 hold_max_us=1.4
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=wal_writer count=3456 wait_p99_us=0.0 wait_max_us=991.7 hold_p99_us=15.0 hold_max_us=377.6
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=wal_queue count=2047 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2.2 hold_max_us=26.6
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=dir_live count=66 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=5.3 hold_max_us=5.3
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=inode_live count=147 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=4.4 hold_max_us=4.8
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=handles count=1121 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.8 hold_max_us=29.8
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=file_cell count=2160 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=4317.2 hold_max_us=7696.4
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=cell_map count=3057 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.7 hold_max_us=31.9
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=stripe count=48 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=24.5 hold_max_us=24.5
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=inode_map count=18 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=8.3 hold_max_us=8.3
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=inode_data count=20 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=dir_data count=4 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.1 hold_max_us=1.1
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=manifest_data count=17 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=6.0 hold_max_us=6.0
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=xattr_data count=1025 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.3 hold_max_us=0.5
+lock n=4 round=1 trace=off arena=default mount=a lock_row site=refcounts count=17 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=4.0 hold_max_us=4.0
+detail n=4 round=1 trace=off arena=default mount=b pool: workers=4 jobs=25694 max_weight=1048576 max_queue_wait_ms=144 queue_max=8 jobs_per_worker=6562,6357,6437,6338
+detail n=4 round=1 trace=off arena=default mount=b steps: save_steps=239 steps_per_s=19.36 freed_per_step=4247186 freed_bytes=1015077568
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=store count=573973 wait_p99_us=2.0 wait_max_us=3029.0 hold_p99_us=8.5 hold_max_us=5054.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1671.2 hold_max_us=1671.2
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=wal count=2259 wait_p99_us=0.0 wait_max_us=0.1 hold_p99_us=0.5 hold_max_us=23.0
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=wal_writer count=3278 wait_p99_us=0.0 wait_max_us=741.4 hold_p99_us=19.6 hold_max_us=56.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=wal_queue count=1622 wait_p99_us=0.0 wait_max_us=0.5 hold_p99_us=2.4 hold_max_us=9.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=readers count=23421 wait_p99_us=0.0 wait_max_us=95.0 hold_p99_us=0.7 hold_max_us=46.6
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=dir_live count=77 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.1 hold_max_us=7.1
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=inode_live count=465 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.8 hold_max_us=11.8
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=handles count=1249 wait_p99_us=0.0 wait_max_us=3.4 hold_p99_us=1.5 hold_max_us=37.8
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=file_cell count=1583 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=6373.4 hold_max_us=8896.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=cell_map count=44158 wait_p99_us=0.0 wait_max_us=0.5 hold_p99_us=1.0 hold_max_us=107.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=stripe count=96 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=5.5 hold_max_us=5.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=inode_map count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.5 hold_max_us=7.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=inode_data count=51 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=dir_data count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=manifest_data count=23693 wait_p99_us=0.0 wait_max_us=623.1 hold_p99_us=0.7 hold_max_us=671.7
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=xattr_data count=1025 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.3 hold_max_us=0.5
+lock n=4 round=1 trace=off arena=default mount=b lock_row site=refcounts count=479 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.8 hold_max_us=6.9
+detail n=4 round=1 trace=off arena=default mount=m pool: workers=4 jobs=48049 max_weight=4096 max_queue_wait_ms=2 queue_max=8 jobs_per_worker=11732,11931,12647,11739
+detail n=4 round=1 trace=off arena=default mount=m steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=store count=96922 wait_p99_us=49.6 wait_max_us=2461.7 hold_p99_us=11.4 hold_max_us=7217.2
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1675.3 hold_max_us=1675.3
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=wal count=52067 wait_p99_us=0.0 wait_max_us=166.0 hold_p99_us=0.2 hold_max_us=357.1
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=wal_writer count=56745 wait_p99_us=37.9 wait_max_us=1340.4 hold_p99_us=9.6 hold_max_us=875.0
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=wal_queue count=36802 wait_p99_us=0.0 wait_max_us=625.7 hold_p99_us=0.5 hold_max_us=50.4
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=readers count=12000 wait_p99_us=0.3 wait_max_us=707.1 hold_p99_us=2.4 hold_max_us=591.4
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=dir_live count=24178 wait_p99_us=0.0 wait_max_us=211.1 hold_p99_us=2.9 hold_max_us=178.0
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=inode_live count=52451 wait_p99_us=0.0 wait_max_us=741.4 hold_p99_us=2.3 hold_max_us=151.7
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=handles count=40001 wait_p99_us=0.1 wait_max_us=439.8 hold_p99_us=0.6 hold_max_us=219.5
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=file_cell count=28000 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=17.2 hold_max_us=2775.0
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=cell_map count=32433 wait_p99_us=0.0 wait_max_us=253.1 hold_p99_us=0.4 hold_max_us=2803.7
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=stripe count=28028 wait_p99_us=0.0 wait_max_us=556.0 hold_p99_us=61.3 hold_max_us=1051.6
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=inode_map count=8162 wait_p99_us=29.6 wait_max_us=735.7 hold_p99_us=15.0 hold_max_us=76.7
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=inode_data count=4148 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=15.5 hold_max_us=54.4
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=dir_data count=4020 wait_p99_us=0.0 wait_max_us=0.1 hold_p99_us=0.1 hold_max_us=21.0
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=manifest_data count=16017 wait_p99_us=0.0 wait_max_us=606.2 hold_p99_us=1.4 hold_max_us=151.7
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=xattr_data count=8017 wait_p99_us=0.0 wait_max_us=0.2 hold_p99_us=0.1 hold_max_us=5.9
+lock n=4 round=1 trace=off arena=default mount=m lock_row site=refcounts count=8001 wait_p99_us=0.1 wait_max_us=581.6 hold_p99_us=2.2 hold_max_us=261.0
+detail n=4 round=1 trace=off arena=default mount=v pool: workers=4 jobs=13966 max_weight=0 max_queue_wait_ms=6 queue_max=8 jobs_per_worker=3578,3513,3352,3523
+detail n=4 round=1 trace=off arena=default mount=v steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=store count=147765 wait_p99_us=5.0 wait_max_us=2725.9 hold_p99_us=2.5 hold_max_us=2011.1
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1707.0 hold_max_us=1707.0
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=wal count=51 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=14.2 hold_max_us=14.2
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=wal_writer count=8 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.0 hold_max_us=3.0
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=wal_queue count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.0 hold_max_us=0.0
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=readers count=13917 wait_p99_us=0.0 wait_max_us=561.2 hold_p99_us=0.9 hold_max_us=87.9
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=dir_live count=49 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=15.7 hold_max_us=15.7
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=inode_live count=82 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2.6 hold_max_us=2.6
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=handles count=65 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.8 hold_max_us=3.8
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=cell_map count=14702 wait_p99_us=0.0 wait_max_us=0.3 hold_p99_us=0.2 hold_max_us=90.8
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=stripe count=32 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.7 hold_max_us=7.7
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=inode_map count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.2 hold_max_us=1.2
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=inode_data count=35 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=dir_data count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.5 hold_max_us=0.5
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=manifest_data count=13902 wait_p99_us=0.0 wait_max_us=101.6 hold_p99_us=0.3 hold_max_us=84.9
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=xattr_data count=1 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.0 hold_max_us=0.0
+lock n=4 round=1 trace=off arena=default mount=v lock_row site=refcounts count=1 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.7 hold_max_us=0.7
+bench n=4 round=1 trace=off arena=default write_mbs=182.2 read_mbs=882.8 meta_fps=7207.2 rand_mbs=141.7 vmhwm_a_mib=82 vmhwm_b_mib=163 mismatches=0 max_weight=1048576 max_queue_wait_ms=144 load=1.39 meta_stat_ops=62500.0 meta_read_ops=15873.0 meta_unlink_ops=37735.8 randcheck_mbs=499.0 vmhwm_m_mib=51 vmhwm_v_mib=45
+loadavg-end 3.30 3.41 2.36 1/803 973
+pool-bench: done
+rc=0
+== lock-stats build, POOL_BENCH_N=8 POOL_BENCH_ROUNDS=1
+nproc 32
+uname -r 7.2.12-orbstack-00394-gbecdd6130068
+loadavg 3.30 3.41 2.36 1/803 979
+clients=16 file_mib=64 files_per_client=250
+detail n=8 round=1 trace=off arena=default mount=a pool: workers=8 jobs=2145 max_weight=1048576 max_queue_wait_ms=1149 queue_max=10 jobs_per_worker=248,265,389,210,238,248,259,288
+detail n=8 round=1 trace=off arena=default mount=a steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=store count=450573 wait_p99_us=249.0 wait_max_us=13508.6 hold_p99_us=38.7 hold_max_us=13099.0
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1455.1 hold_max_us=1455.1
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=wal count=2195 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=23.8
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=wal_writer count=3523 wait_p99_us=0.0 wait_max_us=1186.8 hold_p99_us=16.0 hold_max_us=92.2
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=wal_queue count=2002 wait_p99_us=0.0 wait_max_us=0.1 hold_p99_us=2.1 hold_max_us=27.1
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=dir_live count=66 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=6.2 hold_max_us=6.2
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=inode_live count=147 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.8 hold_max_us=5.6
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=handles count=1121 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2.1 hold_max_us=20.5
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=file_cell count=2160 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=4927.5 hold_max_us=37617.7
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=cell_map count=3601 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=31.8 hold_max_us=1742.8
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=stripe count=48 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=20.6 hold_max_us=20.6
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=inode_map count=18 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.7 hold_max_us=7.7
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=inode_data count=20 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.7 hold_max_us=0.7
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=dir_data count=4 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.4 hold_max_us=0.4
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=manifest_data count=17 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2.4 hold_max_us=2.4
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=xattr_data count=1025 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.4 hold_max_us=0.6
+lock n=8 round=1 trace=off arena=default mount=a lock_row site=refcounts count=17 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=22.1 hold_max_us=22.1
+detail n=8 round=1 trace=off arena=default mount=b pool: workers=8 jobs=26887 max_weight=1048576 max_queue_wait_ms=137 queue_max=16 jobs_per_worker=3344,3464,3375,3401,3523,3180,3216,3384
+detail n=8 round=1 trace=off arena=default mount=b steps: save_steps=239 steps_per_s=19.82 freed_per_step=4234022 freed_bytes=1011931328
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=store count=581370 wait_p99_us=58.5 wait_max_us=2609.2 hold_p99_us=10.7 hold_max_us=4546.6
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2101.2 hold_max_us=2101.2
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=wal count=2269 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.5 hold_max_us=21.3
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=wal_writer count=3236 wait_p99_us=0.0 wait_max_us=2541.6 hold_p99_us=20.4 hold_max_us=46.8
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=wal_queue count=1395 wait_p99_us=0.0 wait_max_us=5.4 hold_p99_us=3.2 hold_max_us=188.7
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=readers count=24624 wait_p99_us=0.0 wait_max_us=1255.4 hold_p99_us=0.7 hold_max_us=47.2
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=dir_live count=76 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.0 hold_max_us=7.0
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=inode_live count=450 wait_p99_us=0.0 wait_max_us=2.8 hold_p99_us=3.9 hold_max_us=9.0
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=handles count=1254 wait_p99_us=0.0 wait_max_us=10.5 hold_p99_us=2.2 hold_max_us=58.3
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=file_cell count=1588 wait_p99_us=0.0 wait_max_us=4587.5 hold_p99_us=9568.3 hold_max_us=68681.7
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=cell_map count=38615 wait_p99_us=0.0 wait_max_us=676.9 hold_p99_us=1.1 hold_max_us=769.0
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=stripe count=96 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=16.6 hold_max_us=16.6
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=inode_map count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=6.3 hold_max_us=6.3
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=inode_data count=51 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=dir_data count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=manifest_data count=24896 wait_p99_us=0.0 wait_max_us=174.7 hold_p99_us=0.7 hold_max_us=67.1
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=xattr_data count=1025 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.3 hold_max_us=0.7
+lock n=8 round=1 trace=off arena=default mount=b lock_row site=refcounts count=479 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.7 hold_max_us=137.2
+detail n=8 round=1 trace=off arena=default mount=m pool: workers=8 jobs=48049 max_weight=4096 max_queue_wait_ms=2 queue_max=16 jobs_per_worker=5730,6583,6036,6204,6420,5342,5407,6327
+detail n=8 round=1 trace=off arena=default mount=m steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=store count=108640 wait_p99_us=161.7 wait_max_us=1687.6 hold_p99_us=20.8 hold_max_us=7196.7
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1691.6 hold_max_us=1691.6
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=wal count=52067 wait_p99_us=0.0 wait_max_us=227.5 hold_p99_us=0.2 hold_max_us=133.6
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=wal_writer count=55160 wait_p99_us=113.6 wait_max_us=1530.9 hold_p99_us=12.6 hold_max_us=890.4
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=wal_queue count=35123 wait_p99_us=0.0 wait_max_us=1048.1 hold_p99_us=0.6 hold_max_us=1059.8
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=readers count=12000 wait_p99_us=97.6 wait_max_us=2359.3 hold_p99_us=9.6 hold_max_us=915.5
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=dir_live count=24178 wait_p99_us=0.0 wait_max_us=273.7 hold_p99_us=3.3 hold_max_us=135.0
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=inode_live count=52456 wait_p99_us=0.0 wait_max_us=560.1 hold_p99_us=2.8 hold_max_us=498.9
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=handles count=40001 wait_p99_us=0.3 wait_max_us=737.8 hold_p99_us=0.6 hold_max_us=339.7
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=file_cell count=28000 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=23.9 hold_max_us=1066.0
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=cell_map count=32433 wait_p99_us=0.0 wait_max_us=79.0 hold_p99_us=0.5 hold_max_us=107.5
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=stripe count=28048 wait_p99_us=0.0 wait_max_us=47317.0 hold_p99_us=148.9 hold_max_us=68157.4
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=inode_map count=8167 wait_p99_us=120.6 wait_max_us=2996.2 hold_p99_us=22.4 hold_max_us=245.4
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=inode_data count=4153 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=21.9 hold_max_us=73.0
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=dir_data count=4020 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.2 hold_max_us=0.9
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=manifest_data count=16017 wait_p99_us=0.3 wait_max_us=993.3 hold_p99_us=1.6 hold_max_us=198.7
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=xattr_data count=8017 wait_p99_us=0.0 wait_max_us=0.3 hold_p99_us=0.2 hold_max_us=18.7
+lock n=8 round=1 trace=off arena=default mount=m lock_row site=refcounts count=8001 wait_p99_us=0.2 wait_max_us=602.1 hold_p99_us=2.5 hold_max_us=41.1
+detail n=8 round=1 trace=off arena=default mount=v pool: workers=8 jobs=13363 max_weight=0 max_queue_wait_ms=4 queue_max=16 jobs_per_worker=1570,1755,1667,1750,1645,1738,1570,1668
+detail n=8 round=1 trace=off arena=default mount=v steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=store count=148100 wait_p99_us=164.5 wait_max_us=3698.7 hold_p99_us=13.0 hold_max_us=2758.7
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=io count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1607.7 hold_max_us=1607.7
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=wal count=51 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.4 hold_max_us=0.4
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=wal_writer count=8 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=2.9 hold_max_us=2.9
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=wal_queue count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.1 hold_max_us=0.1
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=readers count=13314 wait_p99_us=0.0 wait_max_us=111.4 hold_p99_us=1.0 hold_max_us=254.8
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=dir_live count=49 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=4.8 hold_max_us=4.8
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=inode_live count=82 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.0 hold_max_us=3.0
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=handles count=65 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=3.6 hold_max_us=3.6
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=cell_map count=13939 wait_p99_us=0.0 wait_max_us=0.3 hold_p99_us=0.2 hold_max_us=37.6
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=stripe count=32 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=7.3 hold_max_us=7.3
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=inode_map count=2 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.6 hold_max_us=1.6
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=inode_data count=35 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=1.0 hold_max_us=1.0
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=dir_data count=3 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.7 hold_max_us=0.7
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=manifest_data count=13299 wait_p99_us=0.0 wait_max_us=454.9 hold_p99_us=0.4 hold_max_us=229.4
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=xattr_data count=1 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.1 hold_max_us=0.1
+lock n=8 round=1 trace=off arena=default mount=v lock_row site=refcounts count=1 wait_p99_us=0.0 wait_max_us=0.0 hold_p99_us=0.6 hold_max_us=0.6
+bench n=8 round=1 trace=off arena=default write_mbs=140.7 read_mbs=1186.6 meta_fps=6932.4 rand_mbs=144.2 vmhwm_a_mib=90 vmhwm_b_mib=177 mismatches=0 max_weight=1048576 max_queue_wait_ms=1149 load=3.30 meta_stat_ops=60606.1 meta_read_ops=16806.7 meta_unlink_ops=38095.2 randcheck_mbs=646.1 vmhwm_m_mib=51 vmhwm_v_mib=47
+loadavg-end 4.09 3.55 2.44 1/807 1931
+pool-bench: done
+rc=0
+exit=0
+# host load after: 17.80 17.24 15.42

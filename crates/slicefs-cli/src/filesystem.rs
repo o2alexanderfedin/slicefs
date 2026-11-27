@@ -6,19 +6,25 @@
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chunk_store::lock_stats::Site;
+use chunk_store::pack_io::SyncWait;
+use chunk_store::sync::{self, raw, Rank};
 use crate::util::ts;
 
 use slicefs_traits::key::ObjectKey;
 use crate::content::{self, Content, Stream};
-use crate::overlay::Overlay;
+use crate::locks::{NamespaceLocks, NsGuard};
+use crate::overlay::{next_gen, Overlay};
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use metadata::store::DictMetadataStore;
 use metadata::store_io::StoreIo;
+use metadata::wal::Lsn;
 use slicefs_traits::metadata::{InodeMeta, MetaError, MetadataStore};
 
 // POSIX inode type bits
@@ -37,9 +43,32 @@ const S_IFBLK: u32 = 0o060_000;
 /// overlay, see `crate::overlay`).
 pub const MAX_FILE_SIZE: u64 = 1 << 40;
 
+/// The end of a write of `len` bytes at `offset`: `Some(end)` when
+/// `offset + len` fits in u64 and is at most [`MAX_FILE_SIZE`], else `None`
+/// (EFBIG). Kani proves it exact on all inputs (`mod proofs`).
+pub(crate) fn write_end(offset: u64, len: usize) -> Option<u64> {
+    offset.checked_add(len as u64).filter(|&end| end <= MAX_FILE_SIZE)
+}
+
 /// Most bytes of out-of-order writes a streaming handle holds while it waits
 /// for a gap to close. Beyond it the handle switches to an overlay.
 pub const REORDER_WINDOW: usize = 64 << 20;
+
+/// The log callback of a namespace function (D-08): the function calls it
+/// with the op of its record in the lock hold of its apply, once the apply
+/// succeeded. A handler appends the record there (`log_append`) and writes
+/// it out after the call, before the reply; a `test_*` wrapper passes
+/// `&mut |_| {}`.
+pub(crate) type LogOp<'a> = &'a mut dyn FnMut(crate::oplog::Op);
+
+/// The `create_inode` of a create: at the logged inode number in replay
+/// (`Some`), else the next free one.
+fn new_inode(meta: &DictMetadataStore, at: Option<u64>, m: &InodeMeta) -> Result<u64, MetaError> {
+    match at {
+        Some(ino) => meta.create_inode_at(ino, m),
+        None => meta.create_inode(m),
+    }
+}
 
 /// The new content of a splice over an overlay: reads go through
 /// `Overlay::view` (base bytes below `visible`, zeros, extents on top), so a
@@ -87,8 +116,12 @@ const RELOG_PIECE: u64 = 1 << 20;
 /// stays busy holds about the limit; release stores the rest.
 /// An extent grows by at most 1/8 of its length (`overlay::GROW_DIV`), not by
 /// doubling, so the capacity stays near the dirty bytes. The real
-/// peak of one handle is max(REORDER_WINDOW, DIRTY_LIMIT) + one write + the
-/// rebase work space (one piece and the stream state).
+/// peak of one handle is max(REORDER_WINDOW, hard cap) + one write + the
+/// rebase work space (the copy of one step, at most `FINAL_STEP`, and the
+/// stream state): a switch moves up to `REORDER_WINDOW` of pending writes
+/// into the overlay, and the write that switched then steps it down to the
+/// hard cap (`hard_cap`: the limit + limit / 8 + 2 x `REBASE_STEP`), one
+/// step of at most `FINAL_STEP` per hold.
 /// Measured (#98, Docker, release build): VmHWM 114 MiB (1 GiB) and 161 MiB (4 GiB), cap 256 MiB;
 /// slowest write 5870 ms (1 GiB) and 7253 ms (4 GiB). Both are above 2000 ms,
 /// so 16 MiB was also run: 7778 ms and 5726 ms (VmHWM 97 and 146 MiB). The
@@ -101,12 +134,167 @@ pub const DIRTY_LIMIT: usize = 32 << 20;
 /// so no single write pays for the rebase of the whole overlay.
 pub const REBASE_STEP: usize = 1 << 20;
 
-/// Budget of dirty bytes of all open files together (#105): when a write
-/// makes the sum pass it, the file with the most dirty bytes stores a step
-/// (an overlay rebase step; a stream's pending writes first become an
-/// overlay). Each file also keeps its own `DIRTY_LIMIT`. The same value as
-/// `REORDER_WINDOW`, so one stream can still use its whole window.
+/// Most overlay cost one step of the last release stores (D-03, Claude's
+/// discretion): the release goes in steps of this size and never copies the
+/// whole overlay at once (#98).
+pub const FINAL_STEP: usize = 8 << 20;
+
+/// Budget of dirty bytes of all open files together (#105, Phase 20). At
+/// half of it the flusher (`crate::flusher`) steps quiet files; a writer
+/// that finds the total at or above it waits in `throttle_write`, before it
+/// takes any lock, and after the wait it steps only its own file. Each file
+/// also keeps its own `DIRTY_LIMIT`. The default is the same value as
+/// `REORDER_WINDOW`, so one stream can still use its whole window. With a
+/// smaller `--dirty-budget`, a stream with pending writes can become an
+/// overlay when the total reaches the budget (one way).
 pub const DIRTY_BUDGET: usize = 64 << 20;
+
+/// The least value of `--dirty-budget` and `--dirty-limit` (Phase 20 A3):
+/// four rebase steps. A later release can lower it with no break for a
+/// user; a higher value would refuse values that work today.
+pub const MIN_DIRTY_BYTES: usize = 4 * REBASE_STEP;
+
+/// Most dirty cost one flusher step frees (Phase 20, Claude's discretion):
+/// larger than `REBASE_STEP` (less fixed cost per install), smaller than
+/// `FINAL_STEP` (a commit cut waits for the longest shared gate hold). The
+/// RSS cap rule of plan 20-01 (`CAP_MIB`, the "W 4" term) uses this value:
+/// do not change it without a new cap derivation.
+pub const FLUSH_STEP: usize = 4 << 20;
+
+/// Most time a writer over the budget waits for the flusher; then it
+/// writes and pays with a step of its own file, so the memory bound does
+/// not depend on this value. 200 ms is the per-call pause cap of Linux
+/// `balance_dirty_pages` (`MAX_PAUSE`); ZFS caps one write delay at 100 ms.
+/// (Phase 20 used 5 s; one dispatch thread made a long wait stop the whole
+/// mount.)
+const THROTTLE_WAIT: Duration = Duration::from_millis(200);
+
+/// One slice of a throttle wait: the writer looks at the total again after
+/// each slice, because a release or a writer's own step also lowers the
+/// total, with no notify.
+const THROTTLE_SLICE: Duration = Duration::from_millis(50);
+
+/// Time between two flusher passes when nothing wakes the flusher.
+const FLUSH_PASS: Duration = Duration::from_millis(100);
+
+/// The back-off of a cell after its first failed flusher step; it doubles
+/// with each failure in a row up to `FLUSH_RETRY_MAX` (Claude's
+/// discretion: one pass interval).
+const FLUSH_RETRY_MIN: Duration = FLUSH_PASS;
+
+/// The longest back-off of a cell after failed flusher steps.
+const FLUSH_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// The flusher stores the dirty data of a file with no write for this time
+/// (Phase 20 CONTEXT default of `--dirty-idle`).
+const DIRTY_IDLE: Duration = Duration::from_secs(5);
+
+/// The flusher stores the dirty data of a file whose oldest dirty data is
+/// this old (Phase 20 CONTEXT default of `--dirty-expire`).
+const DIRTY_EXPIRE: Duration = Duration::from_secs(30);
+
+/// A file with a write in this window is hot: below the budget the flusher
+/// does not step it (plan 20-05 choice: three pass intervals, "a few
+/// hundred ms" of A10).
+const HOT_WINDOW: Duration = Duration::from_millis(300);
+
+/// The dirty-data values of a mount (`--dirty-budget`, `--dirty-limit`,
+/// `--dirty-idle`, `--dirty-expire`). `Default` gives the values of the
+/// constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyConfig {
+    /// Most dirty bytes of all open files (`DIRTY_BUDGET`).
+    pub budget: usize,
+    /// Most dirty bytes of one file (`DIRTY_LIMIT`).
+    pub limit: usize,
+    /// The idle time of a file, in seconds (`DIRTY_IDLE`).
+    pub idle_secs: u64,
+    /// The maximum age of dirty data, in seconds (`DIRTY_EXPIRE`).
+    pub expire_secs: u64,
+}
+
+impl Default for DirtyConfig {
+    fn default() -> Self {
+        DirtyConfig {
+            budget: DIRTY_BUDGET,
+            limit: DIRTY_LIMIT,
+            idle_secs: DIRTY_IDLE.as_secs(),
+            expire_secs: DIRTY_EXPIRE.as_secs(),
+        }
+    }
+}
+
+impl DirtyConfig {
+    /// Refuse the values that the mount options refuse: a byte value below
+    /// `MIN_DIRTY_BYTES`, a limit above the budget, and a time of 0 s or of
+    /// more ms than a u64 holds. A caller that makes the struct directly
+    /// gets the same checks as the command line.
+    pub fn check(&self) -> Result<(), String> {
+        for (name, bytes) in [("--dirty-budget", self.budget), ("--dirty-limit", self.limit)] {
+            if bytes < MIN_DIRTY_BYTES {
+                return Err(format!(
+                    "{name} {bytes} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)",
+                    MIN_DIRTY_BYTES >> 20
+                ));
+            }
+        }
+        if self.limit > self.budget {
+            return Err(format!(
+                "--dirty-limit {} is above --dirty-budget {} (bytes); the limit of one file must not be above the budget of all files",
+                self.limit, self.budget
+            ));
+        }
+        for (name, secs) in [("--dirty-idle", self.idle_secs), ("--dirty-expire", self.expire_secs)] {
+            if secs == 0 || secs > u64::MAX / 1000 {
+                return Err(format!("{name} {secs} is not in 1-{} seconds", u64::MAX / 1000));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The start of the flusher clock (`FlushCtl::now_ms`).
+static CLOCK_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// One slice of a wait for the step in flight of a cell (with the cell
+/// unlocked; see `CellGuard::wait_step`). The waiter waits another slice
+/// only if the step made progress in this one (a store put or read of the
+/// holder, or a store wait of it that ended), else it gives EIO. Above the
+/// 10 s `STORE_WAIT` of the chunk store: every store wait ends within that,
+/// so a holder that is slow but not stuck moves its count in each slice.
+const STEP_WAIT: Duration = Duration::from_secs(15);
+
+/// Most time a writer waits for one step in flight, even while the step
+/// makes progress (WR-05), then EIO.
+const STEP_WAIT_MAX: Duration = Duration::from_secs(120);
+
+/// Most dropped steps in a row one write tries again (with the I/O
+/// unlocked), then EIO.
+const STEP_TRIES: usize = 16;
+
+/// The longest time that one write request keeps trying again after the
+/// chunk store was busy (a wait of `STORE_WAIT` 10 s for a slow seal or
+/// background sync ended with a busy error, issue #170), then EIO. A new
+/// attempt starts only before this time has passed since the first one, so
+/// one request ends within this + 130.4 s (the sum that `pool::SUBMIT_WAIT` covers).
+pub const STORE_BUSY_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Unlocked attempts of the rebase step of a write over the dirty limit. If
+/// all are dropped the write returns (its bytes are in the overlay, under
+/// the hard cap); the next write, the release or a budget step tries again
+/// (D-02 "retries later").
+const REBASE_TRIES: usize = 2;
+
+/// Most `..` steps of the ancestor walk of a cross-directory rename
+/// (`check_not_ancestor`). A guard against a damaged store with a `..`
+/// cycle, not a depth limit of real trees.
+const MAX_ANCESTOR_STEPS: u32 = 1 << 20;
+
+/// Forced drops in a row (a test hook) after which a finalize stops
+/// consulting the drop hook for the rest of that finalize, so a test
+/// release ends too. With no write handle nothing else drops a finalize
+/// step (see `finalize_steps`).
+const FINAL_TRIES: usize = 8;
 
 /// The RAM an open file holds in written bytes that are not in a stored
 /// root: the overlay cost, or the pending out-of-order writes of a stream.
@@ -117,8 +305,67 @@ fn dirty_cost(s: &OpenFileState) -> usize {
     }
 }
 
+thread_local! {
+    /// Bytes the last splice of this thread cut again (for tests; D-10:
+    /// per thread, so writers on other threads do not change it).
+    static LAST_REBASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Bytes the rebase steps of this thread's last write cut again (for tests).
+    static WRITE_REBASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Base bytes the rebase steps of this thread's last write read (for tests).
+    static WRITE_BASE_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Most bytes one unlocked rebase step of this thread's last write
+    /// copied in its Phase A hold (for tests).
+    static WRITE_MAX_COPY: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A store call of this thread ended on a busy store since the mark was
+    /// last cleared (see `note_store_busy`).
+    static STORE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Note that the store call that gave `e` ended on a busy store (the timeout
+/// of a store wait, issue #170): its caller still maps `e` to EIO, as every
+/// other store error. A step runs on the thread of its caller, so a caller
+/// that can wait (the retry of a write request, the flusher) clears the mark
+/// before its call and asks `take_store_busy` after an error, and tells "the
+/// store was busy, try again" from a real failure. No errno is added: the
+/// chain of `Result<_, i32>` below the write path stays as it was.
+fn note_store_busy(e: &(dyn std::error::Error + 'static)) {
+    if chunk_store::is_store_busy(e) {
+        STORE_BUSY.with(|b| b.set(true));
+    }
+}
+
+/// Clear the busy mark of this thread (see `note_store_busy`).
+pub(crate) fn clear_store_busy() {
+    STORE_BUSY.with(|b| b.set(false));
+}
+
+/// True if a store call of this thread ended on a busy store since the last
+/// `clear_store_busy`; clears the mark.
+pub(crate) fn take_store_busy() -> bool {
+    STORE_BUSY.with(|b| b.replace(false))
+}
+
+/// Add `n` to a thread-local counter.
+fn add_to(counter: &'static std::thread::LocalKey<std::cell::Cell<u64>>, n: u64) {
+    counter.with(|c| c.set(c.get() + n));
+}
+
 /// A function the tests run inside a rebase (see `test_set_rebase_hook`).
 pub type RebaseHook = Arc<dyn Fn() + Send + Sync>;
+
+/// A point where a test can park a request (see `test_set_pause_hook`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pause {
+    /// A size change of a closed file has claimed the inode: its transient
+    /// cell is locked and in the cell map, the stripe is released.
+    SizeClaimed,
+    /// A setattr of other fields (or another `with_inode_locked` call)
+    /// holds the stripe and has read the cell map, before it locks a cell.
+    FieldsStriped,
+}
+
+/// A function the tests run at a `Pause` point (see `test_set_pause_hook`).
+pub type PauseHook = Arc<dyn Fn(Pause) + Send + Sync>;
 
 /// Write mode for an open file handle.
 ///
@@ -131,18 +378,19 @@ enum WriteMode {
     Streaming {
         state: Stream,
         next_expected_offset: u64,
-        /// Writes that arrived ahead of `next_expected_offset` (NFS sends
-        /// WRITEs in parallel). Non-overlapping; drained into `state` when
+        /// Writes that arrived ahead of `next_expected_offset` (writes can
+        /// arrive in parallel). Non-overlapping; drained into `state` when
         /// the gap closes. Bounded by `REORDER_WINDOW` bytes.
         pending: BTreeMap<u64, Vec<u8>>,
     },
     Overlay(Overlay),
 }
 
-/// Per-handle state for a writable file descriptor.
+/// Open write state of one inode (in its `FileCell`, shared by all its
+/// write handles).
 ///
-/// Created on `open()` when `O_WRONLY` or `O_RDWR` flags are present.
-/// Removed on `release()`. Writes are streamed incrementally into FastCDC
+/// Created at the first `open()` with `O_WRONLY` or `O_RDWR`.
+/// Ended at the last write-handle `release()`. Writes are streamed incrementally into FastCDC
 /// chunks and a manifest tree (`content::Stream`) — O(log N) memory regardless
 /// of file size — unless a non-sequential write triggers fallback to
 /// Overlay mode (memory follows the written bytes, not the file size).
@@ -175,6 +423,719 @@ struct OpenFileState {
     /// stamps it as the file's mtime, so a flush at fsync, release or commit
     /// (or at the end of a replay) does not move mtime to its own time.
     modified: Option<(i64, u32)>,
+    /// Generation of the stream (D-02): a new value (from the process-wide
+    /// counter of `overlay::next_gen`) at each change of the stream, its
+    /// pending writes, `min_size` or `byte_count`, and at the switch to an
+    /// overlay. A truncate to 0 makes a new state, so it gets a new value
+    /// too. A stream step publishes only if it is unchanged. (An overlay
+    /// keeps its own generation.)
+    generation: u64,
+}
+
+impl OpenFileState {
+    /// A fresh stream: nothing written yet.
+    fn new(ino: u64) -> Self {
+        OpenFileState {
+            ino,
+            write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
+            byte_count: 0,
+            cas_committed: false,
+            last_committed_root: None,
+            min_size: 0,
+            modified: None,
+            generation: next_gen(),
+        }
+    }
+}
+
+/// Phase A of a rebase step (see `SliceFsFilesystem::rebase_unlocked`).
+struct StepPlan {
+    /// The overlay generation the step starts from.
+    generation: u64,
+    /// Logical size of the overlay (and of the new root).
+    size: u64,
+    /// The stored pieces, as `(start, len)` heads of extents.
+    pieces: Vec<(u64, usize)>,
+    free: usize,
+    cost_before: usize,
+}
+
+/// How `SliceFsFilesystem::flush_cell` runs its I/O phase.
+#[derive(Clone, Copy)]
+enum FlushIo {
+    /// In the cell hold: only where no request runs (the commit cut under
+    /// the exclusive gate, destroy).
+    Locked,
+    /// With the cell unlocked and no step token (fsync, flush).
+    Unlocked,
+    /// With the cell unlocked as the cell's step (`CellGuard::run_step`):
+    /// the last release. The caller makes sure no step is in flight.
+    Step,
+}
+
+/// The fields of the debug line of a switch to an overlay: made in the
+/// write's cell hold, printed by `write_logged` after it.
+struct SwitchNote {
+    ino: u64,
+    offset: u64,
+    expected: u64,
+    pending: usize,
+    fresh: bool,
+    overlap: bool,
+}
+
+/// The open write state of one inode, shared by every handle of it (D-03).
+/// Requests lock it in place; no request takes the state out.
+struct FileCell {
+    ino: u64,
+    /// The cell of a closed-file size change (`FileCell::transient`): it
+    /// only orders an open or another size change after the splice. Readers
+    /// never lock it.
+    transient: bool,
+    state: sync::Mutex<CellState>,
+    /// `dirty_cost` of the state when its guard last synced (see
+    /// `CellGuard`); `SliceFsFilesystem::dirty_total` is the sum.
+    dirty: AtomicUsize,
+    /// True if the state was a stream when its guard last synced (the
+    /// flusher reads it with no cell lock, to step overlays first).
+    stream: AtomicBool,
+    /// The flusher clock (`FlushCtl::now_ms`) at the last applied write; 0
+    /// for none. `write_in_cell` stores it after the apply.
+    last_write: AtomicU64,
+    /// The flusher clock when the dirty cost went from 0 to above 0; 0 when
+    /// the cell is clean. The age of the dirty data starts again only when
+    /// the cell is clean (the Linux `dirtied_when` rule; `sync_dirty`).
+    dirty_since: AtomicU64,
+    /// Failed flusher steps in a row; 0 after a step that freed.
+    flush_fails: AtomicU32,
+    /// The flusher clock before which the flusher does not try the cell
+    /// again after a failed step; 0 for none.
+    flush_retry_at: AtomicU64,
+}
+
+impl FileCell {
+    fn new(ino: u64) -> Self {
+        Self::make(ino, false)
+    }
+
+    /// The cell of a size change of a closed file (case B of
+    /// `setattr_size_logged`).
+    fn transient(ino: u64) -> Self {
+        Self::make(ino, true)
+    }
+
+    fn make(ino: u64, transient: bool) -> Self {
+        let state = CellState {
+            file: OpenFileState::new(ino),
+            write_handles: 0,
+            retired: false,
+            stepping: None,
+            cap_writers: 0,
+            last_published_gen: 0,
+        };
+        FileCell {
+            ino,
+            transient,
+            state: sync::Mutex::new_keyed(Rank::Cell, ino, state).timed(Site::FileCell),
+            dirty: AtomicUsize::new(0),
+            stream: AtomicBool::new(true),
+            last_write: AtomicU64::new(0),
+            dirty_since: AtomicU64::new(0),
+            flush_fails: AtomicU32::new(0),
+            flush_retry_at: AtomicU64::new(0),
+        }
+    }
+}
+
+struct CellState {
+    file: OpenFileState,
+    /// Open write handles of the inode.
+    write_handles: usize,
+    /// Set at the last write-handle release, under the lock and before the
+    /// cell leaves the map. A holder of an old `Arc` that finds it set must
+    /// look the inode up again (or, if it only reads, use the manifest).
+    retired: bool,
+    /// The step token: set while one I/O step of this cell (a stream push,
+    /// a gap fill, the first-write content check, the switch to an overlay,
+    /// a rebase step) runs with the cell unlocked (D-02); at most one at a
+    /// time. Stream writers wait for it with the cell unlocked
+    /// (`CellGuard::wait_step`); a writer over the limit skips its rebase
+    /// step. Readers and flushes never take it or wait for it.
+    stepping: Option<StepToken>,
+    /// Writers of the cell at the hard cap (`CellGuard::enter_cap`). While
+    /// it is not 0, no ordinary rebase step starts (`rebase_cell`), and an
+    /// overlay writer waits for the step in flight before it applies
+    /// (`write_in_cell`), so the step of a writer at the cap publishes
+    /// (CR-01): a write that adds no cost (an overwrite) is not stopped by
+    /// the cap, and without this it would drop every step at the cap.
+    cap_writers: usize,
+    /// The stream generation of the last flush snapshot that was installed,
+    /// or a newer value after another install of the manifest (a switch to
+    /// an overlay, a truncate to 0): a flush of an older snapshot is not
+    /// installed (RESEARCH Pitfall 5).
+    last_published_gen: u64,
+}
+
+/// The step token of a cell (`CellState::stepping`): it ends (`done`) when
+/// the step ends, and its progress count moves with each store put or read
+/// of the step's I/O (`chunk_store::with_progress`, WR-05).
+#[derive(Clone, Default)]
+struct StepToken {
+    done: SyncWait,
+    progress: Arc<AtomicU64>,
+}
+
+/// Ends the step token of `run_step` when it is dropped. On a panic in the
+/// step's I/O it also clears the token from the cell (WR-06), so waiters
+/// and later steps do not wait for a step that never ends.
+struct StepEnd<'a> {
+    cell: &'a FileCell,
+    token: &'a StepToken,
+}
+
+impl Drop for StepEnd<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The panic came from the I/O phase: the cell is unlocked.
+            let mut state = self.cell.state.lock();
+            if state.stepping.as_ref().is_some_and(|t| Arc::ptr_eq(&t.progress, &self.token.progress)) {
+                state.stepping = None;
+            }
+        }
+        self.token.done.done();
+    }
+}
+
+/// A locked cell. When it is dropped (and at `sync_dirty`), it moves
+/// `FileCell::dirty` and the global dirty total by the change of the cell's
+/// `dirty_cost`, with the cell lock still held.
+struct CellGuard<'a> {
+    total: &'a AtomicUsize,
+    /// For the flusher clock of `sync_dirty`.
+    ctl: &'a FlushCtl,
+    cell: &'a FileCell,
+    /// `None` only inside `unlocked`.
+    state: Option<sync::MutexGuard<'a, CellState>>,
+    /// Debug lines made in the hold; printed when the guard is dropped,
+    /// after the cell lock is released (a stderr write can stall).
+    notes: Vec<String>,
+    /// Set by a finalize after `FINAL_TRIES` forced drops in a row: the
+    /// steps of this guard no longer consult the drop hook.
+    no_drop_hook: bool,
+    /// This writer is counted in `CellState::cap_writers`.
+    at_cap: bool,
+    /// One slice of `wait_step` (`STEP_WAIT`; tests set it lower).
+    step_wait: Duration,
+}
+
+impl CellGuard<'_> {
+    /// Run `f` with the cell unlocked (the dirty cost is synced first), then
+    /// lock it again. The state can change meanwhile, and the cell can be
+    /// retired: the caller checks again.
+    fn unlocked<R>(&mut self, f: impl FnOnce() -> R) -> R {
+        self.sync_dirty();
+        self.state = None;
+        let r = f();
+        self.state = Some(self.cell.state.lock());
+        r
+    }
+
+    /// Run `io` as the one step in flight of the cell: set a fresh token,
+    /// run `io` with the cell unlocked (its store work moves the token's
+    /// progress count), lock again, then clear the token and wake its
+    /// waiters. `io` returns its error as a value; a panic in it clears
+    /// the token too (`StepEnd`, WR-06). The caller makes sure no token is
+    /// set, and checks `retired`, the mode and the generation after it.
+    fn run_step<R>(&mut self, io: impl FnOnce() -> R) -> R {
+        debug_assert!(self.stepping.is_none(), "one step in flight per cell");
+        let token = StepToken::default();
+        self.stepping = Some(token.clone());
+        let _end = StepEnd { cell: self.cell, token: &token };
+        let r = self.unlocked(|| chunk_store::with_progress(&token.progress, io));
+        self.stepping = None;
+        r
+    }
+
+    /// Wait, with the cell unlocked, until no step of the cell is in flight
+    /// (WR-05). The wait for one step goes in slices of `step_wait`: after a
+    /// slice in which the step moved its progress count, it waits again;
+    /// after a slice with no progress, or `STEP_WAIT_MAX` for that step, it
+    /// gives EIO. The caller checks `retired` and the mode again after it.
+    fn wait_step(&mut self) -> Result<(), i32> {
+        let slice = self.step_wait;
+        let mut since: Option<(Arc<AtomicU64>, std::time::Instant)> = None;
+        while let Some(token) = self.stepping.clone() {
+            let start = match &since {
+                Some((p, t)) if Arc::ptr_eq(p, &token.progress) => *t,
+                _ => std::time::Instant::now(),
+            };
+            since = Some((Arc::clone(&token.progress), start));
+            let seen = token.progress.load(Ordering::Relaxed);
+            if self.unlocked(|| token.done.wait_timeout(slice)) {
+                continue;
+            }
+            if token.progress.load(Ordering::Relaxed) == seen || start.elapsed() >= STEP_WAIT_MAX {
+                return Err(libc::EIO);
+            }
+        }
+        Ok(())
+    }
+
+    /// Count this writer as one at the hard cap (once) until `leave_cap`
+    /// or the drop of the guard.
+    fn enter_cap(&mut self) {
+        if !self.at_cap {
+            self.at_cap = true;
+            self.cap_writers += 1;
+        }
+    }
+
+    /// The writer is no longer at the hard cap.
+    fn leave_cap(&mut self) {
+        if self.at_cap {
+            self.at_cap = false;
+            self.cap_writers -= 1;
+        }
+    }
+
+    fn sync_dirty(&self) {
+        let Some(state) = &self.state else { return };
+        let cost = if state.retired { 0 } else { dirty_cost(&state.file) };
+        self.cell.stream.store(matches!(state.file.write_mode, WriteMode::Streaming { .. }), Ordering::Relaxed);
+        let old = self.cell.dirty.swap(cost, Ordering::Relaxed);
+        if old == 0 && cost > 0 {
+            self.cell.dirty_since.store(self.ctl.now_ms(), Ordering::Relaxed);
+        } else if cost == 0 {
+            self.cell.dirty_since.store(0, Ordering::Relaxed);
+        }
+        match dirty_move(old, cost) {
+            DirtyMove::Add(d) => {
+                self.total.fetch_add(d, Ordering::Relaxed);
+            }
+            DirtyMove::Sub(d) => {
+                self.total.fetch_sub(d, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// The change of the shared dirty total when the cost of one cell goes
+/// from `old` to `cost`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirtyMove {
+    Add(usize),
+    Sub(usize),
+}
+
+/// The move of the shared total for a cell cost `old` -> `cost` (no wrap:
+/// the difference of the two). Kani proves that the total stays the sum of
+/// the costs (`mod proofs`).
+fn dirty_move(old: usize, cost: usize) -> DirtyMove {
+    if cost >= old {
+        DirtyMove::Add(cost - old)
+    } else {
+        DirtyMove::Sub(old - cost)
+    }
+}
+
+/// The hard cap of a dirty `limit` (see `hard_cap`), saturating, so at
+/// least `limit` (Kani proof in `mod proofs`).
+fn hard_cap_of(limit: usize) -> usize {
+    limit.saturating_add(limit / crate::overlay::GROW_DIV).saturating_add(2 * REBASE_STEP)
+}
+
+impl Deref for CellGuard<'_> {
+    type Target = CellState;
+    fn deref(&self) -> &CellState {
+        self.state.as_ref().expect("cell locked")
+    }
+}
+
+impl DerefMut for CellGuard<'_> {
+    fn deref_mut(&mut self) -> &mut CellState {
+        self.state.as_mut().expect("cell locked")
+    }
+}
+
+impl Drop for CellGuard<'_> {
+    fn drop(&mut self) {
+        if self.at_cap {
+            if self.state.is_none() {
+                // A panic in an unlocked phase: lock again to uncount.
+                self.state = Some(self.cell.state.lock());
+            }
+            self.leave_cap();
+        }
+        self.sync_dirty();
+        self.state = None;
+        for line in self.notes.drain(..) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Shards of the cell map (Claude's discretion).
+const CELL_SHARDS: usize = 16;
+
+/// `ino -> Arc<FileCell>` in `CELL_SHARDS` shards. A shard lock is held only
+/// to find, add or remove an `Arc`, never while a cell is locked by the
+/// same caller, except to remove a retired cell (cell rank, then shard rank).
+struct CellMap([sync::Mutex<HashMap<u64, Arc<FileCell>>>; CELL_SHARDS]);
+
+impl CellMap {
+    fn new() -> Self {
+        CellMap(std::array::from_fn(|_| sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::CellMap)))
+    }
+
+    fn shard(&self, ino: u64) -> &sync::Mutex<HashMap<u64, Arc<FileCell>>> {
+        &self.0[(ino % CELL_SHARDS as u64) as usize]
+    }
+
+    fn get(&self, ino: u64) -> Option<Arc<FileCell>> {
+        self.shard(ino).lock().get(&ino).cloned()
+    }
+
+    fn get_or_insert(&self, ino: u64) -> Arc<FileCell> {
+        Arc::clone(self.shard(ino).lock().entry(ino).or_insert_with(|| Arc::new(FileCell::new(ino))))
+    }
+
+    /// Add `cell` if the map has no cell of its inode; false if it has one.
+    fn insert_new(&self, cell: &Arc<FileCell>) -> bool {
+        let mut m = self.shard(cell.ino).lock();
+        if m.contains_key(&cell.ino) {
+            return false;
+        }
+        m.insert(cell.ino, Arc::clone(cell));
+        true
+    }
+
+    /// Remove `cell` (only if the map still holds this very cell).
+    fn remove(&self, cell: &Arc<FileCell>) {
+        let mut m = self.shard(cell.ino).lock();
+        if m.get(&cell.ino).is_some_and(|c| Arc::ptr_eq(c, cell)) {
+            m.remove(&cell.ino);
+        }
+    }
+
+    /// Every cell, collected shard by shard (one shard lock at a time).
+    fn all(&self) -> Vec<Arc<FileCell>> {
+        self.0.iter().flat_map(|sh| sh.lock().values().cloned().collect::<Vec<_>>()).collect()
+    }
+}
+
+/// The answer of `SliceFsFilesystem::throttle_write` to a write: with
+/// `pay`, the write pays for the budget with steps of its own file
+/// (`pay_budget`, the Phase 19 path); without it, it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Admit {
+    pub pay: bool,
+}
+
+/// The flags of the flush control block, under its lock.
+#[derive(Default)]
+pub(crate) struct FlushFlags {
+    /// The flusher must end (set once, never cleared).
+    pub(crate) stop: bool,
+    /// A write found the total at or above half the budget: the flusher
+    /// makes a pass now, not at the end of its pass interval (see
+    /// `FlushCtl::empty_pass` for when a write does not kick).
+    pub(crate) kicked: bool,
+    /// Test hook: the flusher makes no pass.
+    pub(crate) paused: bool,
+    /// The number of the last pass that began (`flush_pass`).
+    pub(crate) pass_begun: u64,
+    /// The number of the last pass that came to its normal end.
+    pub(crate) pass_done: u64,
+    /// The pass `pass_done` could not free memory: it published no step,
+    /// and a step failed or its last pick found no candidate with the
+    /// total at or above the budget. A throttled writer then does not wait
+    /// for the limit (`throttle_write`).
+    pub(crate) pass_stuck: bool,
+}
+
+/// The flush control block (Phase 20): the flusher thread and throttled
+/// writers meet here. It is in its own `Arc`, so a flusher thread can wait
+/// on it with no `Arc` of the file system.
+pub(crate) struct FlushCtl {
+    /// `Rank::Short`; never held across another lock.
+    pub(crate) flags: sync::Mutex<FlushFlags>,
+    /// The flusher waits on it between passes.
+    pub(crate) wake: sync::Condvar,
+    /// Throttled writers wait on it; the flusher notifies it after each step.
+    pub(crate) freed: sync::Condvar,
+    /// True while a flusher loop runs. With no flusher, a writer over the
+    /// budget does not wait (it pays at once).
+    pub(crate) running: raw::atomic::AtomicBool,
+    /// The wait limit of a throttled writer, in ms (`THROTTLE_WAIT`).
+    pub(crate) throttle_wait_ms: raw::atomic::AtomicU64,
+    /// The pass interval of the flusher, in ms (`FLUSH_PASS`).
+    pub(crate) pass_ms: raw::atomic::AtomicU64,
+    /// The idle time of a file, in ms (`DIRTY_IDLE`).
+    pub(crate) idle_ms: AtomicU64,
+    /// The maximum age of dirty data, in ms (`DIRTY_EXPIRE`).
+    pub(crate) expire_ms: AtomicU64,
+    /// The hot window, in ms (`HOT_WINDOW`).
+    pub(crate) hot_ms: AtomicU64,
+    /// Added to the flusher clock (`test_advance_clock`); 0 in production.
+    /// It is per file system, so tests that run in parallel do not move
+    /// the clock of each other.
+    clock_offset_ms: AtomicU64,
+    /// The last pass published no step, and its last pick found no
+    /// candidate with the total at or above half the budget. While it is
+    /// true, a write below the budget does not kick the flusher: with one
+    /// hot file, each write would else cause one more empty pass. A step
+    /// that was skipped, dropped or failed does not count: the cell was
+    /// busy (it is hot now) or is in its back-off, and only time makes it
+    /// a candidate again (the timed pass). A pass below
+    /// half the budget leaves it false, so the first write that finds the
+    /// total at half kicks. The next pass sets it again: a timed pass, or
+    /// a pass kicked at the budget.
+    pub(crate) empty_pass: raw::atomic::AtomicBool,
+    /// Writers in a throttle wait now.
+    pub(crate) throttled_now: raw::atomic::AtomicUsize,
+    pub(crate) passes: AtomicU64,
+    pub(crate) steps: AtomicU64,
+    pub(crate) published: AtomicU64,
+    pub(crate) drops: AtomicU64,
+    pub(crate) skips: AtomicU64,
+    pub(crate) errors: AtomicU64,
+    pub(crate) busy: AtomicU64,
+    pub(crate) throttled: AtomicU64,
+    pub(crate) timeouts: AtomicU64,
+    pub(crate) stop_exits: AtomicU64,
+    pub(crate) no_room_exits: AtomicU64,
+    pub(crate) max_wait_ms: AtomicU64,
+    /// Overlay save steps (`rebase_unlocked`) that published, from any
+    /// thread, and the dirty cost they freed ([Stats]).
+    pub(crate) save_steps: AtomicU64,
+    pub(crate) freed_bytes: AtomicU64,
+    /// The flusher clock when the flusher loop last started (0: never).
+    pub(crate) started_ms: AtomicU64,
+}
+
+impl FlushCtl {
+    fn new() -> Self {
+        FlushCtl {
+            flags: sync::Mutex::new(Rank::Short, FlushFlags::default()),
+            wake: sync::Condvar::new(),
+            freed: sync::Condvar::new(),
+            running: raw::atomic::AtomicBool::new(false),
+            throttle_wait_ms: raw::atomic::AtomicU64::new(THROTTLE_WAIT.as_millis() as u64),
+            pass_ms: raw::atomic::AtomicU64::new(FLUSH_PASS.as_millis() as u64),
+            idle_ms: AtomicU64::new(DIRTY_IDLE.as_millis() as u64),
+            expire_ms: AtomicU64::new(DIRTY_EXPIRE.as_millis() as u64),
+            hot_ms: AtomicU64::new(HOT_WINDOW.as_millis() as u64),
+            clock_offset_ms: AtomicU64::new(0),
+            empty_pass: raw::atomic::AtomicBool::new(false),
+            throttled_now: raw::atomic::AtomicUsize::new(0),
+            passes: AtomicU64::new(0),
+            steps: AtomicU64::new(0),
+            published: AtomicU64::new(0),
+            drops: AtomicU64::new(0),
+            skips: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            busy: AtomicU64::new(0),
+            throttled: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
+            stop_exits: AtomicU64::new(0),
+            no_room_exits: AtomicU64::new(0),
+            max_wait_ms: AtomicU64::new(0),
+            save_steps: AtomicU64::new(0),
+            freed_bytes: AtomicU64::new(0),
+            started_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// The flusher clock: ms since a process epoch plus the test offset,
+    /// always at least 1 (0 means "none" in the cell times).
+    pub(crate) fn now_ms(&self) -> u64 {
+        let base = CLOCK_EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64;
+        base + 1 + self.clock_offset_ms.load(Ordering::Relaxed)
+    }
+
+    /// Wake throttled writers after the total fell. The lock is taken and
+    /// released first: a writer checks the total under it, so it either saw
+    /// the new total or waits already and gets the notify.
+    pub(crate) fn notify_freed(&self) {
+        drop(self.flags.lock());
+        self.freed.notify_all();
+    }
+
+    /// Ask the flusher loop to end and wake every throttled writer (the
+    /// stop step of `SliceFsFilesystem::stop_flusher`; the M2 model calls
+    /// it). The stop is set under the flags lock: a writer checks it under
+    /// that lock, so it sees it or waits already and gets the notify.
+    pub(crate) fn request_stop(&self) {
+        self.flags.lock().stop = true;
+        self.wake.notify_all();
+        self.freed.notify_all();
+    }
+}
+
+/// The counters of the flusher and the throttle (a copy, for tests).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlusherStats {
+    /// Flusher passes.
+    pub passes: u64,
+    /// Flusher steps tried (skipped ones too).
+    pub steps: u64,
+    /// Steps that lowered the cost of their file.
+    pub published: u64,
+    /// Steps that ran and freed nothing (a dropped result).
+    pub drops: u64,
+    /// Steps not started: the cell had a step in flight, a writer at the
+    /// hard cap, or was retired.
+    pub skips: u64,
+    /// Steps that failed.
+    pub errors: u64,
+    /// Steps that met a busy chunk store and were left for a later pass (not
+    /// failures).
+    pub busy: u64,
+    /// Writes that waited in the throttle.
+    pub throttled: u64,
+    /// Throttle waits that reached the wait limit.
+    pub timeouts: u64,
+    /// Throttle waits that ended because the flusher stopped or ended.
+    pub stop_exits: u64,
+    /// Throttle waits that ended because a flusher pass could not free
+    /// memory (`FlushFlags::pass_stuck`).
+    pub no_room_exits: u64,
+    /// The longest throttle wait, in ms.
+    pub max_wait_ms: u64,
+    /// Overlay save steps that published (flusher and request threads).
+    pub save_steps: u64,
+    /// The dirty cost that those steps freed, in bytes.
+    pub freed_bytes: u64,
+}
+
+/// A dirty cell that the flusher can step (see `flush_targets`).
+pub(crate) struct FlushTarget {
+    cell: Arc<FileCell>,
+}
+
+impl FlushTarget {
+    pub(crate) fn ino(&self) -> u64 {
+        self.cell.ino
+    }
+
+    /// The dirty cost of the cell when its guard last synced.
+    pub(crate) fn dirty(&self) -> usize {
+        self.cell.dirty.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell was a stream when its guard last synced.
+    pub(crate) fn is_stream(&self) -> bool {
+        self.cell.stream.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock at the last applied write (0: none).
+    pub(crate) fn last_write(&self) -> u64 {
+        self.cell.last_write.load(Ordering::Relaxed)
+    }
+
+    /// The flusher clock when the cell became dirty (0: clean).
+    pub(crate) fn dirty_since(&self) -> u64 {
+        self.cell.dirty_since.load(Ordering::Relaxed)
+    }
+
+    /// True if the cell is in its back-off after a failed step at `now`.
+    pub(crate) fn backed_off(&self, now: u64) -> bool {
+        now < self.cell.flush_retry_at.load(Ordering::Relaxed)
+    }
+
+    /// Record a failed step at `now`: the next try comes after a back-off
+    /// of `FLUSH_RETRY_MIN`, doubled for each earlier failure in a row, at
+    /// most `FLUSH_RETRY_MAX`. Returns the back-off in ms.
+    pub(crate) fn note_failed(&self, now: u64) -> u64 {
+        let n = self.cell.flush_fails.fetch_add(1, Ordering::Relaxed).min(16);
+        let ms = ((FLUSH_RETRY_MIN.as_millis() as u64) << n).min(FLUSH_RETRY_MAX.as_millis() as u64);
+        self.cell.flush_retry_at.store(now.saturating_add(ms), Ordering::Relaxed);
+        ms
+    }
+
+    /// Record a step that freed: the back-off ends.
+    pub(crate) fn note_freed(&self) {
+        self.cell.flush_fails.store(0, Ordering::Relaxed);
+        self.cell.flush_retry_at.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The result of one flusher step (`SliceFsFilesystem::flush_step`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushStep {
+    /// Not started (a step in flight, a writer at the cap, retired).
+    Skipped,
+    /// Ran and lowered the cost of the file by this many bytes.
+    Freed(usize),
+    /// Ran and freed nothing (a dropped result).
+    Nothing,
+    /// The chunk store was busy (a store wait ended in a busy error, issue
+    /// #170): nothing was published, nothing failed; the cell goes in a
+    /// back-off and is tried again later.
+    Busy,
+    /// Failed with this errno (nothing was published).
+    Failed(i32),
+}
+
+/// Counts one waiter for the exclusive commit gate while it lives
+/// (`SliceFsFilesystem::exclusive_wait`).
+pub(crate) struct ExclusiveWait<'a>(&'a raw::atomic::AtomicUsize);
+
+impl<'a> ExclusiveWait<'a> {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ExclusiveWait(n)
+    }
+}
+
+impl Drop for ExclusiveWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Lowers `FlushCtl::throttled_now` when dropped (every exit of a wait).
+struct ThrottledNow<'a>(&'a raw::atomic::AtomicUsize);
+
+impl<'a> ThrottledNow<'a> {
+    fn enter(n: &'a raw::atomic::AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::Relaxed);
+        ThrottledNow(n)
+    }
+}
+
+impl Drop for ThrottledNow<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// An open file handle: its inode and its mode.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Handle {
+    pub(crate) ino: u64,
+    /// Opened for writing (`O_WRONLY` or `O_RDWR`).
+    pub(crate) write: bool,
+    /// Opened (or created) with `O_APPEND`: each write goes to the end of
+    /// file taken under the cell lock (D-12).
+    pub(crate) append: bool,
+}
+
+/// Every open handle (read-only too), with the open count of each inode, so
+/// the "is it open" check at unlink and close is O(1).
+#[derive(Default)]
+struct HandleTable {
+    by_fh: HashMap<u64, Handle>,
+    /// Open handles per inode (no entry: none).
+    open_count: HashMap<u64, u32>,
+    /// Inodes whose last link was removed while handles were still open.
+    orphans: HashSet<u64>,
+}
+
+/// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
+/// to be finished with the commit gate released (#108).
+pub struct CommitCut<'a> {
+    prepared: metadata::store::PreparedCommit<'a>,
 }
 
 /// FUSE filesystem adapter backed by a [`DictMetadataStore`].
@@ -184,63 +1145,106 @@ struct OpenFileState {
 /// `get_node` / `put_node`. It is the same `Arc<Mutex<StoreIo>>`
 /// held by `meta`, accessed via `meta.io().clone()`.
 ///
-/// `open_files` tracks per-handle write buffers; `next_fh` allocates unique handles.
+/// `cells` holds the open write state of each inode; `next_fh` allocates unique handles.
 /// `store_path` is the on-disk store root used by `destroy()` to persist state.
 ///
-/// Raw bytes flow directly into the Merkle tree (v3 store format — no compression header).
+/// Raw bytes flow directly into the Merkle tree; the chunk store compresses
+/// each object (zstd) after its ID is computed.
 /// ObjectKey is computed on raw bytes, enabling content-addressed deduplication.
-/// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
-/// to be finished with the commit gate released (#108).
-pub struct CommitCut<'a> {
-    prepared: metadata::store::PreparedCommit<'a>,
-}
-
 pub struct SliceFsFilesystem {
     pub(crate) meta: Arc<DictMetadataStore>,
     pub(crate) io: Arc<Mutex<StoreIo>>,
-    open_files: Mutex<HashMap<u64, OpenFileState>>,
-    /// A second (third, ...) write handle of an inode shares the write state
-    /// of the first: alias fh -> the fh that holds the state in `open_files`.
-    /// POSIX: every handle writes the same file. With a state per handle,
-    /// the last close won and the other handle's bytes were lost.
-    write_alias: Mutex<HashMap<u64, u64>>,
+    /// One cell per inode with open write handles; every handle of the
+    /// inode uses it (POSIX: every handle writes the same file).
+    cells: CellMap,
+    /// Sum of `FileCell::dirty` of all cells (see `pay_budget`).
+    dirty_total: AtomicUsize,
     /// File content store (`<store>/packs/`).
     pub(crate) content: Content,
-    /// A content reader per inode (keeps its node and chunk caches). A reader
-    /// whose key no longer matches the file content is replaced on use.
-    readers: Mutex<HashMap<u64, content::Reader>>,
-    /// Every open handle (read-only too): fh -> ino. Used to keep an unlinked
-    /// inode alive until its last handle closes.
-    handles: Mutex<HashMap<u64, u64>>,
-    /// Inodes whose last link was removed while handles were still open.
-    orphans: Mutex<HashSet<u64>>,
+    /// A content reader per inode (keeps its node and chunk caches), each
+    /// behind its own lock; the map lock is held only to find or add one. A
+    /// reader whose key no longer matches the file content is replaced on use.
+    readers: sync::Mutex<HashMap<u64, Arc<sync::Mutex<content::Reader>>>>,
+    /// Every open handle (read-only too), the open count of each inode and
+    /// the orphans: keeps an unlinked inode alive until its last handle closes.
+    handles: sync::Mutex<HandleTable>,
+    /// Namespace stripes and the rename mutex (D-04): the namespace changes
+    /// of one inode, its open and last-close decisions, setattr and xattr.
+    ns: NamespaceLocks,
     next_fh: AtomicU64,
     pub(crate) store_path: Option<PathBuf>,
     pub(crate) auto_snapshot: bool,
+    /// The read-only daemon mode of a mount of a store with an unknown
+    /// ro_compat flag: `destroy` writes nothing (see `test_destroy`).
+    read_only: bool,
     /// Shared by FUSE callbacks, exclusive for a timed commit (see `commit_gate()`).
-    commit_gate: Arc<RwLock<()>>,
+    commit_gate: Arc<raw::RwLock<()>>,
     /// True while the write log is replayed: requests are not logged again.
     replaying: std::sync::atomic::AtomicBool,
     /// Dirty limit of one overlay (`DIRTY_LIMIT`; tests set it lower).
     dirty_limit: AtomicUsize,
     /// Dirty budget of all open files (`DIRTY_BUDGET`; tests set it lower).
     dirty_budget: AtomicUsize,
+    /// Step of the last release (`FINAL_STEP`; tests set it lower).
+    final_step: AtomicUsize,
     /// Rebases done so far (for tests).
     rebase_count: AtomicU64,
-    /// Bytes the last rebase fed to the chunker (for tests).
-    last_rebase_bytes: AtomicU64,
     /// `Write` payload bytes the last commit logged again (for tests).
     last_relog_bytes: AtomicU64,
-    /// Bytes the rebase steps of the last write cut again (for tests).
-    write_rebase_bytes: AtomicU64,
-    /// Base bytes the rebase steps of the last write read (for tests).
-    write_base_bytes: AtomicU64,
     /// Run inside each rebase, after the new root is finished and before it
-    /// is installed (for tests: online GC during a rebase).
-    rebase_hook: Mutex<Option<RebaseHook>>,
+    /// is installed, with the cell unlocked unless the step holds it (for
+    /// tests: online GC during a rebase, a parked rebase). A size change of
+    /// a closed file runs it after its splice, with its transient cell
+    /// locked.
+    rebase_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run inside each read through the per-inode reader, with it locked
+    /// (for tests: a reader parked in the middle of a read).
+    read_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in the I/O phase of each stream step (a push, a settle, the end
+    /// of a flush snapshot), with the cell unlocked (for tests: a parked
+    /// streaming write or fsync).
+    push_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in each mkdir, create and mknod after the new entry is linked
+    /// and before its record is appended, with its stripes held (for
+    /// tests: a parked mkdir or create).
+    mkdir_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run in each release of the content of a reclaimed inode, before its
+    /// manifest node is read, with no stripe held (for tests: a parked
+    /// unlink).
+    reclaim_hook: sync::Mutex<Option<RebaseHook>>,
+    /// Run at each `Pause` point (for tests: a request parked at a known
+    /// step of a race).
+    pause_hook: sync::Mutex<Option<PauseHook>>,
     /// Write requests so far (write, create, setattr): the online GC gives
     /// way to writes by it (`gc_pacing`).
     write_activity: Arc<AtomicU64>,
+    /// Test hooks (see `test_drop_steps`, `test_drop_every`): results of
+    /// unlocked steps to drop, and the step count they use.
+    drop_steps: AtomicUsize,
+    drop_every: AtomicUsize,
+    steps_seen: AtomicUsize,
+    /// Test hook (see `test_fail_steps`): rebase steps to fail with EIO.
+    fail_steps: AtomicUsize,
+    /// One slice of a wait for a step in flight, in ms (`STEP_WAIT`; tests
+    /// set it lower).
+    step_wait_ms: AtomicU64,
+    /// The longest time that one write request keeps trying again after a
+    /// busy store, in ms (`STORE_BUSY_RETRY_MAX`; tests set it lower).
+    store_busy_limit_ms: AtomicU64,
+    /// Write attempts that ended on a busy store and were tried again (for
+    /// the S7 line and tests).
+    store_busy_retries: AtomicU64,
+    /// The flush control block (Phase 20; see `FlushCtl`).
+    flush_ctl: Arc<FlushCtl>,
+    /// Set at the start of `shutdown()`, never cleared: a timed commit
+    /// that gets the gate later does no commit (`commit_unless_shut_down`).
+    shut_down: AtomicBool,
+    /// Threads that wait for the exclusive commit gate now (a test hook;
+    /// see `ExclusiveWait`).
+    gate_xwaiters: raw::atomic::AtomicUsize,
+    /// The flusher thread of a mount (`start_flusher`); `stop_flusher`
+    /// takes it and joins it. `Rank::Short`.
+    flusher_thread: sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl SliceFsFilesystem {
@@ -251,7 +1255,8 @@ impl SliceFsFilesystem {
     /// `store_path` is the on-disk store root; when `Some`, `destroy()` persists
     /// state after the FUSE session ends.
     ///
-    /// Raw bytes flow directly into the Merkle tree (v3 store format — no compression).
+    /// Raw bytes flow directly into the Merkle tree (the chunk store compresses
+    /// each object).
     pub fn new(
         meta: DictMetadataStore,
         io: Arc<Mutex<StoreIo>>,
@@ -265,25 +1270,40 @@ impl SliceFsFilesystem {
             meta: Arc::new(meta),
             io,
             content,
-            open_files: Mutex::new(HashMap::new()),
-            write_alias: Mutex::new(HashMap::new()),
-            readers: Mutex::new(HashMap::new()),
-            handles: Mutex::new(HashMap::new()),
-            orphans: Mutex::new(HashSet::new()),
+            cells: CellMap::new(),
+            dirty_total: AtomicUsize::new(0),
+            readers: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::Readers),
+            handles: sync::Mutex::new(Rank::Short, HandleTable::default()).timed(Site::Handles),
+            ns: NamespaceLocks::new(),
             next_fh: AtomicU64::new(0),
             store_path,
             auto_snapshot: false,
-            commit_gate: Arc::new(RwLock::new(())),
+            read_only: false,
+            commit_gate: Arc::new(raw::RwLock::new(())),
             replaying: std::sync::atomic::AtomicBool::new(false),
             dirty_limit: AtomicUsize::new(DIRTY_LIMIT),
             dirty_budget: AtomicUsize::new(DIRTY_BUDGET),
+            final_step: AtomicUsize::new(FINAL_STEP),
             rebase_count: AtomicU64::new(0),
-            last_rebase_bytes: AtomicU64::new(0),
             last_relog_bytes: AtomicU64::new(0),
-            write_rebase_bytes: AtomicU64::new(0),
-            write_base_bytes: AtomicU64::new(0),
-            rebase_hook: Mutex::new(None),
+            rebase_hook: sync::Mutex::new(Rank::Short, None),
+            read_hook: sync::Mutex::new(Rank::Short, None),
+            push_hook: sync::Mutex::new(Rank::Short, None),
+            mkdir_hook: sync::Mutex::new(Rank::Short, None),
+            reclaim_hook: sync::Mutex::new(Rank::Short, None),
+            pause_hook: sync::Mutex::new(Rank::Short, None),
             write_activity: Arc::new(AtomicU64::new(0)),
+            drop_steps: AtomicUsize::new(0),
+            drop_every: AtomicUsize::new(0),
+            steps_seen: AtomicUsize::new(0),
+            fail_steps: AtomicUsize::new(0),
+            step_wait_ms: AtomicU64::new(STEP_WAIT.as_millis() as u64),
+            store_busy_limit_ms: AtomicU64::new(STORE_BUSY_RETRY_MAX.as_millis() as u64),
+            store_busy_retries: AtomicU64::new(0),
+            flush_ctl: Arc::new(FlushCtl::new()),
+            shut_down: AtomicBool::new(false),
+            gate_xwaiters: raw::atomic::AtomicUsize::new(0),
+            flusher_thread: sync::Mutex::new(Rank::Short, None),
         }
     }
 
@@ -307,32 +1327,91 @@ impl SliceFsFilesystem {
         self.dirty_budget.store(bytes, Ordering::Relaxed);
     }
 
+    /// Set the dirty-data values of the mount options (Phase 20). The mount
+    /// calls it before the write-log replay, so the replay uses them too.
+    /// It does not check `cfg`: `DirtyConfig::check` does.
+    pub fn set_dirty_config(&self, cfg: &DirtyConfig) {
+        self.dirty_budget.store(cfg.budget, Ordering::Relaxed);
+        self.dirty_limit.store(cfg.limit, Ordering::Relaxed);
+        self.flush_ctl.idle_ms.store(cfg.idle_secs.saturating_mul(1000), Ordering::Relaxed);
+        self.flush_ctl.expire_ms.store(cfg.expire_secs.saturating_mul(1000), Ordering::Relaxed);
+    }
+
+    /// Test hook: the dirty-data values now in use.
+    pub fn test_dirty_config(&self) -> DirtyConfig {
+        DirtyConfig {
+            budget: self.dirty_budget.load(Ordering::Relaxed),
+            limit: self.dirty_limit.load(Ordering::Relaxed),
+            idle_secs: self.flush_ctl.idle_ms.load(Ordering::Relaxed) / 1000,
+            expire_secs: self.flush_ctl.expire_ms.load(Ordering::Relaxed) / 1000,
+        }
+    }
+
+    /// Test hook: set the step of the last release to `bytes`.
+    pub fn test_set_final_step(&self, bytes: usize) {
+        self.final_step.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the longest time that one write request keeps trying
+    /// again after a busy store (`STORE_BUSY_RETRY_MAX`).
+    pub fn test_set_store_busy_limit(&self, limit: Duration) {
+        self.store_busy_limit_ms.store(limit.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// The longest time that one write request keeps trying again after a
+    /// busy store (see `handlers::handle_write_retrying`).
+    pub(crate) fn store_busy_limit(&self) -> Duration {
+        Duration::from_millis(self.store_busy_limit_ms.load(Ordering::Relaxed))
+    }
+
+    /// Count one write attempt that ended on a busy store and is tried again.
+    pub(crate) fn count_store_busy_retry(&self) {
+        self.store_busy_retries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Write attempts so far that ended on a busy store and were tried again.
+    pub fn store_busy_retries(&self) -> u64 {
+        self.store_busy_retries.load(Ordering::Relaxed)
+    }
+
     /// Test hook: the number of rebases so far.
     pub fn test_rebase_count(&self) -> u64 {
         self.rebase_count.load(Ordering::Relaxed)
     }
 
-    /// Test hook: the bytes the last splice cut again with FastCDC (a rebase,
+    /// Test hook: the bytes the last splice of this thread cut again with FastCDC (a rebase,
     /// or a size change with no open handle): `SpliceStats::rechunked`.
     pub fn test_last_rebase_bytes(&self) -> u64 {
-        self.last_rebase_bytes.load(Ordering::Relaxed)
+        LAST_REBASE_BYTES.with(std::cell::Cell::get)
     }
 
-    /// Test hook: the bytes that the rebase work of the last write cut again
+    /// Test hook: the bytes that the rebase work of this thread's last write cut again
     /// with FastCDC (0 if it ran no rebase).
     pub fn test_last_write_rebase_bytes(&self) -> u64 {
-        self.write_rebase_bytes.load(Ordering::Relaxed)
+        WRITE_REBASE_BYTES.with(std::cell::Cell::get)
     }
 
-    /// Test hook: the base bytes that the rebase work of the last write read.
+    /// Test hook: the most bytes that one rebase step of this thread's last
+    /// write copied with the cell locked (its Phase A).
+    pub fn test_last_write_max_copy(&self) -> u64 {
+        WRITE_MAX_COPY.with(std::cell::Cell::get)
+    }
+
+    /// Test hook: the base bytes that the rebase work of this thread's last write read.
     pub fn test_last_write_base_bytes(&self) -> u64 {
-        self.write_base_bytes.load(Ordering::Relaxed)
+        WRITE_BASE_BYTES.with(std::cell::Cell::get)
     }
 
     /// Test hook: the dirty bytes of all open files (overlay costs and the
     /// pending out-of-order writes of streams).
     pub fn test_dirty_total(&self) -> usize {
-        self.open_files.lock().unwrap().values().map(dirty_cost).sum()
+        self.dirty_total.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: the dirty cost of `ino` as its cell last synced it (0 if
+    /// it has no open write state).
+    pub fn test_dirty_cost(&self, ino: u64) -> usize {
+        self.cells.get(ino).map_or(0, |c| c.dirty.load(Ordering::Relaxed))
     }
 
     /// Test hook: the `Write` payload bytes the last commit logged again.
@@ -341,9 +1420,200 @@ impl SliceFsFilesystem {
     }
 
     /// Test hook: run `hook` inside each rebase, after the new root is
-    /// finished and before it is installed (`None`: no hook).
+    /// finished and before it is installed, and after the splice of a size
+    /// change of a closed file (`None`: no hook).
     pub fn test_set_rebase_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
-        *self.rebase_hook.lock().unwrap() = hook;
+        *self.rebase_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` inside each read through the per-inode reader,
+    /// with that reader locked (`None`: no hook).
+    pub fn test_set_read_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.read_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` in the I/O phase of each stream step (a push,
+    /// a settle of pending writes, the end of a flush snapshot), with the
+    /// cell unlocked (`None`: no hook).
+    pub fn test_set_push_hook(&self, hook: Option<RebaseHook>) {
+        *self.push_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` in each mkdir, create and mknod after the new
+    /// entry is linked and before its record is appended, with its stripes
+    /// held (`None`: no hook).
+    pub fn test_set_mkdir_hook(&self, hook: Option<RebaseHook>) {
+        *self.mkdir_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` in each release of the content of a reclaimed
+    /// inode, before its manifest node is read (`None`: no hook).
+    pub fn test_set_reclaim_hook(&self, hook: Option<RebaseHook>) {
+        *self.reclaim_hook.lock() = hook;
+    }
+
+    /// Test hook: run `hook` at each `Pause` point, with the locks that the
+    /// point names held (`None`: no hook).
+    pub fn test_set_pause_hook(&self, hook: Option<PauseHook>) {
+        *self.pause_hook.lock() = hook;
+    }
+
+    /// Run the pause hook at `at`, with no hook lock held during the call.
+    fn pause(&self, at: Pause) {
+        let hook = self.pause_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook(at);
+        }
+    }
+
+    /// Test hook: drop the results of the next `n` unlocked steps (stream
+    /// steps, overlay switches, rebase steps) as if the file had changed in
+    /// their I/O phase. Flushes are not dropped.
+    pub fn test_drop_steps(&self, n: usize) {
+        self.drop_steps.store(n, Ordering::Relaxed);
+    }
+
+    /// Test hook: drop the result of every `k`-th unlocked step (0: off).
+    pub fn test_drop_every(&self, k: usize) {
+        self.steps_seen.store(0, Ordering::Relaxed);
+        self.drop_every.store(k, Ordering::Relaxed);
+    }
+
+    /// Test hook: set one slice of a wait for a step in flight (see
+    /// `STEP_WAIT`) to `d`.
+    pub fn test_set_step_wait(&self, d: Duration) {
+        self.step_wait_ms.store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Test hook: the next `n` unlocked rebase steps fail with EIO after
+    /// their I/O phase, as a store error does (nothing is published).
+    pub fn test_fail_steps(&self, n: usize) {
+        self.fail_steps.store(n, Ordering::Relaxed);
+    }
+
+    /// Test hook: pause (`true`) or resume the flusher. A paused flusher
+    /// makes no pass; a resumed one makes a pass at once.
+    pub fn test_pause_flusher(&self, paused: bool) {
+        self.flush_ctl.flags.lock().paused = paused;
+        self.flush_ctl.wake.notify_all();
+    }
+
+    /// Test hook: set the wait limit of a throttled writer (`THROTTLE_WAIT`).
+    pub fn test_set_throttle_wait(&self, ms: u64) {
+        self.flush_ctl.throttle_wait_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the pass interval of the flusher (`FLUSH_PASS`).
+    pub fn test_set_flush_pass(&self, ms: u64) {
+        self.flush_ctl.pass_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the idle time of a file (`DIRTY_IDLE`).
+    pub fn test_set_dirty_idle(&self, ms: u64) {
+        self.flush_ctl.idle_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the maximum age of dirty data (`DIRTY_EXPIRE`).
+    pub fn test_set_dirty_expire(&self, ms: u64) {
+        self.flush_ctl.expire_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: set the hot window (`HOT_WINDOW`).
+    pub fn test_set_hot_window(&self, ms: u64) {
+        self.flush_ctl.hot_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: move the flusher clock of this file system forward.
+    pub fn test_advance_clock(&self, ms: u64) {
+        self.flush_ctl.clock_offset_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    /// Test hook: the writers in a throttle wait now.
+    pub fn test_throttled_now(&self) -> usize {
+        self.flush_ctl.throttled_now.load(Ordering::Relaxed)
+    }
+
+    /// Test hook: true while a flusher loop runs.
+    pub fn test_flusher_running(&self) -> bool {
+        self.flush_ctl.running.load(Ordering::Acquire)
+    }
+
+    /// Test hook: true when a stop of the flusher was asked.
+    pub fn test_flusher_stopping(&self) -> bool {
+        self.flush_ctl.flags.lock().stop
+    }
+
+    /// Test hook: commits (or GC starts) that wait for the exclusive gate now.
+    pub fn test_gate_exclusive_waiters(&self) -> usize {
+        self.gate_xwaiters.load(Ordering::Relaxed)
+    }
+
+    /// Count this thread as one that waits for the exclusive commit gate
+    /// until the returned guard drops (also on a panic). Take it just
+    /// before the wait and drop it when the gate is held.
+    pub(crate) fn exclusive_wait(&self) -> ExclusiveWait<'_> {
+        ExclusiveWait::enter(&self.gate_xwaiters)
+    }
+
+    /// Test hook: the counters of the flusher and the throttle.
+    pub fn test_flusher_stats(&self) -> FlusherStats {
+        let c = &*self.flush_ctl;
+        let v = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        FlusherStats {
+            passes: v(&c.passes),
+            steps: v(&c.steps),
+            published: v(&c.published),
+            drops: v(&c.drops),
+            skips: v(&c.skips),
+            errors: v(&c.errors),
+            busy: v(&c.busy),
+            throttled: v(&c.throttled),
+            timeouts: v(&c.timeouts),
+            stop_exits: v(&c.stop_exits),
+            no_room_exits: v(&c.no_room_exits),
+            max_wait_ms: v(&c.max_wait_ms),
+            save_steps: v(&c.save_steps),
+            freed_bytes: v(&c.freed_bytes),
+        }
+    }
+
+    /// The `steps:` line of the unmount ([Stats]): save steps, steps per
+    /// second since the flusher started, and freed bytes per step.
+    pub fn steps_line(&self) -> String {
+        let c = &*self.flush_ctl;
+        let (n, freed) = (c.save_steps.load(Ordering::Relaxed), c.freed_bytes.load(Ordering::Relaxed));
+        let start = c.started_ms.load(Ordering::Relaxed);
+        let secs = if start == 0 { 0.0 } else { c.now_ms().saturating_sub(start) as f64 / 1000.0 };
+        let per_s = if secs > 0.0 { n as f64 / secs } else { 0.0 };
+        format!("steps: save_steps={n} steps_per_s={per_s:.2} freed_per_step={} freed_bytes={freed}", freed.checked_div(n).unwrap_or(0))
+    }
+
+    /// True if a test hook fails this rebase step (see `test_fail_steps`).
+    fn forced_fail(&self) -> bool {
+        self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    }
+
+    /// Phase C of an unlocked step: true if a test hook drops its result.
+    /// With `hook_off` (a finalize after `FINAL_TRIES` drops) the hook is
+    /// not consulted.
+    fn forced_drop(&self, hook_off: bool) -> bool {
+        if hook_off {
+            return false;
+        }
+        let k = self.drop_every.load(Ordering::Relaxed);
+        let n = self.steps_seen.fetch_add(1, Ordering::Relaxed) + 1;
+        if k > 0 && n.is_multiple_of(k) {
+            return true;
+        }
+        self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+    }
+
+    /// Run the push hook, if one is set.
+    fn run_push_hook(&self) {
+        let hook = self.push_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Enable auto-snapshot on clean unmount.
@@ -351,13 +1621,41 @@ impl SliceFsFilesystem {
         self.auto_snapshot = enabled;
     }
 
+    /// Set the read-only daemon mode (a mount of a store with an unknown
+    /// ro_compat flag): `destroy` commits nothing. Set once, before the mount.
+    pub fn set_read_only(&mut self, on: bool) {
+        self.read_only = on;
+    }
+
+    /// True in the read-only daemon mode (see `set_read_only`).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Every FUSE callback holds this gate shared; the commit timer holds it
     /// exclusively, so a timed commit never sees half of an operation.
     /// Append a request to the write log (#20), unless the log is being replayed.
     pub(crate) fn log_record(&self, rec: crate::oplog::Record) {
-        if !self.replaying.load(Ordering::Relaxed) {
-            self.meta.log_op(rec.encode());
+        let lsn = self.log_append(rec);
+        self.log_write_out(lsn);
+    }
+
+    /// First half of `log_record` (D-08): encode the record and put it in
+    /// the write log's memory queue. A request calls it under the locks of
+    /// its apply. `None` while the log is replayed, with no write log, or
+    /// when the append failed.
+    pub(crate) fn log_append(&self, rec: crate::oplog::Record) -> Option<Lsn> {
+        if self.replaying.load(Ordering::Relaxed) {
+            return None;
         }
+        self.meta.log_append(rec.encode())
+    }
+
+    /// Second half of `log_record`: write the records up to `lsn` out. A
+    /// request calls it after its apply locks are released and before it
+    /// replies (still inside the shared commit gate).
+    pub(crate) fn log_write_out(&self, lsn: Option<Lsn>) {
+        self.meta.log_write_out(lsn);
     }
 
     /// Turn off logging until the returned guard is dropped (replay).
@@ -366,20 +1664,291 @@ impl SliceFsFilesystem {
         ReplayGuard(&self.replaying)
     }
 
-    /// The inode of an open handle.
+    /// The inode of an open write handle (`None` for a read-only or unknown
+    /// handle).
     pub(crate) fn ino_of_fh(&self, fh: u64) -> Option<u64> {
-        let fh = self.owner_fh(fh);
-        self.open_files.lock().unwrap().get(&fh).map(|s| s.ino)
+        self.handle(fh).filter(|h| h.write).map(|h| h.ino)
     }
 
-    /// The handle that holds the write state of `fh`: `fh` itself, or the
-    /// first write handle of the same inode (see `write_alias`).
-    fn owner_fh(&self, fh: u64) -> u64 {
-        self.write_alias.lock().unwrap().get(&fh).copied().unwrap_or(fh)
+    /// The open handle `fh`, if any.
+    pub(crate) fn handle(&self, fh: u64) -> Option<Handle> {
+        self.handles.lock().by_fh.get(&fh).copied()
     }
 
-    pub fn commit_gate(&self) -> Arc<RwLock<()>> {
+    fn lock_cell<'a>(&'a self, cell: &'a FileCell) -> CellGuard<'a> {
+        CellGuard {
+            total: &self.dirty_total,
+            ctl: &self.flush_ctl,
+            cell,
+            state: Some(cell.state.lock()),
+            notes: Vec::new(),
+            no_drop_hook: false,
+            at_cap: false,
+            step_wait: Duration::from_millis(self.step_wait_ms.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Run `f` on the open write state of `ino` under its cell lock; `None`
+    /// if `ino` has none (no cell, a retired one, or the transient cell of
+    /// a closed-file size change, which is not locked here).
+    fn with_cell<R>(&self, ino: u64, f: impl FnOnce(&mut OpenFileState) -> R) -> Option<R> {
+        let cell = self.cells.get(ino).filter(|c| !c.transient)?;
+        let mut g = self.lock_cell(&cell);
+        if g.retired {
+            return None;
+        }
+        Some(f(&mut g.file))
+    }
+
+    /// Count a new write handle of `ino` in its cell (made if needed). With
+    /// `trunc`, the file is truncated to 0 under the same cell lock, and
+    /// with `time` its `Truncate` record is appended in that hold (D-08).
+    fn open_write(&self, ino: u64, trunc: bool, time: Option<(i64, u32)>) -> Result<Option<Lsn>, i32> {
+        loop {
+            let cell = self.cells.get_or_insert(ino);
+            let mut g = self.lock_cell(&cell);
+            if g.retired {
+                // The last release retired it before we locked it: it has
+                // left the map, so the next lookup gives a live cell.
+                continue;
+            }
+            g.write_handles += 1;
+            if !trunc {
+                return Ok(None);
+            }
+            // The truncate waits for a step in flight with the cell
+            // released and no stripe held (WR-02): the caller counted the
+            // handle under the stripe and released it.
+            match self.setattr_size_open(&mut g, 0) {
+                Ok(true) => {}
+                // Retired while it waited (only destroy can do that: this
+                // handle is counted): look the inode up again.
+                Ok(false) => continue,
+                Err(e) => {
+                    let _ = self.leave(&cell, &mut g);
+                    return Err(e);
+                }
+            }
+            let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Truncate { ino: cell.ino } };
+            return Ok(time.and_then(|t| self.log_append(rec(t))));
+        }
+    }
+
+    /// One write handle of the cell ends. The last one finalizes the content
+    /// in steps and then retires the cell (see `finalize`).
+    fn leave(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        g.write_handles = g.write_handles.saturating_sub(1);
+        if g.write_handles > 0 {
+            return Ok(());
+        }
+        self.finalize(cell, g)
+    }
+
+    /// A write handle of `ino` ends (see `leave`). With `time`, a release
+    /// that finalized and retired the cell appends its `Release` record in
+    /// that last hold (D-08): not the release of a write handle that was
+    /// not the last, nor one whose finalize a new writer stopped.
+    fn release_write(&self, ino: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(cell) = self.cells.get(ino) else { return (Ok(()), None) };
+        let mut g = self.lock_cell(&cell);
+        if g.retired {
+            return (Ok(()), None);
+        }
+        let r = self.leave(&cell, &mut g);
+        let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Release { ino: cell.ino } };
+        let lsn = if g.retired { time.and_then(|t| self.log_append(rec(t))) } else { None };
+        (r, lsn)
+    }
+
+    /// The last write handle of the cell `g` is gone (D-03): store its
+    /// content in bounded steps by the protocol of D-02, each with the I/O
+    /// unlocked under the step token (pending writes one stream step each,
+    /// an overlay in rebase steps of at most `final_step` bytes, a stream
+    /// by a flush; see `finalize_steps`). When the content is clean, retire
+    /// the cell and remove it from the map in the same cell-lock hold (cell
+    /// rank, then shard rank; RESEARCH Pitfall 4). If a write handle is
+    /// opened meanwhile, stop: the cell lives on, and its next last release
+    /// finalizes. After an error the cell is retired only if its state is
+    /// clean (WR-04): a dirty one stays in the map with no write handle, so
+    /// no unstored byte is lost. Reads still see it, a commit cut flushes it
+    /// or logs it again, and the next open and last release (or destroy)
+    /// store it; an unlink of the last link drops it (`reclaim_inode`).
+    fn finalize(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        let r = self.finalize_steps(g);
+        g.no_drop_hook = false;
+        if g.retired || g.write_handles > 0 || (r.is_err() && !Self::is_clean(&g.file)) {
+            return r;
+        }
+        g.retired = true;
+        self.cells.remove(cell);
+        r
+    }
+
+    /// The steps of `finalize`; returns when the content is clean, the cell
+    /// is retired, or a write handle is open again. Each pass runs one step
+    /// with the I/O unlocked under the step token (`CellGuard::run_step`),
+    /// never one with the cell locked:
+    /// - pending writes: one stream step;
+    /// - a dirty overlay: one rebase step of at most `final_step`;
+    /// - a dirty stream: the flush (`FlushIo::Step`), so no size change
+    ///   makes its snapshot stale; if a newer snapshot came first, the next
+    ///   pass sees the result;
+    /// - nothing written: the empty-file rule (`empty_rule`).
+    ///
+    /// A finalize needs no give-up state. With no write handle only a
+    /// forced drop (a test hook) can drop a step: a size change waits for
+    /// the token first, and the flush runs under it. After `FINAL_TRIES`
+    /// forced drops in a row this finalize stops consulting the hook.
+    fn finalize_steps(&self, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        enum Next { Settle, Rebase, Flush, Empty, Clean }
+        let step = self.final_step.load(Ordering::Relaxed).max(1);
+        // Dropped steps in a row.
+        let mut drops = 0usize;
+        loop {
+            if g.retired || g.write_handles > 0 {
+                return Ok(());
+            }
+            if g.stepping.is_some() {
+                // A step of a write that is still in flight, or of a size
+                // change: wait for it with the cell unlocked, then look again.
+                g.wait_step()?;
+                continue;
+            }
+            if drops >= FINAL_TRIES {
+                g.no_drop_hook = true;
+            }
+            let s = &g.file;
+            let next = match &s.write_mode {
+                WriteMode::Streaming { pending, .. } if !pending.is_empty() => Next::Settle,
+                WriteMode::Overlay(ov) if !ov.is_clean() => Next::Rebase,
+                WriteMode::Overlay(_) => Next::Clean,
+                WriteMode::Streaming { .. } if s.byte_count == 0 => Next::Empty,
+                WriteMode::Streaming { .. } if s.cas_committed && s.last_committed_root.is_some() => Next::Clean,
+                WriteMode::Streaming { .. } => Next::Flush,
+            };
+            let published = match next {
+                Next::Settle => {
+                    let WriteMode::Streaming { pending, .. } = &g.file.write_mode else { continue };
+                    let Some((&o, v)) = pending.first_key_value() else { continue };
+                    let v = v.clone();
+                    self.stream_step(g, o, &v, Some(o))?
+                }
+                Next::Rebase => self.rebase_unlocked(g, step)?,
+                Next::Flush => {
+                    // Not installed: an fsync installed a newer snapshot
+                    // first; the next pass sees the stream clean or dirty.
+                    self.flush_cell(g, FlushIo::Step)?;
+                    true
+                }
+                Next::Empty => {
+                    if self.empty_rule(g)? {
+                        return Ok(());
+                    }
+                    // The state changed in the step: look again.
+                    continue;
+                }
+                Next::Clean => return Ok(()),
+            };
+            if published {
+                drops = 0;
+            } else {
+                drops += 1;
+            }
+        }
+    }
+
+    /// True if `s` holds no byte that is not in its stored content: a clean
+    /// overlay, or a stream with no pending write that is empty or whose
+    /// last flush is current.
+    fn is_clean(s: &OpenFileState) -> bool {
+        match &s.write_mode {
+            WriteMode::Overlay(ov) => ov.is_clean(),
+            WriteMode::Streaming { pending, .. } => {
+                pending.is_empty() && (s.byte_count == 0 || (s.cas_committed && s.last_committed_root.is_some()))
+            }
+        }
+    }
+
+    /// The empty-file rule of `finalize`: no bytes were written through the
+    /// cell `g`. Only set an empty manifest if this is a genuinely new file
+    /// (no existing manifest): FUSE-T on macOS may open existing files with
+    /// O_RDWR even for read-only access (issue #15). The manifest read and
+    /// the store put of the empty manifest node run as the cell's step with
+    /// the cell unlocked; the hold only installs the digest, and only if the
+    /// state did not change (the manifest of an open inode changes only
+    /// under its cell lock, with a new generation or a new
+    /// `last_committed_root`). `Ok(false)`: it changed, the caller looks
+    /// again. The caller makes sure no step is in flight.
+    fn empty_rule(&self, g: &mut CellGuard<'_>) -> Result<bool, i32> {
+        if g.file.cas_committed {
+            return Ok(true);
+        }
+        let (ino, generation, committed) = (g.file.ino, g.file.generation, g.file.last_committed_root);
+        let digest = g.run_step(|| -> Result<Option<ObjectKey>, i32> {
+            if self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty()) {
+                return Ok(None);
+            }
+            self.meta.prepare_manifest(&[]).map(Some).map_err(|_| libc::EIO)
+        })?;
+        if g.retired {
+            return Ok(true);
+        }
+        if g.file.generation != generation || g.file.last_committed_root != committed {
+            return Ok(false);
+        }
+        if let Some(d) = digest {
+            self.meta.set_manifest_digest(ino, d).map_err(|_| libc::EIO)?;
+        }
+        Ok(true)
+    }
+
+    /// `finalize` for `test_destroy` only: no request runs at destroy, so
+    /// the steps keep the cell locked (the settle, rebase steps of at most
+    /// `final_step`, a locked flush, the empty-file rule), and the cell is
+    /// always retired. Never on a request path.
+    fn finalize_locked(&self, cell: &Arc<FileCell>, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        let r = self.destroy_steps(g);
+        g.retired = true;
+        self.cells.remove(cell);
+        r
+    }
+
+    /// The steps of `finalize_locked`, all in the cell hold.
+    fn destroy_steps(&self, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        let (ino, step) = (g.file.ino, self.final_step.load(Ordering::Relaxed).max(1));
+        self.settle_locked(g)?;
+        while matches!(&g.file.write_mode, WriteMode::Overlay(ov) if !ov.is_clean()) {
+            if let Some(line) = self.rebase_step(ino, &mut g.file, step)? {
+                g.notes.push(line);
+            }
+        }
+        if matches!(g.file.write_mode, WriteMode::Streaming { .. }) && g.file.byte_count == 0 {
+            // The empty-file rule (see `empty_rule`), in the hold.
+            if !g.file.cas_committed && !self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty()) {
+                self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+            }
+            return Ok(());
+        }
+        self.flush_cell(g, FlushIo::Locked).map(|_| ())
+    }
+
+    pub fn commit_gate(&self) -> Arc<raw::RwLock<()>> {
         Arc::clone(&self.commit_gate)
+    }
+
+    /// Hold the commit gate shared (one request) with a `Rank::Gate` entry
+    /// on this thread's rank stack for the same span (D-16). The entry goes
+    /// on first, so a second gate hold on one thread panics in a debug build
+    /// instead of waiting behind a queued commit. Every request and the
+    /// harness take the gate through this, never `commit_gate().read()`.
+    pub fn gate_shared(&self) -> GateGuard<'_> {
+        hold_shared(&self.commit_gate)
+    }
+
+    /// Hold the commit gate exclusively (a commit, the start of a GC), with
+    /// its `Rank::Gate` entry (see `gate_shared`).
+    pub fn gate_exclusive(&self) -> GateGuard<'_> {
+        hold_exclusive(&self.commit_gate, &self.gate_xwaiters)
     }
 
     /// Access the metadata store (used by the mount command after unmount).
@@ -403,35 +1972,85 @@ impl SliceFsFilesystem {
     }
 }
 
-/// Push zeros into the stream until it reaches offset `to`.
-fn push_zeros(state: &mut Stream, cs: &chunk_store::ChunkStore, next: &mut u64, to: u64) -> std::io::Result<()> {
-    if *next < to {
-        state.push_zeros(cs, to - *next)?;
-        *next = to;
-    }
-    Ok(())
+/// The wait of a writer over the budget (the wait part of
+/// `SliceFsFilesystem::throttle_write`, with `now` for its `dirty_now`):
+/// it counts the wait, kicks the flusher under the flags lock, and waits
+/// on `freed` in slices of `THROTTLE_SLICE` until the total from `now` is
+/// below the budget (returns false: no pay), the flusher stopped or ended,
+/// a pass that began in the wait could not free memory, or the wait limit
+/// passed (returns true: the writer pays). A free function, so the dirty
+/// budget model (`loom_tests`) runs it with a model total.
+pub(crate) fn throttle_wait(ctl: &FlushCtl, now: impl Fn() -> (usize, usize)) -> bool {
+    ctl.throttled.fetch_add(1, Ordering::Relaxed);
+    let _now = ThrottledNow::enter(&ctl.throttled_now);
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(ctl.throttle_wait_ms.load(Ordering::Relaxed));
+    let mut flags = ctl.flags.lock();
+    // Only a pass with a higher number began after this point.
+    let seen = flags.pass_begun;
+    flags.kicked = true;
+    ctl.wake.notify_all();
+    let pay = loop {
+        // Under the flags lock: the flusher lowers the total before it
+        // takes this lock to notify, so no wakeup is lost.
+        let (total, budget) = now();
+        if total < budget {
+            break false;
+        }
+        if flags.stop || !ctl.running.load(Ordering::Acquire) {
+            ctl.stop_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        if flags.pass_done > seen && flags.pass_stuck {
+            ctl.no_room_exits.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            ctl.timeouts.fetch_add(1, Ordering::Relaxed);
+            break true;
+        }
+        ctl.freed.wait_for(&mut flags, left.min(THROTTLE_SLICE));
+    };
+    drop(flags);
+    ctl.max_wait_ms.fetch_max(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+    pay
 }
 
-/// Push the pending writes that start before `upto` into the stream in offset
-/// order, with zeros in the gaps, then zeros up to `upto`. Memory stays O(1)
-/// in the gap size. Only for a fresh stream, where unwritten bytes read as zero.
-fn fill_stream(
-    state: &mut Stream,
-    cs: &chunk_store::ChunkStore,
-    next: &mut u64,
-    pending: &mut BTreeMap<u64, Vec<u8>>,
-    upto: u64,
-) -> std::io::Result<()> {
-    while let Some((&o, _)) = pending.first_key_value() {
-        if o >= upto {
-            break;
-        }
-        push_zeros(state, cs, next, o)?;
-        let v = pending.remove(&o).expect("first key exists");
-        state.push(cs, &v)?;
-        *next += v.len() as u64;
-    }
-    push_zeros(state, cs, next, upto)
+/// Hold `gate` shared with its `Rank::Gate` entry (the body of
+/// `SliceFsFilesystem::gate_shared`). The entry goes on first. A free
+/// function, so the commit gate model (`loom_tests`) runs it on a gate of
+/// its own.
+pub(crate) fn hold_shared(gate: &raw::RwLock<()>) -> GateGuard<'_> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let hold = GateHold::Shared { _g: gate.read().unwrap_or_else(|e| e.into_inner()) };
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// Hold `gate` exclusively with its `Rank::Gate` entry, counted in
+/// `xwaiters` while it waits (the body of
+/// `SliceFsFilesystem::gate_exclusive`; see `hold_shared`).
+pub(crate) fn hold_exclusive<'a>(gate: &'a raw::RwLock<()>, xwaiters: &'a raw::atomic::AtomicUsize) -> GateGuard<'a> {
+    let rank = sync::rank::enter(Rank::Gate);
+    let waiting = ExclusiveWait::enter(xwaiters);
+    let hold = GateHold::Exclusive { _g: gate.write().unwrap_or_else(|e| e.into_inner()) };
+    drop(waiting);
+    GateGuard { _hold: hold, _rank: rank }
+}
+
+/// The commit gate held, shared or exclusive (each guard is kept only for
+/// its drop). The gate is a std `RwLock`; under `--cfg loom` it is the loom
+/// one (`sync::raw`).
+enum GateHold<'a> {
+    Shared { _g: raw::RwLockReadGuard<'a, ()> },
+    Exclusive { _g: raw::RwLockWriteGuard<'a, ()> },
+}
+
+/// A hold of the commit gate and its rank-1 entry (D-16, D-18: the gate
+/// stays a std `RwLock`). The gate is released first, then the entry.
+pub struct GateGuard<'a> {
+    _hold: GateHold<'a>,
+    _rank: sync::rank::Marker,
 }
 
 /// Convert a `SystemTime` to `(seconds, nanoseconds)` since the epoch.
@@ -495,7 +2114,7 @@ pub fn inode_to_file_attr(meta: &InodeMeta) -> FileAttr {
     };
 
     let perm = (meta.mode & 0o7777) as u16;
-    let blocks = (meta.size + 511) / 512;
+    let blocks = meta.size.div_ceil(512);
 
     let mtime = pair_to_system_time(meta.mtime_sec, meta.mtime_nsec);
     let ctime = pair_to_system_time(meta.ctime_sec, meta.ctime_nsec);
@@ -571,69 +2190,111 @@ impl SliceFsFilesystem {
         self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Allocate a file handle and record it as open on `ino`.
-    fn open_handle(&self, ino: u64) -> u64 {
+    /// Allocate a file handle and record it as open on `ino` (for writing
+    /// if `write`, at the end of file if `append`).
+    fn open_handle(&self, ino: u64, write: bool, append: bool) -> u64 {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 1;
-        self.handles.lock().unwrap().insert(fh, ino);
+        let mut t = self.handles.lock();
+        t.by_fh.insert(fh, Handle { ino, write, append });
+        *t.open_count.entry(ino).or_insert(0) += 1;
         fh
     }
 
-    /// Forget handle `fh`. If it was the last handle of an orphaned inode,
-    /// reclaim the inode. A handle that is not open is ignored.
-    fn close_handle(&self, fh: u64) {
-        let ino = match self.handles.lock().unwrap().remove(&fh) {
-            Some(ino) => ino,
-            None => return,
-        };
-        let still_open = self.handles.lock().unwrap().values().any(|&i| i == ino);
-        if !still_open && self.orphans.lock().unwrap().remove(&ino) {
-            self.reclaim_inode(ino);
-        }
+    /// Count `ino` as open with no handle (the count half of `open_handle`):
+    /// an unlink then keeps the inode as an orphan until `uncount`, as for
+    /// an open handle. The caller holds `stripe(ino)` (IN-01 order).
+    fn pin_inode(&self, ino: u64) {
+        *self.handles.lock().open_count.entry(ino).or_insert(0) += 1;
     }
 
-    /// Delete a non-directory inode that has no links left and release its content.
-    fn reclaim_inode(&self, ino: u64) {
-        if let Ok(manifest) = self.meta.get_manifest(ino) {
-            for digest in &manifest {
-                self.meta.decrement_refcount(digest);
+    /// Remove `fh` from the handle table (its inode stays counted as open
+    /// until `uncount`). Exactly one caller gets a handle back.
+    fn take_handle(&self, fh: u64) -> Option<Handle> {
+        self.handles.lock().by_fh.remove(&fh)
+    }
+
+    /// One handle of `ino` is gone. If it was the last one of an orphaned
+    /// inode, reclaim the inode. Locks `stripe(ino)`, so the last-close and
+    /// the last-unlink decisions of one inode cannot interleave; the content
+    /// is released after the stripe (IN-01).
+    fn uncount(&self, ino: u64) {
+        let freed = {
+            let _ns = self.ns.lock(&[ino]);
+            let reclaim = {
+                let mut t = self.handles.lock();
+                let n = t.open_count.get_mut(&ino).expect("an open handle is counted");
+                *n -= 1;
+                *n == 0 && {
+                    t.open_count.remove(&ino);
+                    t.orphans.remove(&ino)
+                }
+            };
+            // The store work runs after the table lock is released.
+            if reclaim { self.reclaim_inode(ino) } else { None }
+        };
+        self.release_content(freed);
+    }
+
+    /// Delete a non-directory inode that has no links left, in memory only
+    /// (IN-01), so its caller can hold its stripes. A cell left with no
+    /// write handle by a failed last release (WR-04) goes too: its bytes
+    /// belong to a deleted inode. Returns the manifest digest of the inode:
+    /// the caller passes it to `release_content` after its stripes are
+    /// released, inside the same shared commit gate (no commit cut and no
+    /// GC start fall between; a replay of the request's record reclaims
+    /// the inode from the old root again).
+    fn reclaim_inode(&self, ino: u64) -> Option<ObjectKey> {
+        if let Some(cell) = self.cells.get(ino).filter(|c| !c.transient) {
+            let mut g = self.lock_cell(&cell);
+            if !g.retired && g.write_handles == 0 {
+                g.retired = true;
+                self.cells.remove(&cell);
             }
         }
-        self.readers.lock().unwrap().remove(&ino);
+        let digest = self.meta.manifest_digest(ino);
+        self.readers.lock().remove(&ino);
         let _ = self.meta.delete_inode(ino);
+        digest
+    }
+
+    /// Release the content of a reclaimed inode (see `reclaim_inode`): read
+    /// the manifest node `digest` and drop one reference of each entry.
+    /// With no stripe held: the node read can take a while (IN-01). The
+    /// decrements commute with the refcount changes of other requests.
+    fn release_content(&self, digest: Option<ObjectKey>) {
+        let Some(digest) = digest else { return };
+        let hook = self.reclaim_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        if let Ok(manifest) = self.meta.manifest_entries(&digest) {
+            for key in &manifest {
+                self.meta.decrement_refcount(key);
+            }
+        }
     }
 
     /// The last link of a non-directory inode was removed: reclaim it now, or
-    /// keep it as an orphan (nlink 0) while handles are still open.
-    fn drop_last_link(&self, mut inode: InodeMeta) -> Result<(), i32> {
-        let open = self.handles.lock().unwrap().values().any(|&i| i == inode.ino);
-        if open {
-            inode.nlinks = 0;
-            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
-            self.orphans.lock().unwrap().insert(inode.ino);
-        } else {
-            self.reclaim_inode(inode.ino);
-        }
-        Ok(())
-    }
-
-    /// ftruncate(fd, 0) takes effect at once: empty the committed manifest and
-    /// release its root, unless that root is `released` (already released by
-    /// the handle). Later writes on the handle then start from an empty file.
-    fn clear_manifest(&self, ino: u64, released: Option<ObjectKey>) -> Result<(), i32> {
-        if let Ok(m) = self.meta.get_manifest(ino) {
-            if let Some(root) = m.first() {
-                if Some(*root) != released {
-                    self.meta.decrement_refcount(root);
-                }
+    /// keep it as an orphan (nlink 0) while handles are still open. The
+    /// caller holds `stripe(ino)` (open and last close take it too), and
+    /// passes the result to `release_content` after its stripes (IN-01).
+    fn drop_last_link(&self, inode: InodeMeta) -> Result<Option<ObjectKey>, i32> {
+        let ino = inode.ino;
+        if self.handles.lock().open_count.contains_key(&ino) {
+            self.meta.modify_inode(ino, |m| m.nlinks = 0).map_err(|e| meta_error_to_errno(&e))?;
+            // The last handle may have closed meanwhile: then reclaim here.
+            let mut t = self.handles.lock();
+            if t.open_count.contains_key(&ino) {
+                t.orphans.insert(ino);
+                return Ok(None);
             }
         }
-        self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)
+        Ok(self.reclaim_inode(ino))
     }
 
-    /// Finish a clone of a streaming state as a stored root, first appending
+    /// End a clone of a streaming state as a stored root, first appending
     /// zeros from `streamed` up to `min_size` (an extension set by setattr).
-    fn end_padded(&self, state: &Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
-        let mut st = state.clone();
+    fn end_padded(&self, mut st: Stream, streamed: u64, min_size: u64) -> Result<ObjectKey, i32> {
         let cs = &*self.content;
         st.push_zeros(cs, min_size.saturating_sub(streamed))
             .and_then(|_| st.finish(cs))
@@ -677,15 +2338,20 @@ impl SliceFsFilesystem {
         // (#108). The commit below waits for it in any case; waiting here,
         // before the gate, keeps requests from waiting for it too.
         self.meta.wait_for_commit();
-        let gate = self.commit_gate.write().unwrap_or_else(|e| e.into_inner());
+        let gate = self.gate_exclusive();
         // From here the chunk store keeps each object put or read (nodes and
         // file content), and the GC changes only packs up to `boundary`.
         let begin = if full { self.content.gc_begin_full() } else { self.content.gc_begin() };
         let boundary = begin.map_err(|e| format!("GC start: chunk store error: {e}"))?;
         let mut file_roots = Vec::new();
         let mut states: Vec<Stream> = Vec::new();
-        for s in self.open_files.lock().unwrap().values() {
-            match &s.write_mode {
+        // One cell lock at a time (the exclusive gate is held).
+        for cell in self.cells.all() {
+            let g = self.lock_cell(&cell);
+            if g.retired {
+                continue;
+            }
+            match &g.file.write_mode {
                 WriteMode::Streaming { state, .. } => states.push(state.clone()),
                 WriteMode::Overlay(ov) => file_roots.extend(ov.base),
             }
@@ -807,72 +2473,62 @@ impl SliceFsFilesystem {
         }
     }
 
-    /// The open write handle of `ino` that holds the most data, if any.
-    /// (FUSE-T may open a file O_RDWR only to read it; such an idle handle
-    /// must not take a size change meant for the real writer.)
-    fn write_handle_of(&self, ino: u64) -> Option<u64> {
-        self.open_files.lock().unwrap().iter()
-            .filter(|(_, s)| s.ino == ino)
-            .max_by_key(|(fh, s)| (s.byte_count, **fh))
-            .map(|(&fh, _)| fh)
-    }
-
     /// True if the committed file has bytes (so a fresh stream would lose them).
     fn has_content(&self, ino: u64) -> bool {
-        self.meta.get_inode(ino).map_or(false, |m| m.size > 0)
-            && self.meta.get_manifest(ino).map_or(false, |m| !m.is_empty())
+        self.meta.get_inode(ino).is_ok_and(|m| m.size > 0)
+            && self.meta.get_manifest(ino).is_ok_and(|m| !m.is_empty())
     }
 
-    /// Make `new` the content root of `ino` (`None`: no content) and stamp
-    /// the inode with `size` and `modified`. The refcount of the new root goes
-    /// up and that of the root the manifest named before goes down. A root
-    /// that the manifest still names is never released. The inode size is
-    /// stamped too, so that a replayed write takes the overlay path on this
-    /// root (not a fresh stream that drops it).
-    fn install_root(&self, ino: u64, new: Option<ObjectKey>, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
-        let old = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
-        match new {
-            None => self.clear_manifest(ino, None)?,
-            Some(k) if Some(k) != old => {
-                self.meta.set_manifest(ino, &[k]).map_err(|_| libc::EIO)?;
-                self.meta.increment_refcount(&k);
-                if let Some(o) = old {
-                    self.meta.decrement_refcount(&o);
-                }
-            }
-            Some(_) => {}
+    /// Switch the stream of the locked cell `g` to an overlay (D-02). Phase
+    /// A clones the stream and reads its generation. Phase B (with the cell
+    /// unlocked if `unlocked`) ends the clone as the base (no zero padding),
+    /// or takes the committed content if nothing was streamed, and stores
+    /// the manifest node. Phase C installs the base in the manifest at once
+    /// (online GC keeps it, and replay starts from it) only if the stream
+    /// did not change, and moves the pending writes into the extents. The
+    /// caller then applies the write that caused the switch. No file
+    /// content is read.
+    ///
+    /// `Ok(true)`: switched (or not a stream); `Ok(false)`: dropped (the
+    /// stream changed, or the cell was retired meanwhile).
+    ///
+    /// Phase B runs as the cell's step (`CellGuard::run_step`): the caller
+    /// makes sure no step is in flight.
+    fn to_overlay(&self, g: &mut CellGuard<'_>) -> Result<bool, i32> {
+        let s = &g.file;
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(true);
+        };
+        let (ino, next, generation, committed) = (s.ino, *next_expected_offset, s.generation, s.last_committed_root);
+        let clone = (next > 0).then(|| state.clone());
+        let io = move || self.overlay_base(ino, clone, next);
+        let (base, base_len, old, digest) = g.run_step(io)?;
+        if g.retired || self.forced_drop(g.no_drop_hook) {
+            return Ok(false);
         }
-        self.stamp_content(ino, size, modified)
-    }
-
-    /// Switch a streaming state to an overlay (the caller took it out of
-    /// `open_files`). The base is the stream so far (ended, no zero padding),
-    /// or the committed content if nothing was streamed. The base goes into
-    /// the manifest at once (online GC keeps it, and replay starts from it).
-    /// Pending writes move into the extents; the caller then applies the
-    /// write that caused the switch. No file content is read.
-    fn to_overlay(&self, s: &mut OpenFileState) -> Result<(), i32> {
-        let ino = s.ino;
-        let WriteMode::Streaming { state, next_expected_offset, pending } = &mut s.write_mode else {
-            return Ok(());
-        };
-        let cs = &*self.content;
-        let store_err = |e: std::io::Error| {
-            eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
-            libc::EIO
-        };
-        let (base, base_len) = if *next_expected_offset > 0 {
-            (Some(state.clone().finish(cs).map_err(store_err)?), *next_expected_offset)
-        } else if self.has_content(ino) {
-            let k = self.meta.get_manifest(ino).map_err(|_| libc::EIO)?[0];
-            (Some(k), content::Reader::open(cs, &k).map_err(store_err)?.len())
-        } else {
-            (None, 0)
-        };
+        let s = &mut g.file;
+        // The manifest of an open inode changes only under its cell lock,
+        // with a new generation or a new `last_committed_root` (a flush):
+        // if neither moved, `old` is still the root the manifest names.
+        if s.generation != generation || s.last_committed_root != committed {
+            return Ok(false);
+        }
+        let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { return Ok(false) };
+        if base != old || base.is_none() {
+            self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+        }
+        if base != old {
+            if let Some(k) = &base {
+                self.meta.increment_refcount(k);
+            }
+            if let Some(o) = &old {
+                self.meta.decrement_refcount(o);
+            }
+        }
+        let pending = std::mem::take(pending);
         let size = base_len.max(s.byte_count).max(s.min_size);
-        self.install_root(ino, base, size, s.modified)?;
         let mut ov = Overlay::new(base, base_len, size);
-        for (o, v) in std::mem::take(pending) {
+        for (o, v) in pending {
             ov.put(o, v);
         }
         s.byte_count = ov.size;
@@ -880,90 +2536,406 @@ impl SliceFsFilesystem {
         s.last_committed_root = base;
         s.min_size = 0;
         s.cas_committed = false;
-        Ok(())
+        s.generation = next_gen();
+        let modified = s.modified;
+        // No older flush snapshot installs over this base.
+        g.last_published_gen = g.file.generation;
+        self.stamp_content(ino, size, modified)?;
+        Ok(true)
     }
 
-    /// Store the content of an overlay as a new root and start a clean
-    /// overlay on it (release, and the full rebase of a small dirty limit).
-    fn rebase_overlay(&self, ino: u64, s: &mut OpenFileState) -> Result<(), i32> {
-        self.rebase_step(ino, s, usize::MAX)
+    /// Phase B of `to_overlay` (no cell lock needed): the base (the ended
+    /// `clone` of a stream of `next` bytes, the committed content, or none)
+    /// and its length, the root the manifest names now, and the digest of
+    /// the stored manifest node of the base.
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
+    fn overlay_base(
+        &self,
+        ino: u64,
+        clone: Option<Stream>,
+        next: u64,
+    ) -> Result<(Option<ObjectKey>, u64, Option<ObjectKey>, ObjectKey), i32> {
+        let cs = &*self.content;
+        let store_err = |e: std::io::Error| {
+            note_store_busy(&e);
+            eprintln!("[{}][FUSE] overlay: content store error: {e}", ts());
+            libc::EIO
+        };
+        let old = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
+        let (base, base_len) = match clone {
+            Some(st) => (Some(st.finish(cs).map_err(store_err)?), next),
+            None if self.has_content(ino) => {
+                let k = old.ok_or(libc::EIO)?;
+                (Some(k), content::Reader::open(cs, &k).map_err(store_err)?.len())
+            }
+            None => (None, 0),
+        };
+        let digest = self.meta.prepare_manifest(base.as_slice()).map_err(|_| libc::EIO)?;
+        Ok((base, base_len, old, digest))
     }
 
-    /// Store a part of an overlay as a new root (#108): take extents worth
-    /// `free` bytes of cost (`Overlay::take`; all of them for `usize::MAX`),
-    /// splice them onto the base, and go on with an overlay on the new root
-    /// that holds the extents not taken. The new root has the old bytes
-    /// under those extents; they stay on top of it, so the content does not
-    /// change. The first step also stores a cut or an extended tail.
+    /// One step of the stream of the locked cell `g` (D-02). Phase A clones
+    /// the stream (a buffer under 2 x CHUNK_MAX plus the level entries) and
+    /// reads its generation. Phase B pushes zeros from the stream end up to
+    /// `zeros_to`, then `bytes`, into the clone, as the cell's step with the
+    /// cell unlocked (`CellGuard::run_step`; the push hook runs there; the
+    /// caller makes sure no step is in flight). Phase C swaps the clone in
+    /// only if the stream did not change, and removes the pending entry
+    /// `pending_key` that `bytes` came from.
     ///
-    /// The splice cuts again only the chunks near the taken extents; every
+    /// `Ok(true)`: published; `Ok(false)`: dropped (the stream changed or is
+    /// gone, the cell was retired, or a test hook dropped it). On an error
+    /// nothing changes.
+    fn stream_step(&self, g: &mut CellGuard<'_>, zeros_to: u64, bytes: &[u8], pending_key: Option<u64>) -> Result<bool, i32> {
+        self.stream_step_in(g, zeros_to, bytes, pending_key, true)
+    }
+
+    /// `stream_step` with Phase B in the cell hold: only for the locked
+    /// settle of `test_destroy` (`finalize_locked`), where no request runs.
+    /// Never on a request path.
+    fn stream_step_locked(&self, g: &mut CellGuard<'_>, zeros_to: u64, bytes: &[u8], pending_key: Option<u64>) -> Result<bool, i32> {
+        self.stream_step_in(g, zeros_to, bytes, pending_key, false)
+    }
+
+    /// The body of `stream_step` (`as_step`) and `stream_step_locked`.
+    fn stream_step_in(
+        &self,
+        g: &mut CellGuard<'_>,
+        zeros_to: u64,
+        bytes: &[u8],
+        pending_key: Option<u64>,
+        as_step: bool,
+    ) -> Result<bool, i32> {
+        let s = &g.file;
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(false);
+        };
+        let (mut st, from, generation) = (state.clone(), *next_expected_offset, s.generation);
+        let cs = &*self.content;
+        let io = |st: &mut Stream| -> std::io::Result<()> {
+            if zeros_to > from {
+                st.push_zeros(cs, zeros_to - from)?;
+            }
+            if !bytes.is_empty() {
+                st.push(cs, bytes)?;
+            }
+            Ok(())
+        };
+        let r = if as_step {
+            g.run_step(|| {
+                let r = io(&mut st);
+                self.run_push_hook();
+                r
+            })
+        } else {
+            io(&mut st)
+        };
+        if let Err(e) = r {
+            note_store_busy(&e);
+            eprintln!("[{}][FUSE] stream: content store error: {e}", ts());
+            return Err(libc::EIO);
+        }
+        if g.retired || (as_step && self.forced_drop(g.no_drop_hook)) {
+            return Ok(false);
+        }
+        let s = &mut g.file;
+        if s.generation != generation {
+            return Ok(false);
+        }
+        let WriteMode::Streaming { state, next_expected_offset, pending } = &mut s.write_mode else {
+            return Ok(false);
+        };
+        let next = zeros_to.max(from) + bytes.len() as u64;
+        *state = st;
+        *next_expected_offset = next;
+        if let Some(k) = pending_key {
+            pending.remove(&k);
+        }
+        s.byte_count = s.byte_count.max(next);
+        s.cas_committed = false;
+        s.generation = next_gen();
+        Ok(true)
+    }
+
+    /// Stream the pending (out-of-order) writes of the locked cell `g` in
+    /// offset order, zeros in the gaps, one locked stream step per pending
+    /// write. Pending writes exist only on a fresh stream, so the gaps are
+    /// zeros; no full-file buffer. Only for `test_destroy`
+    /// (`finalize_locked`), where no request runs; never on a request path
+    /// (a read composes pending writes from memory).
+    fn settle_locked(&self, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        loop {
+            if g.retired {
+                return Ok(());
+            }
+            let WriteMode::Streaming { pending, .. } = &g.file.write_mode else { return Ok(()) };
+            let Some((&o, v)) = pending.first_key_value() else { return Ok(()) };
+            let v = v.clone();
+            self.stream_step_locked(g, o, &v, Some(o))?;
+        }
+    }
+
+    /// Push the pending writes of the stream of `g` that now start at its
+    /// end, one stream step each, with the I/O unlocked. A dropped step is
+    /// tried again (at most `STEP_TRIES` in a row, then EIO; the entry then
+    /// stays pending).
+    fn drain_lined_up(&self, g: &mut CellGuard<'_>) -> Result<(), i32> {
+        let mut drops = 0usize;
+        loop {
+            if g.retired {
+                return Ok(());
+            }
+            let WriteMode::Streaming { next_expected_offset, pending, .. } = &g.file.write_mode else {
+                return Ok(());
+            };
+            let o = *next_expected_offset;
+            let Some(v) = pending.get(&o).cloned() else { return Ok(()) };
+            if self.stream_step(g, o, &v, Some(o))? {
+                drops = 0;
+            } else {
+                drops += 1;
+                if drops >= STEP_TRIES {
+                    return Err(libc::EIO);
+                }
+            }
+        }
+    }
+
+    /// Store a part of an overlay as a new root (#108), with the cell lock
+    /// held across the I/O: the three phases of `rebase_unlocked` in one
+    /// lock hold, so the publish always holds. For `usize::MAX` the splice
+    /// reads the live overlay (no copy, #98); a smaller step copies its
+    /// pieces (about `max(free, MIN_TAKE)` bytes).
+    ///
+    /// The splice cuts again only the chunks near the stored extents; every
     /// other chunk and whole old node is reused by ID. Fixed memory,
     /// canonical key, CPU in the change (on long repeating non-zero data the
     /// re-chunk can run to the end of the file). A clean overlay is kept.
     ///
-    /// GC: like a whole rebase, a step runs inside one callback under the
-    /// shared commit gate, and the old base stays in the manifest until the
-    /// new root is installed.
-    fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<(), i32> {
-        let modified = s.modified;
-        let WriteMode::Overlay(ov) = &mut s.write_mode else {
-            return Ok(());
+    /// GC: a step runs inside one callback under the shared commit gate,
+    /// and the old base stays in the manifest until the new root is
+    /// installed.
+    ///
+    /// Only for `finalize_locked` (`test_destroy`, where no request runs);
+    /// never on a request path. Returns the rebase trace line, for
+    /// the caller to print after its hold.
+    fn rebase_step(&self, ino: u64, s: &mut OpenFileState, free: usize) -> Result<Option<String>, i32> {
+        let Some((plan, part)) = Self::step_plan(s, free, free != usize::MAX) else {
+            return Ok(None);
         };
-        if ov.is_clean() {
-            return Ok(());
+        let (root, digest, line) = match (&part, &s.write_mode) {
+            (Some(p), _) => self.step_io(ino, p, &plan),
+            (None, WriteMode::Overlay(ov)) => self.step_io(ino, ov, &plan),
+            (None, WriteMode::Streaming { .. }) => unreachable!("step_plan gives a plan for an overlay only"),
+        }?;
+        drop(part);
+        self.step_publish(ino, s, plan, (root, digest)).map(|_| Some(line))
+    }
+
+    /// Most dirty cost of one file (#98, RESEARCH Pitfall 1): the limit, the
+    /// spare capacity a growing extent can take (1/`GROW_DIV` of its
+    /// length: the regrowth of an extent near the limit after a step cut
+    /// it), and two rebase steps (Claude's discretion). The write path
+    /// gates its apply on it (`write_in_cell`).
+    fn hard_cap(&self) -> usize {
+        hard_cap_of(self.dirty_limit.load(Ordering::Relaxed))
+    }
+
+    /// A rebase step of the writer's own locked cell `g` (D-02, D-13), with
+    /// the I/O unlocked (`rebase_unlocked`): skipped if another step of the
+    /// cell is in flight or a writer of the cell is at the hard cap (its
+    /// step goes first, CR-01); a dropped result is tried again, at most
+    /// `REBASE_TRIES` attempts. If all are dropped this returns Ok: the
+    /// write is in the overlay already and under the hard cap (the cap gate
+    /// of `write_in_cell`), and the next write, the release or a budget step
+    /// tries again. Only this file waits.
+    fn rebase_cell(&self, g: &mut CellGuard<'_>, free: usize) -> Result<(), i32> {
+        for _ in 0..REBASE_TRIES {
+            if g.retired || g.stepping.is_some() || g.cap_writers > 0 || self.rebase_unlocked(g, free)? {
+                return Ok(());
+            }
         }
+        Ok(())
+    }
+
+    /// At the hard cap: wait for the step in flight with the cell unlocked
+    /// (`wait_step`), or run an own unlocked rebase step that frees
+    /// `excess` (at least `REBASE_STEP`, at most `final_step`: a switch can
+    /// move up to `REORDER_WINDOW` of pending writes in, and one step then
+    /// copies no more than `final_step` in its Phase A hold; the caller
+    /// steps again while it is above the cap). A dropped own step counts in
+    /// `drops`, a published one resets it. The caller looks at the cost again.
+    /// The caller has counted itself at the cap (`CellGuard::enter_cap`):
+    /// no other writer changes the overlay while this step is in flight, so
+    /// only a forced drop (a test hook) or a retire drops it (CR-01).
+    fn cap_step(&self, g: &mut CellGuard<'_>, excess: usize, drops: &mut usize) -> Result<(), i32> {
+        if g.stepping.is_some() {
+            return g.wait_step();
+        }
+        let most = self.final_step.load(Ordering::Relaxed).max(1);
+        if self.rebase_unlocked(g, excess.max(REBASE_STEP).min(most))? {
+            *drops = 0;
+        } else {
+            *drops += 1;
+        }
+        Ok(())
+    }
+
+    /// One rebase step of the locked cell `g` by the protocol of D-02:
+    /// Phase A (cell locked, memory only) copies the pieces and reads the
+    /// generation; Phase B (cell unlocked) splices, hashes and puts them and
+    /// runs the rebase hook; Phase C (cell locked) publishes only if the
+    /// generation did not move. A dropped result is garbage until a GC. On
+    /// a Phase B error nothing is put back: the live overlay kept every byte
+    /// (RESEARCH Pitfall 2).
+    ///
+    /// `Ok(false)`: no step ran to the end (another one is in its I/O
+    /// phase, or the overlay changed meanwhile); `Ok(true)`: published, or
+    /// nothing to do (clean, or the cell was retired meanwhile).
+    fn rebase_unlocked(&self, g: &mut CellGuard<'_>, free: usize) -> Result<bool, i32> {
+        if g.stepping.is_some() {
+            return Ok(false);
+        }
+        let Some((plan, Some(part))) = Self::step_plan(&g.file, free, true) else {
+            return Ok(true);
+        };
+        let copied = plan.pieces.iter().map(|&(_, n)| n as u64).sum::<u64>();
+        WRITE_MAX_COPY.with(|c| c.set(c.get().max(copied)));
+        let ino = g.file.ino;
+        let done = g.run_step(|| -> Result<(Option<ObjectKey>, ObjectKey), i32> {
+            let (root, digest, line) = self.step_io(ino, &part, &plan)?;
+            eprintln!("{line}");
+            Ok((root, digest))
+        });
+        drop(part);
+        if g.retired {
+            return Ok(true);
+        }
+        let done = done?;
+        if self.forced_fail() {
+            return Err(libc::EIO);
+        }
+        if self.forced_drop(g.no_drop_hook) {
+            return Ok(false);
+        }
+        let cost_before = plan.cost_before;
+        let published = self.step_publish(ino, &mut g.file, plan, done)?;
+        if published {
+            let after = match &g.file.write_mode {
+                WriteMode::Overlay(ov) => ov.cost(),
+                _ => 0,
+            };
+            let c = &*self.flush_ctl;
+            c.save_steps.fetch_add(1, Ordering::Relaxed);
+            c.freed_bytes.fetch_add(cost_before.saturating_sub(after) as u64, Ordering::Relaxed);
+        }
+        Ok(published)
+    }
+
+    /// Phase A of a rebase step (memory only): the pieces to store, the
+    /// generation, and with `copy` a copy of the overlay with those pieces
+    /// only. `None` for a clean overlay or a stream.
+    fn step_plan(s: &OpenFileState, free: usize, copy: bool) -> Option<(StepPlan, Option<Overlay>)> {
+        let WriteMode::Overlay(ov) = &s.write_mode else { return None };
+        if ov.is_clean() {
+            return None;
+        }
+        let (pieces, part) = if copy {
+            let copied = ov.copy_step(free);
+            let pieces = copied.iter().map(|(o, v)| (*o, v.len())).collect();
+            let mut part = ov.empty_like();
+            for (o, v) in copied {
+                part.put(o, v);
+            }
+            (pieces, Some(part))
+        } else {
+            (ov.step_ranges(free), None)
+        };
+        let plan = StepPlan { generation: ov.generation(), size: ov.size, pieces, free, cost_before: ov.cost() };
+        Some((plan, part))
+    }
+
+    /// Phase B of a rebase step (no cell lock needed): splice the extents
+    /// of `src` (the copy, or the live overlay when every extent is stored)
+    /// onto its base, store the manifest node of the new root, count, and
+    /// run the rebase hook (after the new root is finished, before it is
+    /// installed). Returns the new root (none for size 0), its manifest
+    /// digest (the empty manifest for size 0) and the rebase trace line
+    /// (the caller prints it with no cell lock held).
+    #[allow(clippy::type_complexity, reason = "a private result tuple; an alias would only move the type")]
+    fn step_io(&self, ino: u64, src: &Overlay, plan: &StepPlan) -> Result<(Option<ObjectKey>, ObjectKey, String), i32> {
         let cs = &*self.content;
         let store_err = |e: std::io::Error| {
+            note_store_busy(&e);
             eprintln!("[{}][FUSE] rebase: content store error: {e}", ts());
             libc::EIO
         };
-        let size = ov.size;
+        let size = plan.size;
         let t0 = std::time::Instant::now();
-        let cost_before = ov.cost();
-        let mut part = ov.empty_like();
-        for (o, v) in ov.take(free) {
-            part.put(o, v);
-        }
-        let (taken_n, taken_bytes) = (part.extent_count(), part.extent_ranges().iter().map(|r| r.end - r.start).sum::<u64>());
-        let spliced = if size == 0 {
-            Ok((None, chunk_store::file::SpliceStats::default(), 0))
+        let ranges = src.extent_ranges();
+        let (taken_n, taken_bytes) = (ranges.len(), ranges.iter().map(|r| r.end - r.start).sum::<u64>());
+        let (root, stats, base_bytes) = if size == 0 {
+            (None, chunk_store::file::SpliceStats::default(), 0)
         } else {
-            OverlaySource::new(cs, &part).and_then(|mut src| {
-                let (k, stats) = content::splice(cs, part.base.as_ref(), part.visible, &part.extent_ranges(), size, &mut src)?;
-                Ok((Some(k), stats, src.base_bytes))
-            })
+            let mut src_io = OverlaySource::new(cs, src).map_err(store_err)?;
+            let (k, stats) = content::splice(cs, src.base.as_ref(), src.visible, &ranges, size, &mut src_io)
+                .map_err(store_err)?;
+            (Some(k), stats, src_io.base_bytes)
         };
         let splice_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let installed = spliced.map_err(store_err).and_then(|(root, stats, base_bytes)| {
-            let rechunked = if root.is_some() { stats.rechunked } else { 0 };
-            let t1 = std::time::Instant::now();
-            self.rebase_count.fetch_add(1, Ordering::Relaxed);
-            self.last_rebase_bytes.store(rechunked, Ordering::Relaxed);
-            self.write_rebase_bytes.fetch_add(rechunked, Ordering::Relaxed);
-            self.write_base_bytes.fetch_add(base_bytes, Ordering::Relaxed);
-            let hook = self.rebase_hook.lock().unwrap().clone();
-            if let Some(hook) = hook {
-                hook();
+        // A size-0 root gets the empty manifest node here too, so Phase C
+        // only swaps digests.
+        let digest = self.meta.prepare_manifest(root.as_slice()).map_err(|_| libc::EIO)?;
+        let rechunked = if root.is_some() { stats.rechunked } else { 0 };
+        self.rebase_count.fetch_add(1, Ordering::Relaxed);
+        LAST_REBASE_BYTES.with(|c| c.set(rechunked));
+        add_to(&WRITE_REBASE_BYTES, rechunked);
+        add_to(&WRITE_BASE_BYTES, base_bytes);
+        let line = format!("[t={}][rebase] ino={ino} size={size} free={} cost_before={} taken={taken_n}/{taken_bytes} \
+            rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1}",
+            crate::util::epoch(), if plan.free == usize::MAX { "all".to_string() } else { plan.free.to_string() },
+            plan.cost_before, stats.reused_entries, stats.reused_nodes, stats.nodes_loaded);
+        let hook = self.rebase_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok((root, digest, line))
+    }
+
+    /// Phase C of a rebase step (cell locked, memory only, also for a
+    /// size-0 root): if the overlay is still at the generation of `plan`,
+    /// install the digest of the new root (refcounts from
+    /// `last_committed_root` as it is now; for an overlay it is the root
+    /// the manifest names),
+    /// remove the stored pieces, and go on with an overlay on the new root
+    /// that holds the rest. Else drop the result (`Ok(false)`).
+    fn step_publish(
+        &self,
+        ino: u64,
+        s: &mut OpenFileState,
+        plan: StepPlan,
+        (root, digest): (Option<ObjectKey>, ObjectKey),
+    ) -> Result<bool, i32> {
+        let WriteMode::Overlay(ov) = &mut s.write_mode else { return Ok(false) };
+        if ov.generation() != plan.generation {
+            return Ok(false);
+        }
+        let old = s.last_committed_root;
+        if root != old || root.is_none() {
+            self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+        }
+        if root != old {
+            if let Some(k) = &root {
+                self.meta.increment_refcount(k);
             }
-            let r = self.install_root(ino, root, size, modified).map(|_| root);
-            eprintln!("[t={}][rebase] ino={ino} size={size} free={} cost_before={cost_before} taken={taken_n}/{taken_bytes} \
-                rechunked={rechunked} base_read={base_bytes} reused_entries={} reused_nodes={} nodes_loaded={} splice_ms={splice_ms:.1} install_ms={:.1}",
-                crate::util::epoch(), if free == usize::MAX { "all".to_string() } else { free.to_string() },
-                stats.reused_entries, stats.reused_nodes, stats.nodes_loaded, t1.elapsed().as_secs_f64() * 1000.0);
-            r
-        });
-        let root = match installed {
-            Ok(root) => root,
-            Err(e) => {
-                // Put the taken extents back: no written byte is lost.
-                for (o, v) in part.into_extents() {
-                    ov.put(o, v);
-                }
-                return Err(e);
+            if let Some(o) = &old {
+                self.meta.decrement_refcount(o);
             }
-        };
-        drop(part);
-        let mut next = Overlay::new(root, size, size);
+        }
+        // The manifest names the new root now: the overlay follows it even
+        // if the stamp below fails.
+        ov.discard(&plan.pieces);
+        let mut next = Overlay::new(root, plan.size, plan.size);
         next.set_sweep(ov.sweep());
         let rest = std::mem::replace(ov, Overlay::new(None, 0, 0));
         for (o, v) in rest.into_extents() {
@@ -971,51 +2943,47 @@ impl SliceFsFilesystem {
         }
         *ov = next;
         s.last_committed_root = root;
-        s.byte_count = size;
-        Ok(())
+        s.byte_count = plan.size;
+        self.stamp_content(ino, plan.size, s.modified).map(|_| true)
     }
 
     /// Read `size` bytes at `offset` of the content `root` of `ino` through
-    /// the per-inode reader cache (it keeps its node and chunk caches).
+    /// the per-inode reader cache (it keeps its node and chunk caches). The
+    /// map lock is held only to clone or add the `Arc`; the per-inode reader
+    /// is locked for the read only. If another read holds it, this read
+    /// opens a private reader instead of waiting (D-07).
     fn read_root(&self, ino: u64, root: &ObjectKey, offset: u64, size: usize) -> std::io::Result<Vec<u8>> {
-        let mut readers = self.readers.lock().unwrap();
-        if readers.len() >= 64 && !readers.contains_key(&ino) {
-            readers.clear();
-        }
-        if readers.get(&ino).map_or(true, |r| r.key() != *root) {
-            readers.insert(ino, content::Reader::open(&self.content, root)?);
-        }
-        readers.get_mut(&ino).expect("reader just inserted").read(&self.content, offset, size)
-    }
-
-    /// If handle `fh` streams with out-of-order writes still pending, stream
-    /// them in order so its content is complete (read, fsync, truncate,
-    /// release need the whole picture; gaps become zero bytes).
-    fn settle_pending(&self, fh: u64) {
-        let fh = self.owner_fh(fh);
-        let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => s,
-            None => return,
-        };
-        if let WriteMode::Streaming { state, next_expected_offset, pending } = &mut file_state.write_mode {
-            if !pending.is_empty() {
-                // Pending writes exist only on a fresh stream: the gaps are zeros.
-                // Stream them in order; no full-file buffer.
-                let upto = pending.iter().next_back().map(|(&o, v)| o + v.len() as u64).unwrap_or(0);
-                if let Err(e) = fill_stream(state, &self.content, next_expected_offset, pending, upto) {
-                    eprintln!("[{}][FUSE] settle: content store error: {}", ts(), e);
-                }
-                file_state.byte_count = file_state.byte_count.max(*next_expected_offset);
-                file_state.cas_committed = false;
+        let shared = self.readers.lock().get(&ino).cloned();
+        let Some(shared) = shared else {
+            // The first read of `ino`: open with no lock, then keep it.
+            let mut r = content::Reader::open(&self.content, root)?;
+            let out = r.read(&self.content, offset, size);
+            let mut readers = self.readers.lock();
+            if readers.len() >= 64 && !readers.contains_key(&ino) {
+                readers.clear();
             }
+            readers.entry(ino).or_insert_with(|| Arc::new(sync::Mutex::new(Rank::Short, r)));
+            return out;
+        };
+        let Some(mut r) = shared.try_lock() else {
+            return content::Reader::open(&self.content, root)?.read(&self.content, offset, size);
+        };
+        if r.key() != *root {
+            *r = content::Reader::open(&self.content, root)?;
         }
-        self.open_files.lock().unwrap().insert(fh, file_state);
+        let hook = self.read_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        r.read(&self.content, offset, size)
     }
 
-    /// Test hook: true if handle `fh` is still in Streaming mode.
+    /// Test hook: true if the inode of write handle `fh` is still in
+    /// Streaming mode.
     pub fn test_is_streaming(&self, fh: u64) -> bool {
-        let fh = self.owner_fh(fh);
-        matches!(self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode), Some(WriteMode::Streaming { .. }))
+        self.ino_of_fh(fh)
+            .and_then(|ino| self.with_cell(ino, |s| matches!(s.write_mode, WriteMode::Streaming { .. })))
+            .unwrap_or(false)
     }
 
     /// Set access, modification and change times of a new inode to now.
@@ -1031,27 +2999,102 @@ impl SliceFsFilesystem {
 
     /// A directory's entries changed: set its mtime and ctime to now.
     fn touch_dir(&self, ino: u64) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         let (sec, nsec) = now_pair();
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        inode.ctime_sec = sec;
-        inode.ctime_nsec = nsec;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+        self.meta.modify_inode(ino, |inode| {
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
+        }).map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Add `delta` to the link count of `ino` (directory ".." bookkeeping).
     fn adjust_nlinks(&self, ino: u64, delta: i32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))
+        self.meta.modify_inode(ino, |inode| {
+            inode.nlinks = (inode.nlinks as i64 + delta as i64).max(0) as u32;
+        }).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// One name of non-directory `ino` went: its link count goes down by one
+    /// (not below 0), and while links are left its ctime changes too.
+    /// Returns the inode after the change.
+    fn drop_link(&self, ino: u64) -> Result<InodeMeta, i32> {
+        let (sec, nsec) = now_pair();
+        self.meta.modify_inode(ino, |inode| {
+            inode.nlinks = inode.nlinks.saturating_sub(1);
+            if inode.nlinks > 0 {
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+            }
+            inode.clone()
+        }).map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// With the parent's stripe held: the parent is still a live directory
+    /// (PITFALLS 6c: an rmdir of the parent that ran first).
+    fn live_dir(&self, ino: u64) -> Result<(), i32> {
+        let m = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        if m.mode & S_IFMT != S_IFDIR {
+            return Err(libc::ENOTDIR);
+        }
+        Ok(())
+    }
+
+    /// Run `f` with `stripe(ino)` held and then the inode's cell locked, if
+    /// it has a live one (RESEARCH Pattern 4 rule 5: stripe, then cell), so
+    /// a setattr or xattr change of the inode is ordered with its writes.
+    fn with_inode_locked<R>(&self, ino: u64, f: impl FnOnce(Option<&mut OpenFileState>) -> R) -> R {
+        let _ns = self.ns.lock(&[ino]);
+        let cell = self.cells.get(ino);
+        self.pause(Pause::FieldsStriped);
+        let mut g = cell.as_deref().map(|c| self.lock_cell(c)).filter(|g| !g.retired);
+        f(g.as_mut().map(|g| &mut g.file))
+    }
+
+    /// Orphans kept for open handles (for tests).
+    pub fn test_orphan_count(&self) -> usize {
+        self.handles.lock().orphans.len()
+    }
+
+    /// Lock the namespace for an operation on the inodes `known` and the
+    /// children named by `lookups` (`(parent, name)`), with the rename mutex
+    /// first if `cross_dir` (RESEARCH Pattern 4 rule 2). A child is read
+    /// from its parent, then all stripes are locked in ascending order, and
+    /// the children are read again under them: on a change the stripes are
+    /// released and taken again for the new set. Returns the guard and the
+    /// lookup results under it (stable while the guard is held, since every
+    /// change of a directory's entries holds the directory's stripe).
+    pub(crate) fn lock_namespace(
+        &self,
+        cross_dir: bool,
+        known: &[u64],
+        lookups: &[(u64, &str)],
+    ) -> (NsGuard<'_>, Vec<Result<u64, MetaError>>) {
+        let look = || lookups.iter().map(|&(p, n)| self.meta.lookup(p, n)).collect::<Vec<_>>();
+        let same = |a: &[Result<u64, MetaError>], b: &[Result<u64, MetaError>]| {
+            a.iter().map(|r| r.as_ref().ok()).eq(b.iter().map(|r| r.as_ref().ok()))
+        };
+        let mut rename = cross_dir.then(|| self.ns.lock_rename());
+        let mut seen = look();
+        loop {
+            let mut inos = known.to_vec();
+            inos.extend(seen.iter().filter_map(|r| r.as_ref().ok().copied()));
+            let g = self.ns.lock_after(rename.take(), &inos);
+            let now = look();
+            if same(&seen, &now) {
+                return (g, now);
+            }
+            rename = g.into_rename();
+            seen = now;
+        }
     }
 
     /// Reclaim all orphans (used at unmount: no handle survives it).
     fn reclaim_all_orphans(&self) {
-        let orphans: Vec<u64> = self.orphans.lock().unwrap().drain().collect();
+        let orphans: Vec<u64> = self.handles.lock().orphans.drain().collect();
         for ino in orphans {
-            self.reclaim_inode(ino);
+            let freed = self.reclaim_inode(ino);
+            self.release_content(freed);
         }
     }
 
@@ -1067,25 +3110,63 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, u64), i32> {
+        self.create_logged(parent_ino, name, mode, umask, uid, gid, 0, None, &mut |_| {})
+    }
+
+    /// `test_create` at inode `at` (replay; `None`: the next free one) that
+    /// logs (D-08): the `Create` record (with `flags`) goes to `log` in the
+    /// hold that also opens the handle. `O_TRUNC` needs no truncate: the
+    /// new inode is empty (a truncate here would wait for a step and do
+    /// store I/O with the stripes held, WR-02).
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    fn create_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        flags: i32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, u64), i32> {
         let file_mode = S_IFREG | (mode & !umask & 0o7777);
         let mut file_meta = InodeMeta::new_file(0, uid, gid, file_mode);
         Self::stamp_new(&mut file_meta);
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
-        if let Err(e) = self.meta.link(parent_ino, name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        // The parent's stripe and the new inode's are held until the handle
+        // is counted and the record appended (`new_entry`).
+        let (ino, _ns) = self.new_entry(parent_ino, name, at, &file_meta)?;
         self.touch_dir(parent_ino)?;
-        let fh = self.open_handle(ino);
-        self.open_files.lock().unwrap().insert(fh, OpenFileState {
-            ino,
-            write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
-            byte_count: 0,
-            cas_committed: false,            modified: None,
-            last_committed_root: None,
-            min_size: 0,
-        });
+        let fh = self.open_handle(ino, true, false);
+        self.open_write(ino, false, None)?;
+        log(crate::oplog::Op::Create { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, flags, ino });
         Ok((ino, fh))
+    }
+
+    /// The new inode `meta` (at `at` in replay) linked as `name` in
+    /// `parent`, which must be a live directory; returns it with the stripes
+    /// of the parent and the new inode held. The number is taken before the
+    /// stripes (nothing can reach an inode with no name), so both stripes
+    /// lock in ascending order. While the guard is held, a request that
+    /// finds the new name and works on the inode by its number (open, link,
+    /// setattr, xattrs) waits for the inode's stripe, so its record comes
+    /// after the create's (D-08); an unlink of the name waits for the
+    /// parent's, so it cannot reclaim the inode before the handle of a
+    /// create is counted.
+    fn new_entry(&self, parent: u64, name: &str, at: Option<u64>, meta: &InodeMeta) -> Result<(u64, NsGuard<'_>), i32> {
+        let ino = new_inode(&self.meta, at, meta).map_err(|e| meta_error_to_errno(&e))?;
+        let ns = self.ns.lock(&[parent, ino]);
+        let linked = self.live_dir(parent).and_then(|()| self.meta.link(parent, name, ino).map_err(|e| meta_error_to_errno(&e)));
+        if let Err(e) = linked {
+            let _ = self.meta.delete_inode(ino);
+            return Err(e);
+        }
+        let hook = self.mkdir_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok((ino, ns))
     }
 
     /// Write `data` at `offset` into the file handle `fh`. Returns bytes written.
@@ -1097,95 +3178,271 @@ impl SliceFsFilesystem {
     /// - Overlay: pwrite semantics into the extents (memory follows the
     ///   written bytes; nothing is allocated by offset or file size).
     ///
-    /// Lock ordering: open_files is released before io to prevent contention.
-    /// Every write takes OpenFileState out of the map, works without the lock
-    /// (stream pushes, the switch), then re-inserts it. This prevents holding
-    /// open_files during potentially slow CAS I/O (which would block concurrent
-    /// reads on other fh's). FUSE serializes per-fh writes.
+    /// The write runs under the cell lock of the inode, but each stream
+    /// step (push, zero gap, the switch to an overlay) and the rebase step
+    /// of an overlay past its limit do their I/O with the cell unlocked
+    /// (D-02): the stream is cloned, pushed with no cell lock, and swapped
+    /// in only if it did not change. One step of a cell is in flight at a
+    /// time (the step token): another stream writer waits for it with the
+    /// cell unlocked. A dropped step is tried again with its I/O unlocked
+    /// (at most `STEP_TRIES` in a row, then EIO).
+    /// Only a write handle may write (else EBADF).
     pub fn test_write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, i32> {
-        let fh = self.owner_fh(fh);
-        self.write_rebase_bytes.store(0, Ordering::Relaxed);
-        self.write_base_bytes.store(0, Ordering::Relaxed);
-        if offset.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE_SIZE) {
+        self.write_logged(fh, offset, data, 0, None).0.map(|(n, _)| n)
+    }
+
+    /// `test_write` that also returns the effective offset (for an append:
+    /// the end of file it wrote at).
+    pub fn test_write_at(&self, fh: u64, offset: u64, data: &[u8]) -> Result<(u32, u64), i32> {
+        self.write_logged(fh, offset, data, 0, None).0
+    }
+
+    /// `test_write` that logs (D-08): with `time`, the `Write` record (the
+    /// inode of the cell, the effective offset) is appended in the cell-lock
+    /// hold that applies the write, exactly once per applied write. Returns
+    /// the bytes written and the effective offset, and the LSN of the record
+    /// for `log_write_out` (also after an error that came after the apply).
+    /// `flags` are the open flags of the request: with `O_APPEND` (or on a
+    /// handle opened with it) the write goes to the end of file (D-12).
+    /// This path always pays for the budget at once (`Admit { pay: true }`,
+    /// the Phase 19 path: replay and in-process callers).
+    pub(crate) fn write_logged(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        flags: i32,
+        time: Option<(i64, u32)>,
+    ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
+        self.write_logged_admitted(fh, offset, data, flags, time, Admit { pay: true })
+    }
+
+    /// `write_logged` with the answer of `throttle_write`: `pay_budget`
+    /// runs only when `admit.pay`. The writer's own limit step and the hard
+    /// cap gate run in both cases.
+    pub(crate) fn write_logged_admitted(
+        &self,
+        fh: u64,
+        offset: u64,
+        data: &[u8],
+        flags: i32,
+        time: Option<(i64, u32)>,
+        admit: Admit,
+    ) -> (Result<(u32, u64), i32>, Option<Lsn>) {
+        let mut lsn = None;
+        let mut switch = None;
+        let r = self.write_in_cell(fh, offset, data, flags, time, admit, &mut lsn, &mut switch);
+        // The cell guard is gone: print the debug line of a switch now.
+        if let Some(SwitchNote { ino, offset, expected, pending, fresh, overlap }) = switch {
+            eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
+                ts(), fh, ino, offset, data.len(), expected, pending, fresh, overlap);
+        }
+        (r, lsn)
+    }
+
+    /// The body of `write_logged`; `lsn` gets the LSN of the record, and
+    /// `switch` the fields of the debug line of a switch to an overlay.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    fn write_in_cell(
+        &self,
+        fh: u64,
+        mut offset: u64,
+        data: &[u8],
+        flags: i32,
+        time: Option<(i64, u32)>,
+        admit: Admit,
+        lsn: &mut Option<Lsn>,
+        switch: &mut Option<SwitchNote>,
+    ) -> Result<(u32, u64), i32> {
+        WRITE_REBASE_BYTES.with(|c| c.set(0));
+        WRITE_BASE_BYTES.with(|c| c.set(0));
+        WRITE_MAX_COPY.with(|c| c.set(0));
+        let Some(h) = self.handle(fh).filter(|h| h.write) else { return Err(libc::EBADF) };
+        let ino = h.ino;
+        // An append ignores the request offset (D-12, D-17). Replay does not
+        // append: each record carries the offset the write used.
+        let append = (h.append || flags & libc::O_APPEND != 0) && !self.replaying.load(Ordering::Relaxed);
+        if !append && write_end(offset, data.len()).is_none() {
             return Err(libc::EFBIG);
         }
-        // Take the file state out of the map so we can release open_files before io.
-        let mut file_state = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => s,
-            None => return Err(libc::EBADF),
-        };
-        // open_files lock is released here.
-
-        // Dirty cost before this write (after a switch: of the new overlay).
-        let mut cost_before = dirty_cost(&file_state);
-        let result = match &mut file_state.write_mode {
-            WriteMode::Streaming { state, next_expected_offset, pending } => {
-                let end = offset + data.len() as u64;
-                // Streaming from scratch is only right when the file starts
-                // empty; otherwise unwritten parts must keep the old bytes.
-                let fresh = *next_expected_offset > 0 || !pending.is_empty() || !self.has_content(file_state.ino);
-                let overlaps_pending = pending.range(..end).next_back()
-                    .map_or(false, |(&o, v)| o + v.len() as u64 > offset);
-                let mut pending_bytes: usize = pending.values().map(Vec::len).sum();
-
-                // A jump past the reorder window is a sparse write, not NFS
-                // reordering: stream the gap as zeros (O(1) memory) and go on.
-                if fresh && !overlaps_pending && offset > *next_expected_offset + REORDER_WINDOW as u64 {
-                    let io_err = fill_stream(state, &self.content, next_expected_offset, pending, offset).err();
-                    if let Some(e) = io_err {
-                        eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap: {}", ts(), e);
-                        self.open_files.lock().unwrap().insert(fh, file_state);
-                        return Err(libc::EIO);
-                    }
-                    pending_bytes = pending.values().map(Vec::len).sum();
-                }
-
-                if fresh && offset == *next_expected_offset && !overlaps_pending {
-                    // In order: push, then drain pending writes that now line up.
-                    let mut chunks = vec![data.to_vec()];
-                    let mut next = end;
-                    while let Some((&o, _)) = pending.first_key_value() {
-                        if o != next { break; }
-                        let v = pending.remove(&o).unwrap();
-                        next += v.len() as u64;
-                        chunks.push(v);
-                    }
-                    let io_err = chunks.iter().try_for_each(|c| state.push(&self.content, c)).err();
-                    if let Some(e) = io_err {
-                        eprintln!("[{}][FUSE] test_write: CAS I/O error during push_bytes: {}", ts(), e);
-                        // Re-insert state before returning error
-                        self.open_files.lock().unwrap().insert(fh, file_state);
-                        return Err(libc::EIO);
-                    }
-                    *next_expected_offset = next;
-                    file_state.byte_count = file_state.byte_count.max(next);
-                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
-                    Ok(data.len() as u32)
-                } else if fresh && offset > *next_expected_offset && !overlaps_pending
-                    && pending_bytes + data.len() <= REORDER_WINDOW
-                {
-                    // Ahead of the stream: wait in the reorder window.
-                    pending.insert(offset, data.to_vec());
-                    file_state.byte_count = file_state.byte_count.max(end);
-                    file_state.cas_committed = false;                    file_state.modified = Some(now_pair());
-                    Ok(data.len() as u32)
-                } else {
-                    // Random write: switch to an overlay on the stored content.
-                    let ino = file_state.ino;
-                    eprintln!("[{}][FUSE] write: fh={} ino={} switches to overlay (offset={} len={} expected={} pending={} fresh={} overlap={})",
-                        ts(), fh, ino, offset, data.len(), *next_expected_offset, pending_bytes, fresh, overlaps_pending);
-                    // Older pending writes go in first, then this (newest) write.
-                    match self.to_overlay(&mut file_state) {
-                        Ok(()) => {
-                            cost_before = dirty_cost(&file_state);
-                            Self::overlay_write(&mut file_state, offset, data)
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
+        let Some(cell) = self.cells.get(ino) else { return Err(libc::EBADF) };
+        let mut g = self.lock_cell(&cell);
+        if g.retired {
+            return Err(libc::EBADF);
+        }
+        // Called in the hold that applies the write (with the cell locked).
+        let log = |lsn: &mut Option<Lsn>, at: u64| {
+            if let Some(time) = time {
+                let op = crate::oplog::Op::Write { ino: cell.ino, offset: at, data: data.to_vec() };
+                *lsn = self.log_append(crate::oplog::Record { time, op });
             }
-            WriteMode::Overlay(_) => Self::overlay_write(&mut file_state, offset, data),
         };
+        let mut end = offset.saturating_add(data.len() as u64);
+        // Dropped steps in a row; each is tried again with its I/O unlocked.
+        let mut drops = 0usize;
+        // Dirty cost before this write (after a switch: of the new overlay).
+        let mut cost_before;
+        let result = loop {
+            if g.retired {
+                // The handle was released while a step ran unlocked.
+                return Err(libc::EBADF);
+            }
+            if drops >= STEP_TRIES {
+                // No other write changes the stream while a step is in flight
+                // (they wait for the token), nor an overlay while a writer is
+                // at the hard cap (CR-01), so only a forced drop (a test
+                // hook), the retire of the cell, or an fsync that installs a
+                // newer snapshot (at most once) can drop this many steps in a
+                // row (a size change waits for the token too).
+                drop(g);
+                eprintln!("[{}][FUSE] write: fh={fh} ino={ino}: {STEP_TRIES} steps in a row were dropped", ts());
+                return Err(libc::EIO);
+            }
+            let streaming = matches!(g.file.write_mode, WriteMode::Streaming { .. });
+            if streaming && g.stepping.is_some() {
+                // A stream writer waits for the step in flight with the cell
+                // unlocked (readers never wait for it), then looks again.
+                g.wait_step()?;
+                continue;
+            }
+            if append {
+                // The end of file now, under the cell lock. Each turn takes
+                // it again: an unlocked step can move it, and then its
+                // publish is dropped (the generation moved) and this turn
+                // runs again. A fresh stream on an existing file takes the
+                // committed size: the inode read (a node read if the inode
+                // is not cached) runs as a step with the cell unlocked, and
+                // counts only if the stream did not change meanwhile (the
+                // size of an open inode changes only under its cell lock;
+                // IN-02). No step is in flight: a stream writer waited above.
+                let s = &g.file;
+                offset = if s.byte_count > 0 || matches!(s.write_mode, WriteMode::Overlay(_)) {
+                    s.byte_count
+                } else {
+                    let generation = s.generation;
+                    let size = g.run_step(|| self.meta.get_inode(ino).map_or(0, |m| m.size));
+                    if g.retired || g.file.generation != generation {
+                        drops += 1;
+                        continue;
+                    }
+                    size
+                };
+                end = write_end(offset, data.len()).ok_or(libc::EFBIG)?;
+            }
+            cost_before = dirty_cost(&g.file);
+            if let WriteMode::Overlay(ov) = &g.file.write_mode {
+                // The hard cap (#98): apply only if the dirty cost stays
+                // under it. Else count this writer at the cap, wait for the
+                // step in flight or run an own unlocked step, with no cell
+                // lock held, and look again. While a writer is at the cap,
+                // every overlay writer (also one whose write adds no cost)
+                // waits for the step in flight before it applies, and no
+                // ordinary step starts, so the step at the cap publishes
+                // (CR-01).
+                let (cap, after) = (self.hard_cap(), ov.cost_after(offset, data.len()));
+                if g.cap_writers > 0 && g.stepping.is_some() {
+                    g.wait_step()?;
+                    continue;
+                }
+                if cost_before > 0 && after > cap {
+                    g.enter_cap();
+                    self.cap_step(&mut g, after - cap, &mut drops)?;
+                    continue;
+                }
+                g.leave_cap();
+                let r = Self::overlay_write(&mut g.file, offset, data);
+                if r.is_ok() {
+                    log(lsn, offset);
+                }
+                break r;
+            }
+            let WriteMode::Streaming { next_expected_offset, pending, .. } = &g.file.write_mode else { continue };
+            let next = *next_expected_offset;
+            // Streaming from scratch is only right when the file starts
+            // empty; otherwise unwritten parts must keep the old bytes. The
+            // first write reads the committed size and manifest as a step
+            // with the cell unlocked, then checks that the stream did not
+            // change.
+            let fresh = if next > 0 || !pending.is_empty() {
+                true
+            } else {
+                let generation = g.file.generation;
+                let has = g.run_step(|| self.has_content(ino));
+                if g.retired || g.file.generation != generation {
+                    drops += 1;
+                    continue;
+                }
+                !has
+            };
+            let s = &mut g.file;
+            let WriteMode::Streaming { pending, .. } = &mut s.write_mode else { continue };
+            let overlaps_pending = pending.range(..end).next_back()
+                .is_some_and(|(&o, v)| o + v.len() as u64 > offset);
+            let pending_bytes: usize = pending.values().map(Vec::len).sum();
+
+            if fresh && !overlaps_pending && offset > next + REORDER_WINDOW as u64 {
+                // A jump past the reorder window is a sparse write, not
+                // reordered writes: stream the pending writes and the gap as zeros
+                // (O(1) memory), one step at a time, and go on.
+                let piece = pending.first_key_value().filter(|(o, _)| **o < offset).map(|(&o, v)| (o, v.clone()));
+                let r = match &piece {
+                    Some((o, v)) => self.stream_step(&mut g, *o, v, Some(*o)),
+                    None => self.stream_step(&mut g, offset, &[], None),
+                };
+                match r {
+                    Ok(true) => drops = 0,
+                    Ok(false) => drops += 1,
+                    Err(e) => {
+                        eprintln!("[{}][FUSE] test_write: CAS I/O error while filling a gap", ts());
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
+
+            if fresh && offset == next && !overlaps_pending {
+                // In order: push, then the pending writes that now line up.
+                if !self.stream_step(&mut g, next, data, None)? {
+                    drops += 1;
+                    continue;
+                }
+                // Still the hold of Phase C that published the write: log it
+                // before `drain_lined_up` can unlock the cell.
+                log(lsn, offset);
+                g.file.modified = Some(now_pair());
+                // This write is in; a pending write that fails here stays
+                // pending (a read composes it, the release streams it later).
+                if let Err(e) = self.drain_lined_up(&mut g) {
+                    eprintln!("[{}][FUSE] test_write: CAS I/O error while draining pending writes: {e}", ts());
+                }
+                break Ok(data.len() as u32);
+            }
+            if fresh && offset > next && !overlaps_pending && pending_bytes + data.len() <= REORDER_WINDOW {
+                // Ahead of the stream: wait in the reorder window.
+                pending.insert(offset, data.to_vec());
+                s.byte_count = s.byte_count.max(end);
+                s.cas_committed = false;
+                s.modified = Some(now_pair());
+                s.generation = next_gen();
+                log(lsn, offset);
+                break Ok(data.len() as u32);
+            }
+            // Random write: switch to an overlay on the stored content (the
+            // debug line is printed after the hold, by `write_logged`).
+            *switch = Some(SwitchNote { ino, offset, expected: next, pending: pending_bytes, fresh, overlap: overlaps_pending });
+            // Older pending writes go in first; the next turn applies this
+            // (newest) write to the overlay.
+            if self.to_overlay(&mut g)? {
+                drops = 0;
+            } else {
+                drops += 1;
+            }
+        };
+        if result.is_ok() {
+            // For the idle and hot rules of the flusher: after the apply,
+            // before the own steps below.
+            cell.last_write.store(self.flush_ctl.now_ms(), Ordering::Relaxed);
+        }
 
         // An overlay past the dirty limit (also right after a switch that
         // moved pending writes in) stores a part of itself as a new root now,
@@ -1193,66 +3450,85 @@ impl SliceFsFilesystem {
         // the larger of the cost this write added and `REBASE_STEP`, down
         // to `limit - REBASE_STEP`: the work of one write does not grow with
         // the limit (#108), and the cost never grows while it is above the
-        // limit (after a switch it comes down with each write smaller than
-        // `REBASE_STEP`). Not the sum of both: bigwrite showed the 1 MiB
+        // limit (after a switch that left it above the hard cap, the gate
+        // above already stepped it down to the cap, in steps of at most
+        // `final_step`). Not the sum of both: bigwrite showed the 1 MiB
         // writes, whose steps freed 2 MiB, as the slowest ones. The added cost
         // counts at most the bytes of the write (and one extent overhead):
         // the spare capacity of a growing extent (up to 1/8 of its length)
         // is freed by the next steps, so a step does not grow with the limit.
         let limit = self.dirty_limit.load(Ordering::Relaxed);
-        let cost = dirty_cost(&file_state);
-        let added = cost.saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
-        let over = matches!(&file_state.write_mode, WriteMode::Overlay(_)) && cost > limit;
-        let result = match result {
-            Ok(n) if over => {
-                let ino = file_state.ino;
-                let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
-                self.rebase_step(ino, &mut file_state, free).map(|_| n).map_err(|_| libc::EIO)
+        let added = dirty_cost(&g.file).saturating_sub(cost_before).min(data.len() + crate::overlay::EXTENT_OVERHEAD);
+        // From here the write is applied and logged (WR-01): a failed step
+        // below does not fail it (an `O_APPEND` write sent again would be
+        // in the file twice). The work is left to the next write, the
+        // release or a budget step; the reason is printed after the hold.
+        let after_err = |g: &mut CellGuard<'_>, what: &str, e: i32| {
+            g.notes.push(format!("[{}][FUSE] write: fh={fh} ino={ino}: {what} failed (errno {e}); the write is in, the next write or the release steps again", ts()));
+        };
+        // A write does not return with the cost above the hard cap: if the
+        // apply passed it after all (the gate predicts the extent growth),
+        // step or wait as at the gate until the cost is under it, unless a
+        // step fails.
+        let cap = self.hard_cap();
+        while result.is_ok() && !g.retired && matches!(&g.file.write_mode, WriteMode::Overlay(_)) && dirty_cost(&g.file) > cap {
+            if drops >= STEP_TRIES {
+                after_err(&mut g, &format!("the hard cap: {STEP_TRIES} steps in a row were dropped, so the step"), libc::EIO);
+                break;
             }
-            r => r,
-        };
-        // Then the budget of all open files (#105), with the same bound.
-        let result = match result {
-            Ok(n) => self.keep_budget(&mut file_state, added).map(|_| n),
-            r => r,
-        };
-
-        // Re-insert the file state back into the map.
-        self.open_files.lock().unwrap().insert(fh, file_state);
-        result
+            let excess = dirty_cost(&g.file) - cap;
+            g.enter_cap();
+            if let Err(e) = self.cap_step(&mut g, excess, &mut drops) {
+                after_err(&mut g, "the hard-cap step", e);
+                break;
+            }
+        }
+        g.leave_cap();
+        let cost = dirty_cost(&g.file);
+        let over = matches!(&g.file.write_mode, WriteMode::Overlay(_)) && cost > limit;
+        // The write is in the overlay already (a read sees all of it or
+        // none): the step does its I/O with the cell unlocked (D-02).
+        if result.is_ok() && over {
+            let free = (cost - limit.saturating_sub(REBASE_STEP)).min(added.max(REBASE_STEP));
+            if let Err(e) = self.rebase_cell(&mut g, free) {
+                after_err(&mut g, "the rebase step", e);
+            }
+        }
+        if g.retired {
+            // The last release finalized the file (with this write) while
+            // the step was unlocked.
+            return result.map(|n| (n, offset));
+        }
+        // Then the budget of all open files (#105), with the same bound,
+        // unless the throttle let the write in below the budget.
+        let n = result?;
+        if admit.pay
+            && let Err(e) = self.pay_budget(&mut g, added)
+        {
+            after_err(&mut g, "the budget step", e);
+        }
+        Ok((n, offset))
     }
 
-    /// Keep the dirty bytes of all open files within the budget (#105). `own`
-    /// is the state of the handle being written (out of `open_files`), and
-    /// `added` the dirty cost its write added. If the sum is above the
-    /// budget, the files with the most dirty bytes (this one or another)
-    /// store steps until the cost `max(added, REBASE_STEP)` is freed, or the sum
-    /// is `REBASE_STEP` below the budget. So the sum does not grow while it
-    /// is above the budget, and a write pays for at most that much work, not
-    /// for the whole rebase of another file.
-    ///
-    /// Another file's state leaves `open_files` during its step (as during
-    /// its own writes); a failed step of another file is logged, its extents
-    /// stay, and this write still succeeds. Nothing can see the state gone:
-    /// the mount runs one fuser dispatch thread (`Config::n_threads` is not
-    /// set, so 1; fuser refuses more outside Linux), and the commit timer
-    /// and the GC start take the commit gate exclusively, which this
-    /// callback holds shared. A mount with more dispatch threads would need
-    /// the state kept in the map during the step.
-    fn keep_budget(&self, own: &mut OpenFileState, added: usize) -> Result<(), i32> {
+    /// The writer pays for its own file with steps (#105). `g` is the locked
+    /// cell of the file being written (only this cell is locked, D-13), and
+    /// `added` the dirty cost its write added. The check reads only the
+    /// global total. If it is above the budget, this file stores steps until
+    /// the cost `max(added, REBASE_STEP)` is freed, the total is
+    /// `REBASE_STEP` below the budget, or the file is clean. A write can
+    /// always free the bytes it added, so the total does not grow while it is
+    /// above the budget, and a write pays for at most that much work. This
+    /// runs when no flusher runs (replay, in-process callers) or after a
+    /// throttle wait ended with no room (Phase 20). Work on other files is
+    /// done only by the flusher thread, never by a request.
+    fn pay_budget(&self, g: &mut CellGuard<'_>, added: usize) -> Result<(), i32> {
         let budget = self.dirty_budget.load(Ordering::Relaxed);
         let target = budget.saturating_sub(REBASE_STEP);
         let mut cap: Option<usize> = None;
         let mut freed = 0usize;
         loop {
-            let own_cost = dirty_cost(own);
-            let (others, largest) = {
-                let open_files = self.open_files.lock().unwrap();
-                let others: usize = open_files.values().map(dirty_cost).sum();
-                let largest = open_files.iter().map(|(&fh, s)| (dirty_cost(s), fh)).max();
-                (others, largest)
-            };
-            let total = own_cost + others;
+            g.sync_dirty();
+            let total = self.dirty_total.load(Ordering::Relaxed);
             if cap.is_none() && total <= budget {
                 return Ok(());
             }
@@ -1260,29 +3536,12 @@ impl SliceFsFilesystem {
             if freed >= cap || total <= target {
                 return Ok(());
             }
-            let want = cap - freed;
-            let step = match largest {
-                Some((c, fh)) if c > own_cost => {
-                    let Some(mut other) = self.open_files.lock().unwrap().remove(&fh) else {
-                        return Ok(());
-                    };
-                    let before = dirty_cost(&other);
-                    let r = self.free_dirty(&mut other, want);
-                    let after = dirty_cost(&other);
-                    let ino = other.ino;
-                    self.open_files.lock().unwrap().insert(fh, other);
-                    if r.is_err() {
-                        eprintln!("[{}][FUSE] budget: step of ino {ino} failed", ts());
-                        return Ok(());
-                    }
-                    before.saturating_sub(after)
-                }
-                _ => {
-                    let before = own_cost;
-                    self.free_dirty(own, want)?;
-                    before.saturating_sub(dirty_cost(own))
-                }
-            };
+            if g.retired {
+                return Ok(());
+            }
+            let before = dirty_cost(&g.file);
+            self.free_dirty(g, cap - freed)?;
+            let step = before.saturating_sub(dirty_cost(&g.file));
             if step == 0 {
                 return Ok(());
             }
@@ -1290,15 +3549,187 @@ impl SliceFsFilesystem {
         }
     }
 
-    /// Free about `want` bytes of dirty cost of `s`: a rebase step of its
-    /// overlay; a stream with pending writes becomes an overlay first (no
-    /// content is read or cut there).
-    fn free_dirty(&self, s: &mut OpenFileState, want: usize) -> Result<(), i32> {
-        if matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()) {
-            self.to_overlay(s)?;
+    /// Admission of a write (Phase 20). Call it before the commit gate, a
+    /// stripe or a cell: it holds no lock but the short lock of the flush
+    /// control block. Below the budget the write goes on and does not pay.
+    /// With no flusher running (replay, in-process callers) it pays at once
+    /// (the Phase 19 path). Else the writer waits, in slices of
+    /// `THROTTLE_SLICE`, until the total is below the budget (then it does
+    /// not pay), the flusher stopped or ended (`stop_flusher`, a panic), a
+    /// flusher pass that began in the wait could not free memory
+    /// (`FlushFlags::pass_stuck`, for example a store error: more wait
+    /// cannot help), or the wait limit passed: then it writes and pays with
+    /// steps of its own file (`pay_budget`); a write never fails here. A
+    /// waiting writer kicks the flusher again under the flags lock, so a
+    /// pass begins after its wait began. A total at or
+    /// above half the budget wakes the flusher at once, unless the last
+    /// pass published no step at half the budget or more and the total is
+    /// below the budget (`FlushCtl::empty_pass`). In a debug build it panics when the
+    /// thread holds any ranked lock (the gate too).
+    pub fn throttle_write(&self) -> Admit {
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "throttle_write with a lock held: {:?}",
+            sync::rank::held()
+        );
+        let ctl = &*self.flush_ctl;
+        let (total, budget) = self.dirty_now();
+        if total >= budget || (total >= budget / 2 && !ctl.empty_pass.load(Ordering::Relaxed)) {
+            self.kick_flusher();
         }
-        let ino = s.ino;
-        self.rebase_step(ino, s, want).map_err(|_| libc::EIO)
+        if total < budget {
+            return Admit { pay: false };
+        }
+        if !ctl.running.load(Ordering::Acquire) {
+            return Admit { pay: true };
+        }
+        Admit { pay: throttle_wait(ctl, || self.dirty_now()) }
+    }
+
+    /// Wake the flusher for a pass now (the background threshold, half the
+    /// budget, was reached, see `throttle_write`). Takes no lock when no
+    /// flusher runs.
+    fn kick_flusher(&self) {
+        let ctl = &*self.flush_ctl;
+        if !ctl.running.load(Ordering::Acquire) {
+            return;
+        }
+        ctl.flags.lock().kicked = true;
+        ctl.wake.notify_all();
+    }
+
+    /// Start the flusher thread of a mount (`flusher::spawn_flusher`). It
+    /// holds only a `Weak` of the file system; `stop_flusher` joins it.
+    pub fn start_flusher(self: &Arc<Self>) {
+        let h = crate::flusher::spawn_flusher(Arc::downgrade(self));
+        let old = self.flusher_thread.lock().replace(h);
+        debug_assert!(old.is_none(), "one flusher thread per file system");
+    }
+
+    /// Ask the flusher loop to end, wake every throttled writer (each one
+    /// then writes and pays with steps of its own file), then join the
+    /// flusher thread of `start_flusher`, if any. Calling it again does
+    /// nothing new. It does not join when it runs on the flusher thread
+    /// (no caller does that today; a test hook in a flusher step could,
+    /// and a join there would wait for its own thread). In a debug build it
+    /// panics when the thread holds any ranked lock (the gate too): a join
+    /// under the gate can wait for ever behind a queued commit.
+    ///
+    /// The join waits for at most one flusher step: the flusher checks the
+    /// stop flag before each gate hold and each step, and its sleep wakes
+    /// on the stop. One step is bounded by its own timed waits (store waits
+    /// of `STORE_WAIT` 10 s each, step-token waits in `STEP_WAIT` slices
+    /// with progress, at most `STEP_WAIT_MAX` 120 s).
+    pub fn stop_flusher(&self) {
+        debug_assert!(
+            sync::rank::held().is_empty(),
+            "stop_flusher with a lock held: {:?}",
+            sync::rank::held()
+        );
+        self.flush_ctl.request_stop();
+        // Take the handle, then join with no lock held.
+        let Some(h) = self.flusher_thread.lock().take() else { return };
+        if h.thread().id() == std::thread::current().id() {
+            return;
+        }
+        if h.join().is_err() {
+            eprintln!("[{}][FLUSH] the flusher thread ended with a panic", ts());
+        }
+    }
+
+    /// The end of a mount (the FUSE `destroy` callback): stop and join the
+    /// flusher with no lock held, then take the gate shared and run
+    /// `test_destroy` (it writes open files with locked steps, so no
+    /// flusher step may run then). The join comes before the gate: under
+    /// the gate it could wait for a flusher that waits for the gate behind
+    /// a queued commit, and that commit waits for this hold. First it
+    /// marks the file system as shut down, so a timed commit that waits
+    /// for the gate now does no commit after the destroy work (see
+    /// `commit_timer::commit_unless_shut_down`). Returns the result of
+    /// `test_destroy` (true if the commit succeeded).
+    pub fn shutdown(&self) -> bool {
+        self.shut_down.store(true, Ordering::SeqCst);
+        self.stop_flusher();
+        let _op = self.gate_shared();
+        self.test_destroy()
+    }
+
+    /// True after `shutdown()` started.
+    pub fn is_shut_down(&self) -> bool {
+        self.shut_down.load(Ordering::SeqCst)
+    }
+
+    /// The flush control block.
+    pub(crate) fn flush_ctl(&self) -> &Arc<FlushCtl> {
+        &self.flush_ctl
+    }
+
+    /// The shared dirty total and the budget, now.
+    pub(crate) fn dirty_now(&self) -> (usize, usize) {
+        (self.dirty_total.load(Ordering::Relaxed), self.dirty_budget.load(Ordering::Relaxed))
+    }
+
+    /// The dirty limit of one file, now.
+    pub(crate) fn dirty_limit_now(&self) -> usize {
+        self.dirty_limit.load(Ordering::Relaxed)
+    }
+
+    /// Every cell with dirty cost that the flusher can step (not a
+    /// transient cell). Reads the cell map shard by shard and atomics only;
+    /// no cell is locked.
+    pub(crate) fn flush_targets(&self) -> Vec<FlushTarget> {
+        self.cells
+            .all()
+            .into_iter()
+            .filter(|c| !c.transient && c.dirty.load(Ordering::Relaxed) > 0)
+            .map(|cell| FlushTarget { cell })
+            .collect()
+    }
+
+    /// One flusher step of `t`: the commit gate shared, then the cell lock,
+    /// then `free_dirty` of about `want` bytes (its I/O with the cell
+    /// unlocked under the step token), then the cell and the gate are
+    /// released, in that order. A cell that is retired, has a step in
+    /// flight or a writer at the hard cap is skipped: the flusher never
+    /// waits for a step token with the gate held. A dirty cell with no
+    /// write handle (a failed last release) is stepped like any other; it
+    /// is never retired or removed here.
+    pub(crate) fn flush_step(&self, t: &FlushTarget, want: usize) -> FlushStep {
+        let gate = self.gate_shared();
+        let mut g = self.lock_cell(&t.cell);
+        if g.retired || t.cell.transient || g.stepping.is_some() || g.cap_writers > 0 {
+            drop(g);
+            drop(gate);
+            return FlushStep::Skipped;
+        }
+        let before = dirty_cost(&g.file);
+        clear_store_busy();
+        let r = self.free_dirty(&mut g, want);
+        let after = if g.retired { 0 } else { dirty_cost(&g.file) };
+        drop(g);
+        drop(gate);
+        match r {
+            // A busy store (a slow seal or sync) is no failure: the file
+            // keeps its dirty data and the step is tried again later.
+            Err(_) if take_store_busy() => FlushStep::Busy,
+            Err(e) => FlushStep::Failed(e),
+            Ok(()) if after < before => FlushStep::Freed(before - after),
+            Ok(()) => FlushStep::Nothing,
+        }
+    }
+
+    /// Free about `want` bytes of dirty cost of the locked cell `g`: a
+    /// rebase step of its overlay (`rebase_cell`, D-02); a stream with
+    /// pending writes becomes an overlay first (no content is read or cut
+    /// there), as an unlocked step under the token. If a step is in flight,
+    /// or the switch is dropped, it frees nothing (as a skipped step).
+    fn free_dirty(&self, g: &mut CellGuard<'_>, want: usize) -> Result<(), i32> {
+        if matches!(&g.file.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty())
+            && (g.stepping.is_some() || !self.to_overlay(g)? || g.retired)
+        {
+            return Ok(());
+        }
+        self.rebase_cell(g, want).map_err(|_| libc::EIO)
     }
 
     /// pwrite into the overlay of `s` (no I/O, no allocation by offset).
@@ -1322,111 +3753,29 @@ impl SliceFsFilesystem {
     ///
     /// Refcount lifecycle: decrements old committed root if different from new digest,
     /// increments new digest. Empty files (byte_count==0) set empty manifest without CAS push.
+    ///
+    /// The handle leaves the table first, so a write handle is counted out
+    /// of its cell exactly once; only the last write handle of the inode
+    /// finalizes. An unknown handle is ignored.
     pub fn test_release(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        // A handle that shares another's write state: only the handle ends.
-        if self.write_alias.lock().unwrap().remove(&fh).is_some() {
-            self.close_handle(fh);
-            return Ok(());
-        }
-        // The holder of a shared state closes while other write handles are
-        // open: one of them takes the state over (nothing is written yet).
-        let heir = {
-            let mut alias = self.write_alias.lock().unwrap();
-            let heir = alias.iter().find(|(_, o)| **o == fh).map(|(a, _)| *a);
-            if let Some(h) = heir {
-                alias.remove(&h);
-                for owner in alias.values_mut() {
-                    if *owner == fh {
-                        *owner = h;
-                    }
-                }
-            }
-            heir
-        };
-        if let Some(h) = heir {
-            let mut open_files = self.open_files.lock().unwrap();
-            if let Some(st) = open_files.remove(&fh) {
-                open_files.insert(h, st);
-            }
-            drop(open_files);
-            self.close_handle(fh);
-            return Ok(());
-        }
-        let result = self.finalize_write(ino, fh);
-        self.close_handle(fh);
-        result
+        self.release_logged(ino, fh, None).0
     }
 
-    /// Commit the write state of `fh` (if any) to the inode's manifest.
-    fn finalize_write(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.settle_pending(fh);
-        let mut s = match self.open_files.lock().unwrap().remove(&fh) {
-            Some(s) => s,
-            None => return Ok(()), // Already closed
-        };
-        // An overlay: store its content as a new root (its base is already
-        // in the manifest, so a clean overlay needs nothing).
-        if matches!(s.write_mode, WriteMode::Overlay(_)) {
-            return self.rebase_overlay(ino, &mut s);
-        }
-        let OpenFileState { write_mode, byte_count, cas_committed, last_committed_root, min_size, modified, .. } = s;
-
-        // No bytes written through this handle.
-        // Only set empty manifest if this is a genuinely new file (no existing manifest).
-        // FUSE-T on macOS may open existing files with O_RDWR even for read-only access
-        // (issue #15). Setting an empty manifest here would erase the file's content.
-        if byte_count == 0 {
-            if !cas_committed {
-                // Check if the file already has content — if so, don't overwrite it.
-                let has_existing = self.meta.get_manifest(ino)
-                    .map(|m| !m.is_empty())
-                    .unwrap_or(false);
-                if !has_existing {
-                    self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
-                }
-            }
-            return Ok(());
-        }
-
-        // Finalize to CAS based on write mode
-        let new_digest: ObjectKey = match write_mode {
-            WriteMode::Streaming { state, next_expected_offset, .. } => {
-                self.end_padded(&state, next_expected_offset, min_size)?
-            }
-            WriteMode::Overlay(_) => unreachable!("an overlay is rebased above"),
-        };
-
-        // If the digest matches last committed root (fsync already committed this exact state),
-        // skip redundant manifest write and refcount increment
-        if last_committed_root == Some(new_digest) && cas_committed {
-            return Ok(());
-        }
-
-        // Decrement old committed root if different
-        if let Some(old) = last_committed_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
-            }
-        }
-
-        // Set manifest and increment refcount
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
-        if last_committed_root != Some(new_digest) {
-            self.meta.increment_refcount(&new_digest);
-        }
-
-        // Update inode size and mtime
-        self.stamp_content(ino, byte_count, modified)?;
-
-        Ok(())
+    /// `test_release` that logs (see `release_write`); returns the LSN of
+    /// the `Release` record, if one was appended.
+    pub(crate) fn release_logged(&self, _ino: u64, fh: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(h) = self.take_handle(fh) else { return (Ok(()), None) };
+        let result = if h.write { self.release_write(h.ino, time) } else { (Ok(()), None) };
+        self.uncount(h.ino);
+        result
     }
 
     /// Flush the write buffer for `fh` to CAS, then reset the buffer to empty.
     ///
     /// Unlike `test_release`, the file handle remains open after this call.
     /// Used by `test_fsync` and the FUSE `fsync()` callback.
-    pub fn test_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.flush_buffer_for_fsync(ino, fh)?;
+    pub fn test_fsync(&self, _ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_handle(fh)?;
         // Flush WAL to disk — ensures all pending mutations are durable
         self.meta.flush_wal().map_err(|_| libc::EIO)?;
         Ok(())
@@ -1441,45 +3790,88 @@ impl SliceFsFilesystem {
     ///
     /// Falls back to committed manifest when no open write handle exists.
     ///
-    /// Lock ordering: open_files (clone State) -> io (materialize/read).
+    /// The cell lock is held only for memory copies (D-02): the overlay
+    /// view of the range, or for a stream the clone (only if the range
+    /// starts in the streamed prefix), the sizes and the parts of pending
+    /// writes inside the range. The read then composes the result with no
+    /// lock: stream bytes, zeros up to the size, the pending parts on top.
+    /// Pending writes overlap neither each other nor the streamed prefix
+    /// (the insert rule), so this is the content a settle would give. A
+    /// read runs no stream step and never waits for the step token.
     ///
     /// Used by integration tests to bypass the FUSE request/reply layer.
     pub fn test_read(&self, ino: u64, offset: u64, size: u32) -> Result<Vec<u8>, i32> {
         // Check for open write handles on this inode (cross-handle read support).
-        // In Overlay mode, copy only the extent parts of the range under the lock.
-        // In Streaming mode, clone State for materialization.
         enum WriterSnapshot {
-            Streaming(Stream),
+            /// The stream clone (if the range starts below `streamed`), the
+            /// streamed end, the size, and the pending parts in the range.
+            Streaming { clone: Option<Stream>, streamed: u64, size: u64, parts: Vec<(u64, Vec<u8>)> },
             Overlay(crate::overlay::RangeView),
         }
 
-        let pending_fh = self.open_files.lock().unwrap().iter()
-            .find(|(_, s)| s.ino == ino && matches!(&s.write_mode, WriteMode::Streaming { pending, .. } if !pending.is_empty()))
-            .map(|(&fh, _)| fh);
-        if let Some(fh) = pending_fh {
-            self.settle_pending(fh);
-        }
-        let mut logical_size: Option<u64> = None;
-        let writer_snapshot: Option<WriterSnapshot> = {
-            let open_files = self.open_files.lock().unwrap();
-            match open_files.values().find(|s| s.ino == ino && s.byte_count > 0) {
-                // Overlay: copy only the extent parts inside the range.
-                Some(OpenFileState { write_mode: WriteMode::Overlay(ov), .. }) => {
-                    Some(WriterSnapshot::Overlay(ov.view(offset, size as u64)))
+        let writer_snapshot: Option<WriterSnapshot> = match self.cells.get(ino) {
+            None => None,
+            // A closed-file size change: not locked (its splice runs under
+            // it). The read uses the committed manifest, which the change
+            // replaces in one install: the old or the new content, never a
+            // mix, and no wait for the splice.
+            Some(cell) if cell.transient => None,
+            Some(cell) => {
+                let g = self.lock_cell(&cell);
+                let s = &g.file;
+                if g.retired || s.byte_count == 0 {
+                    None
+                } else {
+                    match &s.write_mode {
+                        // Overlay: copy only the extent parts inside the range.
+                        WriteMode::Overlay(ov) => Some(WriterSnapshot::Overlay(ov.view(offset, size as u64))),
+                        WriteMode::Streaming { state, next_expected_offset, pending } => {
+                            let (streamed, size_now) = (*next_expected_offset, s.byte_count);
+                            let end = offset.saturating_add(size as u64).min(size_now);
+                            // Pending entries do not overlap, so their ends
+                            // are in order too: walk back from `end`.
+                            let mut parts: Vec<(u64, Vec<u8>)> = pending
+                                .range(..end)
+                                .rev()
+                                .take_while(|(o, v)| *o + v.len() as u64 > offset)
+                                .map(|(&o, v)| {
+                                    let from = offset.max(o);
+                                    let to = end.min(o + v.len() as u64);
+                                    (from, v[(from - o) as usize..(to - o) as usize].to_vec())
+                                })
+                                .collect();
+                            parts.reverse();
+                            let clone = (offset < streamed).then(|| state.clone());
+                            Some(WriterSnapshot::Streaming { clone, streamed, size: size_now, parts })
+                        }
+                    }
                 }
-                Some(OpenFileState { write_mode: WriteMode::Streaming { state, .. }, byte_count, .. }) => {
-                    logical_size = Some(*byte_count);
-                    Some(WriterSnapshot::Streaming(state.clone()))
-                }
-                None => None,
             }
         };
-        // open_files lock released
+        // cell lock released
 
         let root: ObjectKey = match writer_snapshot {
-            Some(WriterSnapshot::Streaming(snapshot)) => {
-                // Uncommitted content: finish a clone of the writer to get a root.
-                snapshot.finish(&self.content).map_err(|_| libc::EIO)?
+            Some(WriterSnapshot::Streaming { clone, streamed, size: logical, parts }) => {
+                let end = offset.saturating_add(size as u64).min(logical);
+                if offset >= end {
+                    return Ok(Vec::new());
+                }
+                let mut out = match clone {
+                    // Uncommitted content: finish a clone of the writer to get a root.
+                    Some(st) => {
+                        let root = st.finish(&self.content).map_err(|_| libc::EIO)?;
+                        let n = (end.min(streamed) - offset) as usize;
+                        self.read_root(ino, &root, offset, n).map_err(|_| libc::EIO)?
+                    }
+                    None => Vec::new(),
+                };
+                // Past the streamed bytes (gaps, a setattr extension): zeros.
+                out.resize((end - offset) as usize, 0);
+                for (o, bytes) in parts {
+                    let at = (o - offset) as usize;
+                    out[at..at + bytes.len()].copy_from_slice(&bytes);
+                }
+                return Ok(out);
             }
             Some(WriterSnapshot::Overlay(view)) => {
                 // Base bytes, zeros and the extent parts: memory O(request).
@@ -1497,15 +3889,7 @@ impl SliceFsFilesystem {
             }
         };
 
-        let mut out = self.read_root(ino, &root, offset, size as usize).map_err(|_| libc::EIO)?;
-        // Past the streamed bytes but inside a setattr extension: zeros.
-        if let Some(logical) = logical_size {
-            let want = logical.saturating_sub(offset).min(size as u64) as usize;
-            if out.len() < want {
-                out.resize(want, 0);
-            }
-        }
-        Ok(out)
+        self.read_root(ino, &root, offset, size as usize).map_err(|_| libc::EIO)
     }
 
     /// Flush the streaming state for `fh` to CAS without closing the handle.
@@ -1518,26 +3902,21 @@ impl SliceFsFilesystem {
     /// Refcount lifecycle: decrements old committed root (if any and different),
     /// increments new root. Tracks `last_committed_root` for next decrement.
     ///
-    /// If `fh` is not in `open_files` (read-only handle or invalid), returns Ok
-    /// without error — fsync is a no-op for read-only handles.
+    /// For a read-only or unknown handle it returns Ok and does nothing.
     /// The content of `ino` is now `size` bytes, last changed at `modified`
     /// (now if unknown): set size, mtime and ctime. ctime does not go back
     /// past a later change (a chmod after the last write).
     fn stamp_content(&self, ino: u64, size: u64, modified: Option<(i64, u32)>) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = size;
         let (sec, nsec) = modified.unwrap_or_else(now_pair);
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        if (sec, nsec) > (inode.ctime_sec, inode.ctime_nsec) {
-            inode.ctime_sec = sec;
-            inode.ctime_nsec = nsec;
-        }
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)
-    }
-
-    fn flush_buffer_for_fsync(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.flush_handle(ino, fh)
+        self.meta.modify_inode(ino, |inode| {
+            inode.size = size;
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            if (sec, nsec) > (inode.ctime_sec, inode.ctime_nsec) {
+                inode.ctime_sec = sec;
+                inode.ctime_nsec = nsec;
+            }
+        }).map_err(|_| libc::EIO)
     }
 
     /// Commit with a clean cut of the write log (#20): first write the
@@ -1574,12 +3953,17 @@ impl SliceFsFilesystem {
     /// synced here; [`Self::commit_cut_finish`] does that with the gate released.
     pub fn commit_cut_begin(&self) -> Result<CommitCut<'_>, MetaError> {
         use crate::oplog::{Op, Record};
-        let handles: Vec<(u64, u64)> = self.open_files.lock().unwrap()
-            .iter().map(|(&fh, s)| (s.ino, fh)).collect();
+        // The exclusive gate is held: lock the cells one at a time.
+        let cells = self.cells.all();
         // Streamed prefixes go into the manifests (cheap: an ended clone).
-        for &(ino, fh) in &handles {
-            if let Err(e) = self.flush_handle(ino, fh) {
-                return Err(MetaError::Corrupted(format!("cut: flush of open file {ino} failed: errno {e}")));
+        for cell in &cells {
+            let r = {
+                let mut g = self.lock_cell(cell);
+                // Locked: the exclusive gate is held, so no request runs.
+                if g.retired { Ok(()) } else { self.flush_cell(&mut g, FlushIo::Locked).map(|_| ()) }
+            };
+            if let Err(e) = r {
+                return Err(MetaError::Corrupted(format!("cut: flush of open file {} failed: errno {e}", cell.ino)));
             }
         }
         // Bytes that are only in RAM (pending out-of-order writes, overlay
@@ -1593,14 +3977,17 @@ impl SliceFsFilesystem {
         // records are logged.
         enum Relog {
             Pending(Vec<Record>),
-            Overlay { fh: u64, base_len: u64, visible: u64, size: u64, extents: Vec<std::ops::Range<u64>> },
+            Overlay { cell: Arc<FileCell>, base_len: u64, visible: u64, size: u64, extents: Vec<std::ops::Range<u64>> },
         }
         struct Item { ino: u64, time: (i64, u32), ctime: Option<(i64, u32)>, what: Relog }
         let mut items: Vec<Item> = Vec::new();
-        {
-            let open_files = self.open_files.lock().unwrap();
-            for &(_, fh) in &handles {
-                let Some(s) = open_files.get(&fh) else { continue };
+        for cell in &cells {
+            {
+                let g = self.lock_cell(cell);
+                if g.retired {
+                    continue;
+                }
+                let s = &g.file;
                 let ino = s.ino;
                 let time = s.modified.unwrap_or_else(now_pair);
                 let what = match &s.write_mode {
@@ -1608,7 +3995,7 @@ impl SliceFsFilesystem {
                         pending.iter().map(|(&off, data)| Record { time, op: Op::Write { ino, offset: off, data: data.clone() } }).collect(),
                     ),
                     WriteMode::Overlay(ov) if !ov.is_clean() => Relog::Overlay {
-                        fh, base_len: ov.base_len, visible: ov.visible, size: ov.size, extents: ov.extent_ranges(),
+                        cell: Arc::clone(cell), base_len: ov.base_len, visible: ov.visible, size: ov.size, extents: ov.extent_ranges(),
                     },
                     _ => continue,
                 };
@@ -1639,7 +4026,7 @@ impl SliceFsFilesystem {
                         self.log_record(rec);
                     }
                 }
-                Relog::Overlay { fh, base_len, visible, size, extents } => {
+                Relog::Overlay { cell, base_len, visible, size, extents } => {
                     // The base is the manifest root. Shrink first (the zeros
                     // past `visible` come back), then the size, then the
                     // extents in pieces of at most RELOG_PIECE, one at a time.
@@ -1656,9 +4043,12 @@ impl SliceFsFilesystem {
                         let mut off = r.start;
                         while off < r.end {
                             let n = (r.end - off).min(RELOG_PIECE);
-                            let data = match self.open_files.lock().unwrap().get(&fh).map(|s| &s.write_mode) {
-                                Some(WriteMode::Overlay(ov)) => ov.copy_out(off, n as usize),
-                                _ => Vec::new(),
+                            let data = {
+                                let g = self.lock_cell(&cell);
+                                match &g.file.write_mode {
+                                    WriteMode::Overlay(ov) if !g.retired => ov.copy_out(off, n as usize),
+                                    _ => Vec::new(),
+                                }
                             };
                             if data.len() as u64 != n {
                                 // `prepared` drops: the commit is not made.
@@ -1688,70 +4078,104 @@ impl SliceFsFilesystem {
     /// An overlay needs nothing: its base is in the manifest, and its extents
     /// are durable through the write log (#20). A rebase at each fsync would
     /// cost a write of the changed chunks and nodes per fsync (#3).
-    fn flush_handle(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let fh = self.owner_fh(fh);
-        // Pending (out-of-order) bytes stay pending: settling them here would
-        // stream zeros for the gaps, and the late writes that fill the gaps
-        // would then force the handle into an overlay. The write log keeps
-        // pending bytes durable (#20), so the manifest takes the streamed prefix.
-        // 1. Clone the stream under the open_files lock
-        let (snapshot, byte_count, old_root, modified) = {
-            let mut open_files = self.open_files.lock().unwrap();
-            match open_files.get_mut(&fh) {
-                Some(s) => {
-                    if s.byte_count == 0 {
-                        // Empty file -- nothing to flush
-                        return Ok(());
-                    }
-                    if s.cas_committed && s.last_committed_root.is_some() {
-                        // No write since the last fsync: the manifest is current.
-                        // (NFS sends a COMMIT per group of writes; skip the re-hash.)
-                        return Ok(());
-                    }
-                    let snap = match &s.write_mode {
-                        WriteMode::Streaming { state, next_expected_offset, .. } =>
-                            (state.clone(), *next_expected_offset, s.min_size),
-                        WriteMode::Overlay(_) => return Ok(()),
-                    };
-                    s.cas_committed = true;
-                    (snap, s.byte_count, s.last_committed_root, s.modified)
-                }
-                None => return Ok(()), // No write handle -- fsync is a no-op
-            }
-        };
-        // open_files lock released here
-
-        // 2. End the clone (an O(log N) tree finish)
-        let (state_snapshot, streamed, min_size) = snapshot;
-        let new_digest: ObjectKey = self.end_padded(&state_snapshot, streamed, min_size)?;
-
-        // 3. Decrement old committed root if any
-        if let Some(old) = old_root {
-            if old != new_digest {
-                self.meta.decrement_refcount(&old);
-            }
-        }
-
-        // 4. Set manifest and increment refcount (skip increment if same as old -- already counted)
-        self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
-        if old_root != Some(new_digest) {
-            self.meta.increment_refcount(&new_digest);
-        }
-
-        // 5. Update last_committed_root
-        {
-            let mut open_files = self.open_files.lock().unwrap();
-            if let Some(s) = open_files.get_mut(&fh) {
-                s.last_committed_root = Some(new_digest);
-            }
-        }
-
-        // 6. Update inode size and mtime
-        self.stamp_content(ino, byte_count, modified)?;
-
-        Ok(())
+    /// Any write handle of the inode flushes the shared cell; a read-only
+    /// or unknown handle does nothing. The end of the snapshot runs with
+    /// the cell unlocked (see `flush_cell`).
+    fn flush_handle(&self, fh: u64) -> Result<(), i32> {
+        self.flush_logged(fh, None).0
     }
 
+    /// `flush_handle` that logs: with `time`, a flush that installed (its
+    /// Phase C ran) appends its `Flush` record in that hold (D-08); a flush
+    /// with nothing to do appends none.
+    pub(crate) fn flush_logged(&self, fh: u64, time: Option<(i64, u32)>) -> (Result<(), i32>, Option<Lsn>) {
+        let Some(ino) = self.ino_of_fh(fh) else { return (Ok(()), None) };
+        let Some(cell) = self.cells.get(ino) else { return (Ok(()), None) };
+        let mut g = self.lock_cell(&cell);
+        if g.retired {
+            return (Ok(()), None);
+        }
+        match self.flush_cell(&mut g, FlushIo::Unlocked) {
+            Ok(true) => {
+                let rec = |time| crate::oplog::Record { time, op: crate::oplog::Op::Flush { ino: cell.ino } };
+                (Ok(()), time.and_then(|t| self.log_append(rec(t))))
+            }
+            r => (r.map(|_| ()), None),
+        }
+    }
+
+    /// Write the streamed content of the locked cell `g` into its manifest
+    /// (fsync, flush, the commit cut, the last release; D-02, RESEARCH
+    /// Pitfall 5). Phase A clones the stream and reads its generation.
+    /// Phase B (by `mode`; with the cell unlocked the push hook runs there)
+    /// ends the clone, zero-padded to `min_size`, and stores the manifest
+    /// node. Phase C installs it only if no newer snapshot, and no
+    /// other install (a switch to an overlay, a truncate to 0), came first
+    /// (`last_published_gen`); the refcounts use `last_committed_root` as
+    /// it is then. The state is clean (`cas_committed`) only if the stream
+    /// did not change after the snapshot.
+    ///
+    /// Pending (out-of-order) bytes stay pending: settling them here would
+    /// stream zeros for the gaps, and the late writes that fill the gaps
+    /// would then force the handle into an overlay. The write log keeps
+    /// pending bytes durable (#20), so the manifest takes the streamed prefix.
+    ///
+    /// `Ok(true)`: Phase C ran (the flush did work, with the cell locked).
+    fn flush_cell(&self, g: &mut CellGuard<'_>, mode: FlushIo) -> Result<bool, i32> {
+        let s = &g.file;
+        if s.byte_count == 0 {
+            // Empty file -- nothing to flush
+            return Ok(false);
+        }
+        if s.cas_committed && s.last_committed_root.is_some() {
+            // No write since the last fsync: the manifest is current.
+            // (The NFS backend sent a COMMIT per group of writes; skip the re-hash.)
+            return Ok(false);
+        }
+        let WriteMode::Streaming { state, next_expected_offset, .. } = &s.write_mode else {
+            return Ok(false);
+        };
+        let (ino, snap, streamed) = (s.ino, state.clone(), *next_expected_offset);
+        let (min_size, byte_count, modified, generation) = (s.min_size, s.byte_count, s.modified, s.generation);
+        let io = || -> Result<(ObjectKey, ObjectKey), i32> {
+            let k = self.end_padded(snap, streamed, min_size)?;
+            Ok((k, self.meta.prepare_manifest(&[k]).map_err(|_| libc::EIO)?))
+        };
+        let (new, digest) = match mode {
+            FlushIo::Locked => io(),
+            FlushIo::Unlocked => g.unlocked(|| {
+                let r = io();
+                self.run_push_hook();
+                r
+            }),
+            FlushIo::Step => g.run_step(|| {
+                let r = io();
+                self.run_push_hook();
+                r
+            }),
+        }?;
+        // Phase C: a newer snapshot, or another install, came first.
+        if g.retired || g.last_published_gen >= generation || !matches!(g.file.write_mode, WriteMode::Streaming { .. }) {
+            return Ok(false);
+        }
+        g.last_published_gen = generation;
+        let s = &mut g.file;
+        let old = s.last_committed_root;
+        if old != Some(new) {
+            self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+            self.meta.increment_refcount(&new);
+            if let Some(o) = old {
+                self.meta.decrement_refcount(&o);
+            }
+            s.last_committed_root = Some(new);
+        }
+        s.cas_committed = s.generation == generation;
+        // With no write since the snapshot, `modified` can still have moved:
+        // a setattr of the mtime in the I/O phase sets it and wins (as at a
+        // close). Stamp the current one then, not the snapshot's.
+        let modified = if s.cas_committed { s.modified } else { modified };
+        self.stamp_content(ino, byte_count, modified).map(|_| true)
+    }
 
     /// Truncate/extend a file to `new_size` bytes. If `fh` is Some and open,
     /// operates on the in-flight write state; otherwise streams the committed
@@ -1762,130 +4186,118 @@ impl SliceFsFilesystem {
     ///   stream; any other size switches to an overlay (no content read).
     /// - Overlay: only the size and the extents change (no I/O, no allocation
     ///   by size); a resize to 0 goes back to a fresh stream.
-    pub fn test_setattr_size(&self, ino: u64, fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+    ///
+    /// A size change goes to the open write state of the inode whatever
+    /// handle it names (an NFS SETATTR from cp, with the removed NFS
+    /// backend, carried no handle).
+    pub fn test_setattr_size(&self, ino: u64, _fh: Option<u64>, new_size: u64) -> Result<(), i32> {
+        self.setattr_size_logged(ino, new_size, &mut |_| {})
+    }
+
+    /// `test_setattr_size` that logs a size-only `Setattr` in the cell hold
+    /// of the change (the open cell or the transient cell).
+    ///
+    /// A closed file (case B) is first claimed under `stripe(ino)`: the
+    /// inode exists (else ENOENT), its transient cell is locked and in the
+    /// cell map, and the inode is pinned like an open handle (`pin_inode`).
+    /// The splice and the install then run under the cell with the stripe
+    /// released; the pin makes an unlink meanwhile keep an orphan, which
+    /// `uncount` reclaims after the change (race (a), window 1). The install
+    /// stays in the cell hold, so an open or a second size change cannot
+    /// enter between the splice and the install (research variant of D-27).
+    fn setattr_size_logged(&self, ino: u64, new_size: u64, log: LogOp<'_>) -> Result<(), i32> {
         if new_size > MAX_FILE_SIZE {
             return Err(libc::EFBIG);
         }
-        // A size change without a handle still belongs to an open write
-        // handle of the file (the NFS SETATTR from cp carries no handle).
-        let fh = fh.map(|f| self.owner_fh(f)).filter(|f| self.open_files.lock().unwrap().contains_key(f))
-            .or_else(|| self.write_handle_of(ino));
-        if let Some(fh_val) = fh {
-            // Extending a streaming handle: record the size, no materializing.
-            let extended = {
-                let mut open_files = self.open_files.lock().unwrap();
-                match open_files.get_mut(&fh_val) {
-                    Some(s) if matches!(s.write_mode, WriteMode::Streaming { .. })
-                        && new_size > 0 && new_size >= s.byte_count
-                        && (s.byte_count > 0 || !self.has_content(ino)) => {
-                        s.min_size = new_size;
-                        s.byte_count = new_size;
-                        s.cas_committed = false;                        s.modified = Some(now_pair());
-                        true
-                    }
-                    _ => false,
+        let size_op = || crate::oplog::Op::Setattr {
+            ino, mode: None, uid: None, gid: None, size: Some(new_size), atime: None, mtime: None,
+        };
+        loop {
+            // Each pass takes `stripe(ino)` first. A create (or mknod) that
+            // has linked `ino` holds it until its record is appended
+            // (`new_entry`): so this change's record comes after it (WR-03,
+            // D-08). The caller holds no stripe (stripes rank before cells).
+            let ns = self.ns.lock(&[ino]);
+            // Case A: the inode has an open write state (also one that its
+            // last release is still storing). The stripe is released before
+            // the cell lock: the change can wait for steps.
+            if let Some(cell) = self.cells.get(ino) {
+                drop(ns);
+                let mut g = self.lock_cell(&cell);
+                if g.retired {
+                    continue;
                 }
-            };
-            if extended {
-                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-                inode.size = new_size;
-                let (sec, nsec) = now_pair();
-                inode.mtime_sec = sec;
-                inode.mtime_nsec = nsec;
-                inode.ctime_sec = sec;
-                inode.ctime_nsec = nsec;
-                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-                return Ok(());
-            }
-            self.settle_pending(fh_val);
-        }
-        // Case A: open file handle — truncate in-flight write state
-        if let Some(fh_val) = fh {
-            let mut open_files = self.open_files.lock().unwrap();
-            if let Some(s) = open_files.get_mut(&fh_val) {
-                match &mut s.write_mode {
-                    WriteMode::Overlay(ov) => {
-                        if new_size == 0 {
-                            let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() };
-                            s.byte_count = 0;
-                            s.min_size = 0;
-                            s.cas_committed = false;                            s.modified = Some(now_pair());
-                            drop(open_files);
-
-                            if let Some(old) = old_root {
-                                self.meta.decrement_refcount(&old);
-                            }
-                            self.clear_manifest(ino, old_root)?;
-                        } else {
-                            ov.truncate(new_size);
-                            s.byte_count = ov.size;
-                            s.min_size = 0;
-                            s.cas_committed = false;                            s.modified = Some(now_pair());
-                            drop(open_files);
-                        }
+                match self.setattr_size_open(&mut g, new_size) {
+                    Ok(true) => {
+                        log(size_op());
+                        return Ok(());
                     }
-                    WriteMode::Streaming { .. } => {
-                        if new_size == 0 {
-                            // Fast path: reset to empty Streaming State
-                            let old_root = s.last_committed_root.take();
-                            s.write_mode = WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() };
-                            s.byte_count = 0;
-                            s.min_size = 0;
-                            s.cas_committed = false;                            s.modified = Some(now_pair());
-                            drop(open_files);
-
-                            if let Some(old) = old_root {
-                                self.meta.decrement_refcount(&old);
-                            }
-                            self.clear_manifest(ino, old_root)?;
-                        } else {
-                            // Not a pure extension: switch to an overlay on
-                            // the content so far and cut or extend it there.
-                            // No file content is read.
-                            let mut st = open_files.remove(&fh_val).expect("state is in the map");
-                            drop(open_files); // Release before io
-                            let switched = self.to_overlay(&mut st).map(|_| {
-                                if let WriteMode::Overlay(ov) = &mut st.write_mode {
-                                    ov.truncate(new_size);
-                                    st.byte_count = ov.size;
-                                }
-                                st.cas_committed = false;
-                                st.modified = Some(now_pair());
-                            });
-                            self.open_files.lock().unwrap().insert(fh_val, st);
-                            switched?;
-                        }
-                    }
+                    // The last release retired the cell while this change
+                    // waited for its step: the file is closed now (case B).
+                    Ok(false) => continue,
+                    Err(e) => return Err(e),
                 }
-
-                // Update inode size immediately
-                let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-                inode.size = new_size;
-                // truncate changes the content: mtime and ctime both change.
-                let (sec, nsec) = now_pair();
-                inode.mtime_sec = sec;
-                inode.mtime_nsec = nsec;
-                inode.ctime_sec = sec;
-                inode.ctime_nsec = nsec;
-                self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-                return Ok(());
             }
+            // Case B: no open write state. The claim, under the stripe: the
+            // inode exists; a transient cell, locked before it goes into the
+            // map (stripe 3 before cell 4), orders this change against an
+            // open or another size change of the inode, and a setattr of
+            // other fields either ran before the claim or finds the cell and
+            // waits for it (window 2: its inode write and its record both
+            // come after this change's); the pin keeps an unlinked inode as
+            // an orphan (window 1). The cell lock is held across the splice
+            // with the stripe released. This is the one I/O under a cell
+            // lock on a request path, accepted (RESEARCH Pattern 1): the
+            // file is closed, so no writer and no reader waits for it (a
+            // read does not lock a transient cell; it reads the committed
+            // manifest, which this change replaces in one install). Only an
+            // open, a second size change or a fields setattr of the inode
+            // waits (19-07 order).
+            if self.meta.get_inode(ino).is_err() {
+                return Err(libc::ENOENT);
+            }
+            let cell = Arc::new(FileCell::transient(ino));
+            let mut g = self.lock_cell(&cell);
+            if !self.cells.insert_new(&cell) {
+                drop(g);
+                drop(ns);
+                continue;
+            }
+            self.pin_inode(ino);
+            drop(ns);
+            self.pause(Pause::SizeClaimed);
+            // No return between the pin and `uncount`.
+            let r = self.setattr_size_closed(ino, new_size);
+            if r.is_ok() {
+                log(size_op());
+            }
+            g.retired = true;
+            self.cells.remove(&cell);
+            // The cell first: `uncount` takes the stripe (rank 3).
+            drop(g);
+            self.uncount(ino);
+            return r;
         }
+    }
 
-        // Case B: no open write handle — splice the committed content to the
-        // new size, truncated or zero-extended. NotFound from get_manifest means the inode exists but has no content yet
-        // (brand-new file created by create() before any write/release). Treat as empty content.
+    /// Case B of `test_setattr_size` (the caller holds the transient cell):
+    /// splice the committed content to the new size, truncated or
+    /// zero-extended. NotFound from get_manifest means the inode exists but
+    /// has no content yet (brand-new file created by create() before any
+    /// write/release). Treat as empty content. The rebase hook runs after
+    /// the splice, before the install (for tests). The old root is released
+    /// once, after the new manifest is set (no release on an error path).
+    fn setattr_size_closed(&self, ino: u64, new_size: u64) -> Result<(), i32> {
         let old_manifest = match self.meta.get_manifest(ino) {
             Ok(m) => m,
             Err(MetaError::NotFound(_)) => vec![],
             Err(_) => return Err(libc::EIO),
         };
-
-        // Decrement old refcount
-        if !old_manifest.is_empty() {
-            self.meta.decrement_refcount(&old_manifest[0]);
-        }
+        let release_old = || {
+            if let Some(old) = old_manifest.first() {
+                self.meta.decrement_refcount(old);
+            }
+        };
 
         // Splice the old content to the new size: only the chunks near the
         // old end (a cut, or the last chunk of an extend) are cut again; the
@@ -1893,6 +4305,7 @@ impl SliceFsFilesystem {
         // zero chunks without a hash. Same key as a full write.
         if new_size == 0 {
             self.meta.set_manifest(ino, &[]).map_err(|_| libc::EIO)?;
+            release_old();
         } else {
             let cs = &*self.content;
             let store_err = |e: std::io::Error| {
@@ -1909,33 +4322,166 @@ impl SliceFsFilesystem {
             let mut src = OverlaySource::new(cs, &ov).map_err(store_err)?;
             let (new_digest, stats) = content::splice(cs, old_root.as_ref(), ov.visible, &[], new_size, &mut src)
                 .map_err(store_err)?;
-            self.last_rebase_bytes.store(stats.rechunked, Ordering::Relaxed);
+            LAST_REBASE_BYTES.with(|c| c.set(stats.rechunked));
+            let hook = self.rebase_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
             self.meta.set_manifest(ino, &[new_digest]).map_err(|_| libc::EIO)?;
+            // The new root first: it can be the old one.
             self.meta.increment_refcount(&new_digest);
+            release_old();
         }
 
         // Update inode
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = new_size;
-        // truncate changes the content: mtime and ctime both change.
+        self.stamp_size(ino, new_size)
+    }
+
+    /// The size change of `test_setattr_size` on the locked cell `g`. A
+    /// size change is writer-side: each pass first waits for the step token
+    /// with the cell released (`wait_step`: EIO only for a step with no
+    /// progress), also for the memory-only changes, so it never drops a
+    /// step in flight (of a
+    /// write or of the last release, see `finalize_steps`). Its own I/O
+    /// runs as unlocked steps under the token: the content check of a
+    /// stream extension, the manifest read and the empty manifest of a
+    /// truncate to 0, and for a cut of a stream the settle of the pending
+    /// writes and the switch to an overlay. A dropped step is tried again,
+    /// at most `STEP_TRIES` in a row, then EIO. The hold changes only
+    /// memory, the manifest digest and the inode.
+    ///
+    /// `Ok(false)`: the cell was retired while this change waited (the
+    /// caller looks the inode up again); nothing was changed.
+    fn setattr_size_open(&self, g: &mut CellGuard<'_>, new_size: u64) -> Result<bool, i32> {
+        let ino = g.file.ino;
+        let mut drops = 0usize;
+        loop {
+            if drops >= STEP_TRIES {
+                g.notes.push(format!("[{}][FUSE] setattr size: ino={ino}: {STEP_TRIES} steps in a row were dropped", ts()));
+                return Err(libc::EIO);
+            }
+            g.wait_step()?;
+            if g.retired {
+                return Ok(false);
+            }
+            let streaming = matches!(g.file.write_mode, WriteMode::Streaming { .. });
+            if streaming && new_size > 0 && new_size >= g.file.byte_count {
+                // Extending a stream: record the size, no materializing. A
+                // fresh stream on a file with stored bytes cannot (it would
+                // lose them): the check is a step with the cell unlocked.
+                let extend = if g.file.byte_count > 0 {
+                    true
+                } else {
+                    let generation = g.file.generation;
+                    let has = g.run_step(|| self.has_content(ino));
+                    if g.retired {
+                        return Ok(false);
+                    }
+                    if g.file.generation != generation {
+                        drops += 1;
+                        continue;
+                    }
+                    !has
+                };
+                if extend {
+                    let s = &mut g.file;
+                    s.min_size = new_size;
+                    s.byte_count = new_size;
+                    s.cas_committed = false;
+                    s.modified = Some(now_pair());
+                    s.generation = next_gen();
+                    return self.stamp_size(ino, new_size).map(|_| true);
+                }
+            }
+            if new_size == 0 {
+                // Back to an empty stream (a new state: a new generation).
+                // The committed root and the empty manifest node come from a
+                // step with the cell unlocked; they are still right if the
+                // state did not change (the manifest of an open inode
+                // changes only under its cell lock, with a new generation or
+                // a new `last_committed_root`).
+                let (generation, committed) = (g.file.generation, g.file.last_committed_root);
+                let (root, digest) = g.run_step(|| -> Result<(Option<ObjectKey>, ObjectKey), i32> {
+                    let root = self.meta.get_manifest(ino).ok().and_then(|m| m.first().copied());
+                    Ok((root, self.meta.prepare_manifest(&[]).map_err(|_| libc::EIO)?))
+                })?;
+                if g.retired {
+                    return Ok(false);
+                }
+                if g.file.generation != generation || g.file.last_committed_root != committed {
+                    drops += 1;
+                    continue;
+                }
+                g.file = OpenFileState { modified: Some(now_pair()), ..OpenFileState::new(ino) };
+                // No flush snapshot of the old content installs after this.
+                g.last_published_gen = g.file.generation;
+                if let Some(old) = &committed {
+                    self.meta.decrement_refcount(old);
+                }
+                if let Some(r) = root.filter(|r| Some(*r) != committed) {
+                    self.meta.decrement_refcount(&r);
+                }
+                self.meta.set_manifest_digest(ino, digest).map_err(|_| libc::EIO)?;
+                return self.stamp_size(ino, 0).map(|_| true);
+            }
+            if streaming {
+                // A stream that is not purely extended: stream its pending
+                // writes (one step each), then switch to an overlay on the
+                // content so far; the next pass cuts or extends there. No
+                // file content is read.
+                let first = match &g.file.write_mode {
+                    WriteMode::Streaming { pending, .. } => pending.first_key_value().map(|(&o, v)| (o, v.clone())),
+                    WriteMode::Overlay(_) => None,
+                };
+                let published = match first {
+                    Some((o, v)) => self.stream_step(g, o, &v, Some(o))?,
+                    None => self.to_overlay(g)?,
+                };
+                if g.retired {
+                    return Ok(false);
+                }
+                if published {
+                    drops = 0;
+                } else {
+                    drops += 1;
+                }
+                continue;
+            }
+            // An overlay: only the size and the extents change (memory).
+            let s = &mut g.file;
+            if let WriteMode::Overlay(ov) = &mut s.write_mode {
+                ov.truncate(new_size);
+                s.byte_count = ov.size;
+            }
+            s.min_size = 0;
+            s.cas_committed = false;
+            s.modified = Some(now_pair());
+            return self.stamp_size(ino, new_size).map(|_| true);
+        }
+    }
+
+    /// A truncate or extend to `size`: it changes the content, so mtime and
+    /// ctime both change (to now).
+    fn stamp_size(&self, ino: u64, size: u64) -> Result<(), i32> {
         let (sec, nsec) = now_pair();
-        inode.mtime_sec = sec;
-        inode.mtime_nsec = nsec;
-        inode.ctime_sec = sec;
-        inode.ctime_nsec = nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.size = size;
+            inode.mtime_sec = sec;
+            inode.mtime_nsec = nsec;
+            inode.ctime_sec = sec;
+            inode.ctime_nsec = nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update permission bits (preserving file type bits) for an inode.
     pub fn test_setattr_mode(&self, ino: u64, mode: u32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.mode = (inode.mode & S_IFMT) | (mode & 0o7777);
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update uid and/or gid for an inode.
@@ -1945,30 +4491,30 @@ impl SliceFsFilesystem {
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        if let Some(u) = uid {
-            inode.uid = u;
-        }
-        if let Some(g) = gid {
-            inode.gid = g;
-        }
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            if let Some(u) = uid {
+                inode.uid = u;
+            }
+            if let Some(g) = gid {
+                inode.gid = g;
+            }
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Update mtime for an inode to a specific (sec, nsec).
     pub fn test_setattr_mtime(&self, ino: u64, mtime_sec: i64, mtime_nsec: u32) -> Result<(), i32> {
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.mtime_sec = mtime_sec;
-        inode.mtime_nsec = mtime_nsec;
+        let _ns = self.ns.lock(&[ino]);
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-        Ok(())
+        self.meta.modify_inode(ino, |inode| {
+            inode.mtime_sec = mtime_sec;
+            inode.mtime_nsec = mtime_nsec;
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+        }).map_err(|_| libc::EIO)
     }
 
     /// Create a regular file inode via mknod (without opening it).
@@ -1985,9 +4531,19 @@ impl SliceFsFilesystem {
     /// mknod with a device number. Creates regular files, FIFOs, sockets and
     /// character/block device nodes (the kernel implements their I/O; only
     /// the type bits and `rdev` are stored). Returns `(ino, InodeMeta)`.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_mknod_rdev(
         &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
+    ) -> Result<(u64, InodeMeta), i32> {
+        self.mknod_logged(parent, name, mode, rdev, uid, gid, umask, None, &mut |_| {})
+    }
+
+    /// `test_mknod_rdev` at inode `at` (replay) that logs its `Mknod` record
+    /// in the parent-stripe hold (D-08).
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    pub(crate) fn mknod_logged(
+        &self, parent: u64, name: &str, mode: u32, rdev: u32, uid: u32, gid: u32, umask: u32,
+        at: Option<u64>, log: LogOp<'_>,
     ) -> Result<(u64, InodeMeta), i32> {
         let file_type = match mode & S_IFMT {
             0 | S_IFREG => S_IFREG,
@@ -2000,13 +4556,10 @@ impl SliceFsFilesystem {
         if file_type == S_IFCHR || file_type == S_IFBLK {
             file_meta.rdev = rdev;
         }
-        let ino = self.meta.create_inode(&file_meta).map_err(|e| meta_error_to_errno(&e))?;
-        if let Err(e) = self.meta.link(parent, name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        let (ino, _ns) = self.new_entry(parent, name, at, &file_meta)?;
         self.touch_dir(parent)?;
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        log(crate::oplog::Op::Mknod { parent, name: name.to_string(), mode, umask, rdev, uid, gid, ino });
         Ok((ino, meta))
     }
 
@@ -2084,14 +4637,42 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<u64, i32> {
+        self.mkdir_logged(parent_ino, name, mode, umask, uid, gid, None, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_mkdir` at inode `at` (replay) that logs its `Mkdir` record
+    /// in the stripe hold (D-08). Returns `(ino, InodeMeta)`. As `new_entry`
+    /// does, it takes the number first and locks the stripes of the parent
+    /// and of the new directory before the directory is linked: a request
+    /// that finds the new name (a create in it, a setattr) waits for the new
+    /// directory's stripe, so its record comes after the `Mkdir` record.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    pub(crate) fn mkdir_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         let dir_mode = S_IFDIR | (mode & !umask & 0o7777);
         let mut dir_meta = InodeMeta::new_directory(0, uid, gid, dir_mode);
         Self::stamp_new(&mut dir_meta);
-        let ino = self.meta
-            .create_directory(parent_ino, name, &dir_meta)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        let ino = at.unwrap_or_else(|| self.meta.reserve_ino());
+        let _ns = self.ns.lock(&[parent_ino, ino]);
+        self.live_dir(parent_ino)?;
+        let ino = self.meta.create_directory_at(parent_ino, name, ino, &dir_meta).map_err(|e| meta_error_to_errno(&e))?;
+        let hook = self.mkdir_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.touch_dir(parent_ino)?;
-        Ok(ino)
+        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        log(crate::oplog::Op::Mkdir { parent: parent_ino, name: name.to_string(), mode, umask, uid, gid, ino });
+        Ok((ino, meta))
     }
 
     /// Remove empty directory `name` from `parent_ino`.
@@ -2099,11 +4680,15 @@ impl SliceFsFilesystem {
     /// Returns ENOTEMPTY if the directory still has entries beyond . and ..
     /// Returns EISDIR if the target is not a directory (though lookup normally guards this).
     pub fn simulate_rmdir(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
-        // Resolve name to inode
-        let ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        self.rmdir_logged(parent_ino, name, &mut |_| {})
+    }
+
+    /// `simulate_rmdir` that logs its record in the stripe hold (D-08).
+    pub(crate) fn rmdir_logged(&self, parent_ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
+        // Resolve name to inode, with the parent and child stripes held (a
+        // create in the child holds the child's stripe too).
+        let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
+        let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
 
         // Verify it is a directory
         let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -2129,15 +4714,11 @@ impl SliceFsFilesystem {
         self.meta.delete_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
 
         // Decrement parent nlinks (removing the .. backlink from the deleted subdir)
-        let mut parent_inode = self
-            .meta
-            .get_inode(parent_ino)
+        self.meta
+            .modify_inode(parent_ino, |m| m.nlinks = m.nlinks.saturating_sub(1))
             .map_err(|e| meta_error_to_errno(&e))?;
-        if parent_inode.nlinks > 0 {
-            parent_inode.nlinks -= 1;
-            self.meta.update_inode(&parent_inode).map_err(|e| meta_error_to_errno(&e))?;
-        }
         self.touch_dir(parent_ino)?;
+        log(crate::oplog::Op::Rmdir { parent: parent_ino, name: name.to_string() });
         Ok(())
     }
 
@@ -2150,16 +4731,28 @@ impl SliceFsFilesystem {
     ///
     /// Returns EISDIR if the target is a directory (use rmdir instead).
     pub fn simulate_unlink(&self, parent_ino: u64, name: &str) -> Result<(), i32> {
-        // Resolve name
-        let ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        self.unlink_logged(parent_ino, name, &mut |_| {})
+    }
 
-        // Get inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+    /// `simulate_unlink` that logs its record in the stripe hold (D-08).
+    /// The content of a reclaimed inode is released after the stripes
+    /// (IN-01).
+    pub(crate) fn unlink_logged(&self, parent_ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
+        let mut freed = None;
+        let r = self.unlink_held(parent_ino, name, log, &mut freed);
+        self.release_content(freed);
+        r
+    }
+
+    /// The body of `unlink_logged`, with the stripes held; `freed` gets the
+    /// manifest of an inode it reclaimed.
+    fn unlink_held(&self, parent_ino: u64, name: &str, log: LogOp<'_>, freed: &mut Option<ObjectKey>) -> Result<(), i32> {
+        // Resolve name, with the parent and child stripes held.
+        let (_ns, found) = self.lock_namespace(false, &[parent_ino], &[(parent_ino, name)]);
+        let ino = found[0].as_ref().map_err(meta_error_to_errno).copied()?;
 
         // Must not be a directory
+        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         if inode.mode & S_IFMT == S_IFDIR {
             return Err(libc::EISDIR);
         }
@@ -2169,23 +4762,13 @@ impl SliceFsFilesystem {
             .unlink(parent_ino, name)
             .map_err(|e| meta_error_to_errno(&e))?;
 
-        // Guard against underflow
-        if inode.nlinks > 0 {
-            inode.nlinks -= 1;
-        }
-
+        let inode = self.drop_link(ino)?;
         if inode.nlinks == 0 {
             // Reclaim now, or keep as an orphan while handles are open.
-            self.drop_last_link(inode)?;
-        } else {
-            // Hard links still exist — persist the decremented nlinks; the
-            // link count changed, so ctime changes too.
-            let (sec, nsec) = now_pair();
-            inode.ctime_sec = sec;
-            inode.ctime_nsec = nsec;
-            self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+            *freed = self.drop_last_link(inode)?;
         }
         self.touch_dir(parent_ino)?;
+        log(crate::oplog::Op::Unlink { parent: parent_ino, name: name.to_string() });
         Ok(())
     }
 
@@ -2194,8 +4777,27 @@ impl SliceFsFilesystem {
     /// POSIX disallows hard links to directories — returns EPERM.
     /// Returns the new inode number (same as `ino`).
     pub fn simulate_link(&self, ino: u64, newparent_ino: u64, newname: &str) -> Result<u64, i32> {
-        // Get source inode
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        self.link_logged(ino, newparent_ino, newname, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_link` that logs its record in the stripe hold (D-08).
+    /// Returns `(ino, InodeMeta)`.
+    pub(crate) fn link_logged(
+        &self,
+        ino: u64,
+        newparent_ino: u64,
+        newname: &str,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
+        // The inode and the new parent, under their stripes.
+        let (_ns, _) = self.lock_namespace(false, &[ino, newparent_ino], &[]);
+        let inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+        // An orphan (no link left, kept for open handles) gets no new name:
+        // its last close reclaims it.
+        if inode.nlinks == 0 {
+            return Err(libc::ENOENT);
+        }
+        self.live_dir(newparent_ino)?;
 
         // Disallow hard links to directories
         if inode.mode & S_IFMT == S_IFDIR {
@@ -2208,14 +4810,16 @@ impl SliceFsFilesystem {
             .map_err(|e| meta_error_to_errno(&e))?;
 
         // Increment nlinks and update ctime
-        inode.nlinks += 1;
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        let meta = self.meta.modify_inode(ino, |inode| {
+            inode.nlinks += 1;
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+            inode.clone()
+        }).map_err(|e| meta_error_to_errno(&e))?;
         self.touch_dir(newparent_ino)?;
-
-        Ok(ino)
+        log(crate::oplog::Op::Link { ino, newparent: newparent_ino, newname: newname.to_string() });
+        Ok((ino, meta))
     }
 
     /// Rename `name` in `parent_ino` to `newname` in `newparent_ino`.
@@ -2232,21 +4836,99 @@ impl SliceFsFilesystem {
         newname: &str,
         flags: u32,
     ) -> Result<(), i32> {
+        self.rename_logged(parent_ino, name, newparent_ino, newname, flags, &mut |_| {})
+    }
+
+    /// `simulate_rename` that logs its record in the stripe hold (D-08).
+    /// The content of a replaced file that is reclaimed is released after
+    /// the stripes (IN-01).
+    pub(crate) fn rename_logged(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        newparent_ino: u64,
+        newname: &str,
+        flags: u32,
+        log: LogOp<'_>,
+    ) -> Result<(), i32> {
+        let mut freed = None;
+        let r = self.rename_held(parent_ino, name, newparent_ino, newname, flags, log, &mut freed);
+        self.release_content(freed);
+        r
+    }
+
+    /// Refuse to move the directory `dir` into `target_parent` when `dir` is
+    /// `target_parent` or one of its ancestors: that move would detach `dir`
+    /// and its subtree from the tree as a cycle (race (b) of Phase 19).
+    ///
+    /// The walk reads `..` from `target_parent` up to the root (the root is
+    /// its own parent) and returns `EINVAL` when it meets `dir`. The caller
+    /// holds the rename mutex, which is enough: every other cross-directory
+    /// move waits for it, a rename in one directory changes no `..`, and
+    /// `rmdir` removes only an empty directory, while each directory above
+    /// `target_parent` has a child on the walk and the stripe of
+    /// `target_parent` is held. After `MAX_ANCESTOR_STEPS` steps (only on a
+    /// damaged store with a `..` cycle) it returns `ELOOP`. It changes
+    /// nothing, so a refused rename writes no record.
+    fn check_not_ancestor(&self, dir: u64, target_parent: u64) -> Result<(), i32> {
+        let mut cur = target_parent;
+        for _ in 0..MAX_ANCESTOR_STEPS {
+            if cur == dir {
+                return Err(libc::EINVAL);
+            }
+            let up = self.meta.lookup(cur, "..").map_err(|e| meta_error_to_errno(&e))?;
+            if up == cur {
+                return Ok(());
+            }
+            cur = up;
+        }
+        Err(libc::ELOOP)
+    }
+
+    /// The body of `rename_logged`, with the stripes held; `freed` gets the
+    /// manifest of a replaced inode it reclaimed.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    fn rename_held(
+        &self,
+        parent_ino: u64,
+        name: &str,
+        newparent_ino: u64,
+        newname: &str,
+        flags: u32,
+        log: LogOp<'_>,
+        freed: &mut Option<ObjectKey>,
+    ) -> Result<(), i32> {
+        let op = || crate::oplog::Op::Rename {
+            parent: parent_ino, name: name.to_string(), newparent: newparent_ino, newname: newname.to_string(), flags,
+        };
         // RENAME_EXCHANGE not supported
         if flags & 2 != 0 {
             return Err(libc::ENOSYS);
         }
 
+        // Both parents, the source and the replaced target under their
+        // stripes; a cross-directory rename takes the rename mutex first.
+        let (_ns, found) = self.lock_namespace(
+            parent_ino != newparent_ino,
+            &[parent_ino, newparent_ino],
+            &[(parent_ino, name), (newparent_ino, newname)],
+        );
+        let mut found = found.into_iter();
+        let (src, dst) = (found.next().expect("two lookups"), found.next().expect("two lookups"));
+
         // Resolve source inode
-        let src_ino = self
-            .meta
-            .lookup(parent_ino, name)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        let src_ino = src.map_err(|e| meta_error_to_errno(&e))?;
         let src_is_dir = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?
             .mode & S_IFMT == S_IFDIR;
 
+        // A directory must not move into itself or its own subtree; the
+        // rename mutex is held here (race (b), D-28).
+        if src_is_dir && parent_ino != newparent_ino {
+            self.check_not_ancestor(src_ino, newparent_ino)?;
+        }
+
         // RENAME_NOREPLACE: fail if target already exists
-        let target_ino = match self.meta.lookup(newparent_ino, newname) {
+        let target_ino = match dst {
             Ok(ino) => Some(ino),
             Err(MetaError::NameTooLong(n)) => return Err(meta_error_to_errno(&MetaError::NameTooLong(n))),
             Err(_) => None,
@@ -2258,6 +4940,7 @@ impl SliceFsFilesystem {
         if let Some(dst_ino) = target_ino {
             // POSIX: old and new name the same file -> do nothing.
             if dst_ino == src_ino {
+                log(op());
                 return Ok(());
             }
             let dst_inode = self.meta.get_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
@@ -2281,17 +4964,10 @@ impl SliceFsFilesystem {
                 self.meta.delete_inode(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
                 self.adjust_nlinks(newparent_ino, -1)?;
             } else {
-                let new_nlinks = dst_inode.nlinks.saturating_sub(1);
-                if new_nlinks == 0 {
+                let left = self.drop_link(dst_ino)?;
+                if left.nlinks == 0 {
                     // Reclaim now, or keep as an orphan while handles are open.
-                    self.drop_last_link(dst_inode.clone())?;
-                } else {
-                    let mut updated_dst = dst_inode.clone();
-                    updated_dst.nlinks = new_nlinks;
-                    let (sec, nsec) = now_pair();
-                    updated_dst.ctime_sec = sec;
-                    updated_dst.ctime_nsec = nsec;
-                    self.meta.update_inode(&updated_dst).map_err(|e| meta_error_to_errno(&e))?;
+                    *freed = self.drop_last_link(left)?;
                 }
             }
         }
@@ -2316,12 +4992,12 @@ impl SliceFsFilesystem {
         }
 
         // Update ctime on moved inode
-        let mut src_inode = self.meta.get_inode(src_ino).map_err(|e| meta_error_to_errno(&e))?;
         let (now_sec, now_nsec) = now_pair();
-        src_inode.ctime_sec = now_sec;
-        src_inode.ctime_nsec = now_nsec;
-        self.meta.update_inode(&src_inode).map_err(|e| meta_error_to_errno(&e))?;
-
+        self.meta.modify_inode(src_ino, |m| {
+            m.ctime_sec = now_sec;
+            m.ctime_nsec = now_nsec;
+        }).map_err(|e| meta_error_to_errno(&e))?;
+        log(op());
         Ok(())
     }
 
@@ -2337,6 +5013,22 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<u64, i32> {
+        self.symlink_logged(parent_ino, link_name, target, uid, gid, None, &mut |_| {}).map(|(ino, _)| ino)
+    }
+
+    /// `simulate_symlink` at inode `at` (replay) that logs its `Symlink`
+    /// record in the parent-stripe hold (D-08). Returns `(ino, InodeMeta)`.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    pub(crate) fn symlink_logged(
+        &self,
+        parent_ino: u64,
+        link_name: &str,
+        target: &str,
+        uid: u32,
+        gid: u32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, InodeMeta), i32> {
         let target_bytes = target.as_bytes();
         let mut symlink_meta = InodeMeta {
             ino: 0,
@@ -2353,32 +5045,27 @@ impl SliceFsFilesystem {
         };
         Self::stamp_new(&mut symlink_meta);
 
-        // Create inode
-        let ino = self
-            .meta
-            .create_inode(&symlink_meta)
-            .map_err(|e| meta_error_to_errno(&e))?;
+        // Store target as CAS content (raw bytes; the chunk store compresses it),
+        // before the parent's stripe: no stripe is held across content I/O.
+        // If the create fails, the object is garbage for the GC.
+        let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
 
-        // Link into parent directory
-        if let Err(e) = self.meta.link(parent_ino, link_name, ino) {
-            let _ = self.meta.delete_inode(ino);
-            return Err(meta_error_to_errno(&e));
-        }
+        // The inode, linked into the parent, with both stripes held.
+        let (ino, _ns) = self.new_entry(parent_ino, link_name, at, &symlink_meta)?;
         self.touch_dir(parent_ino)?;
 
-        // Store target as CAS content (raw bytes — v3 format, no compression)
-        let content_digest = content::put_all(&self.content, target_bytes).map_err(|_| libc::EIO)?;
         self.meta
             .set_manifest(ino, &[content_digest])
             .map_err(|_| libc::EIO)?;
         self.meta.increment_refcount(&content_digest);
 
         // Update inode size to raw target length (uncompressed)
-        let mut inode = self.meta.get_inode(ino).map_err(|_| libc::EIO)?;
-        inode.size = target_bytes.len() as u64;
-        self.meta.update_inode(&inode).map_err(|_| libc::EIO)?;
-
-        Ok(ino)
+        let len = target_bytes.len() as u64;
+        let meta = self.meta.modify_inode(ino, |m| { m.size = len; m.clone() }).map_err(|_| libc::EIO)?;
+        log(crate::oplog::Op::Symlink {
+            parent: parent_ino, name: link_name.to_string(), target: target.to_string(), uid, gid, ino,
+        });
+        Ok((ino, meta))
     }
 
     /// Read the target of a symbolic link inode.
@@ -2406,19 +5093,20 @@ impl SliceFsFilesystem {
     /// Bytes written through an open handle stay in its write state until
     /// release; report that size so fstat/stat during a write are correct.
     fn overlay_open_size(&self, meta: &mut InodeMeta) {
-        let open_files = self.open_files.lock().unwrap();
-        if let Some(s) = open_files.values().find(|s| s.ino == meta.ino && s.byte_count > 0) {
-            meta.size = s.byte_count;
-        }
-        // Unflushed writes: show the mtime (and ctime) the close will stamp.
-        if let Some((sec, nsec)) = open_files.values().find(|s| s.ino == meta.ino).and_then(|s| s.modified) {
-            meta.mtime_sec = sec;
-            meta.mtime_nsec = nsec;
-            if (sec, nsec) > (meta.ctime_sec, meta.ctime_nsec) {
-                meta.ctime_sec = sec;
-                meta.ctime_nsec = nsec;
+        self.with_cell(meta.ino, |s| {
+            if s.byte_count > 0 {
+                meta.size = s.byte_count;
             }
-        }
+            // Unflushed writes: show the mtime (and ctime) the close will stamp.
+            if let Some((sec, nsec)) = s.modified {
+                meta.mtime_sec = sec;
+                meta.mtime_nsec = nsec;
+                if (sec, nsec) > (meta.ctime_sec, meta.ctime_nsec) {
+                    meta.ctime_sec = sec;
+                    meta.ctime_nsec = nsec;
+                }
+            }
+        });
     }
 
     /// Lookup a name in a directory. Returns `(child_ino, InodeMeta)` on success.
@@ -2447,43 +5135,47 @@ impl SliceFsFilesystem {
     /// Open a file. Returns `(fh, is_write)` on success.
     /// If `O_TRUNC` is set and the file is opened for writing, truncates to size 0.
     pub fn test_open(&self, ino: u64, flags: i32) -> Result<(u64, bool), i32> {
+        self.open_logged(ino, flags, None).0
+    }
+
+    /// `test_open` that logs: with `time`, a write open with `O_TRUNC`
+    /// appends its `Truncate` record in the cell-lock hold of the truncate.
+    pub(crate) fn open_logged(&self, ino: u64, flags: i32, time: Option<(i64, u32)>) -> (Result<(u64, bool), i32>, Option<Lsn>) {
         let acc_mode = flags & libc::O_ACCMODE;
         let is_write = acc_mode == libc::O_WRONLY || acc_mode == libc::O_RDWR;
 
-        let fh = self.open_handle(ino);
-
-        if is_write {
-            // Another write handle of this inode is open: share its state.
-            let owner = self.open_files.lock().unwrap().iter().find(|(_, st)| st.ino == ino).map(|(&f, _)| f);
-            if let Some(owner) = owner {
-                self.write_alias.lock().unwrap().insert(fh, owner);
-            } else {
-            self.open_files.lock().unwrap().insert(
-                fh,
-                OpenFileState {
-                    ino,
-                    write_mode: WriteMode::Streaming { state: Stream::default(), next_expected_offset: 0, pending: BTreeMap::new() },
-                    byte_count: 0,
-                    cas_committed: false,                    modified: None,
-                    last_committed_root: None,
-                    min_size: 0,
-                },
-            );
+        // Under stripe(ino): the inode exists (a create that linked it has
+        // logged its record), and the handle is counted before an unlink
+        // can decide that nobody has it open. Only that needs the stripe:
+        // the cell work below (a truncate can wait for a step and do store
+        // I/O) runs with it released (WR-02); the counted handle keeps an
+        // unlinked inode alive as an orphan.
+        let fh = {
+            let _ns = self.ns.lock(&[ino]);
+            if self.meta.get_inode(ino).is_err() {
+                return (Err(libc::ENOENT), None);
             }
+            self.open_handle(ino, is_write, flags & libc::O_APPEND != 0)
+        };
 
-            // FUSE_ATOMIC_O_TRUNC
-            if flags & libc::O_TRUNC != 0 {
-                if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                    if self.write_alias.lock().unwrap().remove(&fh).is_none() {
-                        self.open_files.lock().unwrap().remove(&fh);
+        let mut lsn = None;
+        if is_write {
+            // Every write handle of the inode shares its cell.
+            // FUSE_ATOMIC_O_TRUNC: the truncate runs under the same cell lock.
+            match self.open_write(ino, flags & libc::O_TRUNC != 0, time) {
+                Ok(l) => lsn = l,
+                Err(e) => {
+                    // `open_write` counted the handle out of the cell;
+                    // `uncount` takes the stripe again.
+                    if self.take_handle(fh).is_some() {
+                        self.uncount(ino);
                     }
-                    self.close_handle(fh);
-                    return Err(e);
+                    return (Err(e), None);
                 }
             }
         }
 
-        Ok((fh, is_write))
+        (Ok((fh, is_write)), lsn)
     }
 
     /// Get an extended attribute value. Returns the raw bytes.
@@ -2504,17 +5196,41 @@ impl SliceFsFilesystem {
     }
 
     /// Set an extended attribute.
+    /// Under `stripe(ino)` (then its cell): the inode must still exist, so
+    /// a set that loses the race with the delete of the inode leaves no
+    /// xattr entry behind.
     pub fn test_setxattr(&self, ino: u64, name: &str, value: &[u8]) -> Result<(), i32> {
-        self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))
+        self.setxattr_logged(ino, name, value, &mut |_| {})
+    }
+
+    /// `test_setxattr` that logs its record in the stripe (and cell) hold.
+    pub(crate) fn setxattr_logged(&self, ino: u64, name: &str, value: &[u8], log: LogOp<'_>) -> Result<(), i32> {
+        self.with_inode_locked(ino, |_| {
+            self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))?;
+            log(crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
+            Ok(())
+        })
     }
 
     /// Remove an extended attribute.
     pub fn test_removexattr(&self, ino: u64, name: &str) -> Result<(), i32> {
-        self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))
+        self.removexattr_logged(ino, name, &mut |_| {})
+    }
+
+    /// `test_removexattr` that logs its record in the stripe (and cell) hold.
+    pub(crate) fn removexattr_logged(&self, ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
+        self.with_inode_locked(ino, |_| {
+            self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))?;
+            log(crate::oplog::Op::Removexattr { ino, name: name.to_string() });
+            Ok(())
+        })
     }
 
     /// Combined setattr: apply mode, uid, gid, mtime, and size changes.
     /// Returns the updated `InodeMeta`.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr(
         &self,
         ino: u64,
@@ -2539,7 +5255,7 @@ impl SliceFsFilesystem {
     }
 
     /// setattr with every supported field.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_setattr_full(
         &self,
         ino: u64,
@@ -2551,45 +5267,72 @@ impl SliceFsFilesystem {
         atime: Option<(i64, u32)>,
         mtime: Option<(i64, u32)>,
     ) -> Result<InodeMeta, i32> {
+        self.setattr_logged(ino, mode, uid, gid, size, fh, atime, mtime, &mut |_| {})
+    }
+
+    /// `test_setattr_full` that logs (D-08). A size change logs a size-only
+    /// `Setattr` in the cell hold of the size change, so it keeps its order
+    /// with the writes of the inode; the other fields then log a `Setattr`
+    /// without the size in the stripe-and-cell hold of their apply (also
+    /// when they are all `None`: that hold sets the ctime).
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    pub(crate) fn setattr_logged(
+        &self,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _fh: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        log: LogOp<'_>,
+    ) -> Result<InodeMeta, i32> {
         // Size first: it rewrites the inode (size, mtime, ctime); the other
-        // fields of the same request are applied on top of the result.
+        // fields of the same request are applied on top of the result. The
+        // size change is ordered by the cell lock alone (the open cell, or
+        // the transient cell of a closed file), not under the stripe: it can
+        // run stream steps or a splice (RESEARCH Pattern 4 rule 1).
         if let Some(new_size) = size {
-            self.test_setattr_size(ino, fh, new_size)?;
+            self.setattr_size_logged(ino, new_size, &mut *log)?;
         }
-        let mut inode = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        if let Some((sec, nsec)) = atime {
-            inode.atime_sec = sec;
-            inode.atime_nsec = nsec;
-        }
-
-        if let Some(m) = mode {
-            inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
-        }
-        if let Some(u) = uid {
-            inode.uid = u;
-        }
-        if let Some(g) = gid {
-            inode.gid = g;
-        }
-        if let Some((sec, nsec)) = mtime {
-            inode.mtime_sec = sec;
-            inode.mtime_nsec = nsec;
-            // An explicit mtime (utimens) on a file with unflushed writes
-            // wins over the time of those writes: the close stamps this one.
-            for s in self.open_files.lock().unwrap().values_mut() {
-                if s.ino == ino && s.modified.is_some() {
-                    s.modified = Some((sec, nsec));
-                }
-            }
-        }
-
+        // The other fields: stripe, then the cell (if open), so they are
+        // ordered with the writes of the inode.
+        self.with_inode_locked(ino, |cell| {
         // Always update ctime
         let (now_sec, now_nsec) = now_pair();
-        inode.ctime_sec = now_sec;
-        inode.ctime_nsec = now_nsec;
-
-        self.meta.update_inode(&inode).map_err(|e| meta_error_to_errno(&e))?;
+        let inode = self.meta.modify_inode(ino, |inode| {
+            if let Some((sec, nsec)) = atime {
+                inode.atime_sec = sec;
+                inode.atime_nsec = nsec;
+            }
+            if let Some(m) = mode {
+                inode.mode = (inode.mode & S_IFMT) | (m & 0o7777);
+            }
+            if let Some(u) = uid {
+                inode.uid = u;
+            }
+            if let Some(g) = gid {
+                inode.gid = g;
+            }
+            if let Some((sec, nsec)) = mtime {
+                inode.mtime_sec = sec;
+                inode.mtime_nsec = nsec;
+            }
+            inode.ctime_sec = now_sec;
+            inode.ctime_nsec = now_nsec;
+            inode.clone()
+        }).map_err(|e| meta_error_to_errno(&e))?;
+        if let (Some((sec, nsec)), Some(s)) = (mtime, cell) {
+            // An explicit mtime (utimens) on a file with unflushed writes
+            // wins over the time of those writes: the close stamps this one.
+            if s.modified.is_some() {
+                s.modified = Some((sec, nsec));
+            }
+        }
+        log(crate::oplog::Op::Setattr { ino, mode, uid, gid, size: None, atime, mtime });
         Ok(inode)
+        })
     }
 
     // ── Higher-level testable wrappers ───────────────────────────────────────
@@ -2600,6 +5343,7 @@ impl SliceFsFilesystem {
 
     /// Create a file and return `(ino, fh, InodeMeta)`.
     /// Handles `O_TRUNC` flag atomically.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
     pub fn test_create_full(
         &self,
         parent: u64,
@@ -2610,13 +5354,28 @@ impl SliceFsFilesystem {
         gid: u32,
         flags: i32,
     ) -> Result<(u64, u64, InodeMeta), i32> {
-        let (ino, fh) = self.test_create(parent, name, mode, umask, uid, gid)?;
-        if flags & libc::O_TRUNC != 0 {
-            if let Err(e) = self.test_setattr_size(ino, Some(fh), 0) {
-                self.open_files.lock().unwrap().remove(&fh);
-                self.close_handle(fh);
-                return Err(e);
-            }
+        self.create_full_logged(parent, name, mode, umask, uid, gid, flags, None, &mut |_| {})
+    }
+
+    /// `test_create_full` at inode `at` that logs (see `create_logged`).
+    #[allow(clippy::too_many_arguments, reason = "the fields of one FUSE request; a struct would only move them")]
+    pub(crate) fn create_full_logged(
+        &self,
+        parent: u64,
+        name: &str,
+        mode: u32,
+        umask: u32,
+        uid: u32,
+        gid: u32,
+        flags: i32,
+        at: Option<u64>,
+        log: LogOp<'_>,
+    ) -> Result<(u64, u64, InodeMeta), i32> {
+        let (ino, fh) = self.create_logged(parent, name, mode, umask, uid, gid, flags, at, log)?;
+        if flags & libc::O_APPEND != 0
+            && let Some(h) = self.handles.lock().by_fh.get_mut(&fh)
+        {
+            h.append = true;
         }
         let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
         Ok((ino, fh, meta))
@@ -2632,9 +5391,7 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.simulate_mkdir(parent, name, mode, umask, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.mkdir_logged(parent, name, mode, umask, uid, gid, None, &mut |_| {})
     }
 
     /// Create a node (mknod) and return `(ino, InodeMeta)`.
@@ -2659,9 +5416,7 @@ impl SliceFsFilesystem {
         uid: u32,
         gid: u32,
     ) -> Result<(u64, InodeMeta), i32> {
-        let ino = self.simulate_symlink(parent, link_name, target, uid, gid)?;
-        let meta = self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((ino, meta))
+        self.symlink_logged(parent, link_name, target, uid, gid, None, &mut |_| {})
     }
 
     /// Create a hard link and return `(ino, InodeMeta)`.
@@ -2671,37 +5426,42 @@ impl SliceFsFilesystem {
         newparent: u64,
         newname: &str,
     ) -> Result<(u64, InodeMeta), i32> {
-        let new_ino = self.simulate_link(ino, newparent, newname)?;
-        let meta = self.meta.get_inode(new_ino).map_err(|e| meta_error_to_errno(&e))?;
-        Ok((new_ino, meta))
+        self.link_logged(ino, newparent, newname, &mut |_| {})
     }
 
     /// Flush write buffer without closing the handle.
-    /// Wrapper around `flush_buffer_for_fsync` exposed for testing.
-    pub fn test_flush(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        self.flush_buffer_for_fsync(ino, fh)
+    /// Wrapper around `flush_handle` exposed for testing.
+    pub fn test_flush(&self, _ino: u64, fh: u64) -> Result<(), i32> {
+        self.flush_handle(fh)
     }
 
     /// Release with read-only handle check (matches FUSE release behavior).
+    /// The handle table says whether `fh` is a write handle.
     pub fn test_release_full(&self, ino: u64, fh: u64) -> Result<(), i32> {
-        let shared = self.write_alias.lock().unwrap().contains_key(&fh);
-        if !shared && !self.open_files.lock().unwrap().contains_key(&fh) {
-            self.close_handle(fh); // read-only handle, no write state
-            return Ok(());
-        }
         self.test_release(ino, fh)
     }
 
     /// Destroy: commit, optionally snapshot, and shut down WAL.
     /// Returns true if commit succeeded.
     pub fn test_destroy(&self) -> bool {
+        // The read-only daemon mode writes nothing. The kernel sends no
+        // write with the `RO` mount option; a write that reached the
+        // read-only chunk store failed. Nothing is committed, so the store
+        // does not change.
+        if self.read_only {
+            return true;
+        }
+        debug_assert!(!self.flush_ctl.running.load(Ordering::Acquire), "test_destroy while a flusher runs");
         // Write the content of handles that are still open (e.g. a forced
         // unmount), so the commit below keeps it.
-        let open: Vec<(u64, u64)> = self.open_files.lock().unwrap()
-            .iter().map(|(&fh, st)| (fh, st.ino)).collect();
-        for (fh, ino) in open {
-            if let Err(e) = self.finalize_write(ino, fh) {
-                eprintln!("[{}][FUSE] destroy: could not write open handle fh={} ino={}: errno {}", ts(), fh, ino, e);
+        for cell in self.cells.all() {
+            let mut g = self.lock_cell(&cell);
+            if g.retired {
+                continue;
+            }
+            // No request runs now: the steps keep the cell locked.
+            if let Err(e) = self.finalize_locked(&cell, &mut g) {
+                eprintln!("[{}][FUSE] destroy: could not write open file ino={}: errno {}", ts(), cell.ino, e);
             }
         }
         // No handle survives unmount: unlinked-but-open inodes go away now.
@@ -3041,7 +5801,7 @@ mod tests {
 
         // List
         let list = fs.test_listxattr(ino).unwrap();
-        assert!(list.len() > 0);
+        assert!(!list.is_empty());
         // Should contain "user.key\0"
         let expected = b"user.key\0";
         assert!(list.windows(expected.len()).any(|w| w == expected));
@@ -3700,7 +6460,7 @@ mod tests {
         let _ = meta_error_to_fuse_errno(&MetaError::NotEmpty(0));
         let _ = meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()));
         let _ = meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()));
-        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")));
+        let _ = meta_error_to_fuse_errno(&MetaError::Io(std::io::Error::other("x")));
     }
 
     // ── meta_error_to_errno full coverage ────────────────────────────────────
@@ -3709,7 +6469,7 @@ mod tests {
     fn test_meta_error_to_errno_all_variants() {
         assert_eq!(meta_error_to_errno(&MetaError::NotEmpty(0)), libc::ENOTEMPTY);
         assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
-        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x"))), libc::EIO);
+        assert_eq!(meta_error_to_errno(&MetaError::Io(std::io::Error::other("x"))), libc::EIO);
     }
 
     // ── Buffered mode write tests ────────────────────────────────────────────
@@ -3743,10 +6503,10 @@ mod tests {
         assert_eq!(&data[10..12], b"YZ");
     }
 
-    // Two write handles share one overlay (the owner state). Writes through
-    // both, in any order, and a release of the owner first, keep every byte.
+    // Two write handles share one overlay (one cell). Writes through both,
+    // in any order, and a release of the first handle first, keep every byte.
     #[test]
-    fn two_aliased_handles_on_an_overlay_keep_every_write() {
+    fn two_write_handles_on_an_overlay_keep_every_write() {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         let mut model: Vec<u8> = (0..1u32 << 20).map(|i| (i * 7 + 3) as u8).collect();
@@ -3763,7 +6523,7 @@ mod tests {
         assert!(!fs.test_is_streaming(h1));
         write(h2, 500_000, &[0xB2; 300]);
         write(h1, 2000, &[0xC3; 50]);
-        fs.test_release(ino, h1).unwrap(); // h2 takes the state over
+        fs.test_release(ino, h1).unwrap(); // the cell stays for h2
         write(h2, 3000, &[0xD4; 10]);
         fs.test_release(ino, h2).unwrap();
 
@@ -3819,7 +6579,7 @@ mod tests {
         let (fs, _dir) = fresh_fs();
         let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
         fs.test_write(fh, 0, b"uncommitted data").unwrap();
-        // Read from another "handle" (using test_read which checks open_files)
+        // Read from another "handle" (test_read uses the cell of the inode)
         let data = fs.test_read(ino, 0, 100).unwrap();
         assert_eq!(&data, b"uncommitted data");
         fs.test_release(ino, fh).unwrap();
@@ -4187,10 +6947,32 @@ mod tests {
 
     /// RAM charged to the overlay of `fh` (0 if it streams).
     fn overlay_cost(fs: &SliceFsFilesystem, fh: u64) -> usize {
-        match fs.open_files.lock().unwrap().get(&fs.owner_fh(fh)).map(|s| &s.write_mode) {
-            Some(WriteMode::Overlay(ov)) => ov.cost(),
+        let cost = |s: &mut OpenFileState| match &s.write_mode {
+            WriteMode::Overlay(ov) => ov.cost(),
             _ => 0,
-        }
+        };
+        fs.ino_of_fh(fh).and_then(|ino| fs.with_cell(ino, cost)).unwrap_or(0)
+    }
+
+    /// The mount options reach the atomics; the dirty data that is there
+    /// does not change.
+    #[test]
+    fn set_dirty_config_stores_the_budget_and_limit() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 1 << 20)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+        let (fh, _) = fs.test_open(ino, libc::O_RDWR).unwrap();
+        fs.test_write(fh, 4096, &seeded(2, 4096)).unwrap();
+        let total = fs.test_dirty_total();
+        assert!(total > 0, "the overlay write is dirty data");
+        assert_eq!(fs.test_dirty_config(), DirtyConfig::default());
+        let cfg = DirtyConfig { budget: 8 << 20, limit: 4 << 20, ..DirtyConfig::default() };
+        fs.set_dirty_config(&cfg);
+        let now = fs.test_dirty_config();
+        assert_eq!((now.budget, now.limit), (8 << 20, 4 << 20), "the dirty budget and limit are set");
+        assert_eq!(fs.test_dirty_total(), total, "the dirty total did not change");
+        fs.test_release(ino, fh).unwrap();
     }
 
     #[test]
@@ -4345,5 +7127,319 @@ mod tests {
         assert!(!fs.test_is_streaming(fh2));
         fs.test_release(ino2, fh2).unwrap();
         assert!(fs.test_read(ino2, 0, 1 << 20).unwrap() == old[..n], "streamed bytes cut at n");
+    }
+
+    /// Race (a), window 2 (Phase 19 item 19-10): a setattr of other fields
+    /// that reads the cell map in the window between the stripe step and
+    /// the transient-cell insert of a closed-file size change must not
+    /// write the inode in another order than its record. The size change is
+    /// parked at `Pause::SizeClaimed`, the fields call at
+    /// `Pause::FieldsStriped`; the log closure of the size change is the
+    /// third pause (after its inode write, before its record).
+    #[test]
+    fn a_fields_setattr_in_the_claim_window_keeps_the_record_order() {
+        use std::sync::mpsc::channel;
+        const T: (i64, u32) = (1_000_000_000, 0);
+        const WAIT: Duration = Duration::from_secs(10);
+        let (fs, _dir) = fresh_fs();
+        let (ino, fh) = fs.test_create(1, "f", 0o644, 0, 0, 0).unwrap();
+        fs.test_write(fh, 0, &seeded(1, 64 << 10)).unwrap();
+        fs.test_release(ino, fh).unwrap();
+
+        let (tx, rx) = channel::<&'static str>();
+        let (go_s, go_s_rx) = channel::<()>();
+        let (go_f, go_f_rx) = channel::<()>();
+        let (go_2, go_2_rx) = channel::<()>();
+        let (go_s_rx, go_f_rx) = (Mutex::new(go_s_rx), Mutex::new(go_f_rx));
+        let (s_seen, f_seen) = (AtomicBool::new(false), AtomicBool::new(false));
+        let hook_tx = Mutex::new(tx.clone());
+        fs.test_set_pause_hook(Some(Arc::new(move |at| {
+            let (seen, msg, go) = match at {
+                Pause::SizeClaimed => (&s_seen, "s-claimed", &go_s_rx),
+                Pause::FieldsStriped => (&f_seen, "f-armed", &go_f_rx),
+            };
+            if !seen.swap(true, Ordering::SeqCst) {
+                hook_tx.lock().unwrap().send(msg).unwrap();
+                let _ = go.lock().unwrap().recv_timeout(WAIT);
+            }
+        })));
+        let next = |want: &str| assert_eq!(rx.recv_timeout(WAIT), Ok(want), "waiting for {want}");
+
+        let records = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            let (fs, records) = (&fs, &records);
+            let tx_s = tx.clone();
+            let s = sc.spawn(move || {
+                fs.setattr_size_logged(ino, 1024, &mut |op| {
+                    tx_s.send("s-at-log").unwrap();
+                    let _ = go_2_rx.recv_timeout(WAIT);
+                    records.lock().unwrap().push(op);
+                })
+            });
+            next("s-claimed");
+            let tx_f = tx.clone();
+            let f = sc.spawn(move || {
+                fs.setattr_logged(ino, None, None, None, None, None, None, Some(T), &mut |op| {
+                    records.lock().unwrap().push(op);
+                    tx_f.send("f-done").unwrap();
+                })
+            });
+            next("f-armed");
+            go_s.send(()).unwrap();
+            next("s-at-log");
+            go_f.send(()).unwrap();
+            // Before the fix the fields call ends here; after it, it waits
+            // for the transient cell (the wait times out, which is fine).
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+            go_2.send(()).unwrap();
+            assert_eq!(s.join().unwrap(), Ok(()));
+            assert!(f.join().unwrap().is_ok());
+        });
+        fs.test_set_pause_hook(None);
+
+        let records = records.into_inner().unwrap();
+        assert_eq!(records.len(), 2, "one size record and one fields record: {records:?}");
+        let last_is_size = matches!(records[1], crate::oplog::Op::Setattr { size: Some(_), .. });
+        let m = fs.meta.get_inode(ino).unwrap();
+        let live = (m.mtime_sec, m.mtime_nsec);
+        if last_is_size {
+            assert_ne!(live, T, "the size record is last, but the fields write was last: replay gives another mtime");
+        } else {
+            assert_eq!(live, T, "the fields record is last, so its mtime must be the live one");
+        }
+    }
+
+    #[test]
+    fn write_end_gives_the_end_or_none() {
+        assert_eq!(write_end(0, 0), Some(0));
+        assert_eq!(write_end(MAX_FILE_SIZE - 1, 1), Some(MAX_FILE_SIZE));
+        assert_eq!(write_end(MAX_FILE_SIZE, 1), None);
+        assert_eq!(write_end(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn dirty_move_keeps_the_sum() {
+        // Costs (5, 3), total 8; the first cell goes to 2, the second to 10.
+        let apply = |total: usize, m: DirtyMove| match m {
+            DirtyMove::Add(d) => total + d,
+            DirtyMove::Sub(d) => total - d,
+        };
+        let total = apply(8, dirty_move(5, 2));
+        assert_eq!(apply(total, dirty_move(3, 10)), 12);
+    }
+}
+
+/// Models of the lock protocol on the real code (Phase 21.2, TSAFE-02):
+/// the commit gate (M3) and the shared dirty budget (M2). Run them with
+/// `scripts/safety/model.sh`. Threads are counted with the model main thread.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use crate::locks::{stripe, NamespaceLocks};
+    use raw::atomic::AtomicUsize as ModelUsize;
+
+    /// M3, the commit gate: shared request holds against the exclusive
+    /// commit, with the real `hold_shared`/`hold_exclusive`, the real
+    /// `NamespaceLocks` and two shim cell locks. Threads: 4 (main, 2
+    /// requests and 1 committer). Bound: the `LOOM_MAX_PREEMPTIONS` of
+    /// model.sh (default 3).
+    ///
+    /// Each request holds the gate shared, then the stripes of two inodes
+    /// (given in opposite order by the two requests; `NamespaceLocks::lock`
+    /// sorts them), then its cell, and counts `started` and then `finished`.
+    /// The committer holds the gate exclusively, then locks each cell once,
+    /// one at a time. Invariants: no deadlock in any order (gate, stripes
+    /// ascending, cell), and `started == finished` while the committer
+    /// holds the gate (no request is mid-flight).
+    ///
+    /// What loom cannot see: loom's `RwLock` lets a new reader in whenever
+    /// no writer holds it (it is reader-preferring), and loom reports
+    /// deadlocks and failed asserts, not starvation. So the deadlock of
+    /// `.planning/research/STACK.md` (a queued exclusive commit blocks new
+    /// shared holds while a shared holder waits for the budget) is not shown
+    /// here. It is covered by the debug panic of `throttle_write` under any
+    /// ranked lock (the gate too), by the `Rank::Gate` same-thread rule (test
+    /// `gate_after_a_lock_panics`), by the S5 gate spike and by the stress
+    /// harness. `Mutex<StoreIo>` is not modeled: it is a std lock of rank 6
+    /// (a leaf), with no condvar, held only for short store calls; the
+    /// models replace the store with closures, and TSan and the stress run
+    /// cover it. `commit_timer::commit` takes the gate with its own inline
+    /// code, not through `hold_exclusive`, so this model covers the steps of
+    /// `hold_exclusive` only.
+    #[test]
+    fn loom_gate_commit_excludes_requests() {
+        loom::model(|| {
+            let (a, b) = (1u64, 2u64);
+            assert_ne!(stripe(a), stripe(b), "the two inodes need two stripes");
+            let gate = Arc::new(raw::RwLock::new(()));
+            let xwaiters = Arc::new(ModelUsize::new(0));
+            let ns = Arc::new(NamespaceLocks::new());
+            let cells = Arc::new([sync::Mutex::new_keyed(Rank::Cell, a, ()), sync::Mutex::new_keyed(Rank::Cell, b, ())]);
+            let started = Arc::new(ModelUsize::new(0));
+            let finished = Arc::new(ModelUsize::new(0));
+            let mut threads = Vec::new();
+            for (cell, inos) in [(0usize, [a, b]), (1, [b, a])] {
+                let (gate, ns, cells) = (Arc::clone(&gate), Arc::clone(&ns), Arc::clone(&cells));
+                let (started, finished) = (Arc::clone(&started), Arc::clone(&finished));
+                threads.push(raw::thread::spawn(move || {
+                    let _gate = hold_shared(&gate);
+                    let _ns = ns.lock(&inos);
+                    let _cell = cells[cell].lock();
+                    started.fetch_add(1, Ordering::SeqCst);
+                    finished.fetch_add(1, Ordering::SeqCst);
+                }));
+            }
+            threads.push(raw::thread::spawn(move || {
+                let _gate = hold_exclusive(&gate, &xwaiters);
+                assert_eq!(
+                    started.load(Ordering::SeqCst),
+                    finished.load(Ordering::SeqCst),
+                    "a request is mid-flight while the commit holds the gate"
+                );
+                for c in cells.iter() {
+                    drop(c.lock());
+                }
+            }));
+            for t in threads {
+                t.join().unwrap();
+            }
+        });
+    }
+
+    /// The budget of the M2 models (the total starts at or above it).
+    const BUDGET: usize = 100;
+
+    /// A real flush control block for the M2 models, as `throttle_write`
+    /// finds it before the wait: the flusher is marked as running (the
+    /// writer enters the wait only after it saw `running`) and kicked (a
+    /// write at or above the budget kicks the flusher before its wait,
+    /// `kick_flusher`). Real time is not modeled: the wait limit and the
+    /// pass interval are one hour, so no wait ends by time, and under loom
+    /// `wait_for` never times out anyway. So a lost wakeup shows as a
+    /// deadlock report, not as a slow pass (RESEARCH Pitfall 4).
+    fn model_ctl() -> Arc<FlushCtl> {
+        let ctl = FlushCtl::new();
+        ctl.throttle_wait_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.pass_ms.store(3_600_000, Ordering::Relaxed);
+        ctl.running.store(true, Ordering::Release);
+        ctl.flags.lock().kicked = true;
+        Arc::new(ctl)
+    }
+
+    /// M2, the shared dirty budget: one writer over the budget in the real
+    /// `throttle_wait`, against the real `flusher::flusher_loop` with a pass
+    /// that, like a flusher step, lowers a model total below the budget
+    /// when it finds it at or above the budget and then calls the real
+    /// `FlushCtl::notify_freed` (a pass that finds nothing to free does not
+    /// notify). Threads: 3 (main, writer, flusher). Bound: the
+    /// `LOOM_MAX_PREEMPTIONS` of model.sh (default 3). Invariants: the
+    /// writer leaves the wait with no pay (it never waits while the total
+    /// is below the budget, and the notify of the pass is not lost: "the
+    /// flusher lowers the total before it takes this lock to notify"), then
+    /// `request_stop` ends the flusher; no deadlock in any order.
+    #[test]
+    fn loom_throttle_writer_leaves_after_a_pass_frees() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let total = Arc::new(ModelUsize::new(BUDGET));
+            let flusher = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || {
+                    crate::flusher::flusher_loop(&ctl, || {
+                        if total.load(Ordering::Relaxed) >= BUDGET {
+                            total.store(0, Ordering::Relaxed);
+                            ctl.notify_freed();
+                        }
+                        true
+                    })
+                })
+            };
+            let writer = {
+                let (ctl, total) = (Arc::clone(&ctl), Arc::clone(&total));
+                raw::thread::spawn(move || throttle_wait(&ctl, || (total.load(Ordering::Relaxed), BUDGET)))
+            };
+            assert!(!writer.join().unwrap(), "the writer pays although the pass freed");
+            ctl.request_stop();
+            flusher.join().unwrap();
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    /// M2, the stop: two writers over the budget in the real
+    /// `throttle_wait`, the real `flusher_loop` with a pass that frees
+    /// nothing, and the real `FlushCtl::request_stop` (the stop step of
+    /// `stop_flusher`) on the main thread. Threads: 4 (main, 2 writers,
+    /// flusher). Bound: the `LOOM_MAX_PREEMPTIONS` of model.sh (default 3).
+    /// Invariants: the stop wakes both writers (or they see it, or see the
+    /// flusher gone, when they enter), each pays, `stop_exits` is 2, and the
+    /// flusher ends; no deadlock in any order.
+    #[test]
+    fn loom_throttle_stop_wakes_two_writers() {
+        loom::model(|| {
+            let ctl = model_ctl();
+            let flusher = {
+                let ctl = Arc::clone(&ctl);
+                raw::thread::spawn(move || crate::flusher::flusher_loop(&ctl, || true))
+            };
+            let writers: Vec<_> = (0..2)
+                .map(|_| {
+                    let ctl = Arc::clone(&ctl);
+                    raw::thread::spawn(move || throttle_wait(&ctl, || (BUDGET, BUDGET)))
+                })
+                .collect();
+            ctl.request_stop();
+            for w in writers {
+                assert!(w.join().unwrap(), "a writer does not pay after the stop");
+            }
+            assert_eq!(ctl.stop_exits.load(Ordering::Relaxed), 2);
+            flusher.join().unwrap();
+        });
+    }
+}
+
+// Kani proofs of the size and limit arithmetic (TSAFE-04). Each harness
+// writes its bound. Run with scripts/safety/kani.sh.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    // Bound: none (any u64 offset, any usize length).
+    #[kani::proof]
+    fn write_end_is_exact_and_bounded() {
+        let offset: u64 = kani::any();
+        let len: usize = kani::any();
+        let sum = u128::from(offset) + len as u128;
+        match write_end(offset, len) {
+            Some(e) => assert!(u128::from(e) == sum && e <= MAX_FILE_SIZE),
+            None => assert!(sum > u128::from(MAX_FILE_SIZE)),
+        }
+    }
+
+    // Bound: none (any usize limit).
+    #[kani::proof]
+    fn hard_cap_is_at_least_the_limit() {
+        let limit: usize = kani::any();
+        assert!(hard_cap_of(limit) >= limit);
+    }
+
+    // Bound: two cells; each old and new cost at most usize::MAX / 4, so the
+    // sums fit. The two moves are applied in either order.
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn dirty_total_stays_the_sum_of_costs() {
+        let (a0, a1, b0, b1): (usize, usize, usize, usize) = (kani::any(), kani::any(), kani::any(), kani::any());
+        for c in [a0, a1, b0, b1] {
+            kani::assume(c <= usize::MAX / 4);
+        }
+        let moves = if kani::any() { [(a0, a1), (b0, b1)] } else { [(b0, b1), (a0, a1)] };
+        let mut total = a0 + b0;
+        for (old, cost) in moves {
+            let next = match dirty_move(old, cost) {
+                DirtyMove::Add(d) => total.checked_add(d),
+                DirtyMove::Sub(d) => total.checked_sub(d),
+            };
+            total = next.expect("the shared total does not wrap");
+        }
+        assert_eq!(total, a1 + b1);
     }
 }

@@ -1,0 +1,242 @@
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+     Ignored package `kani-verifier v0.68.0` is already installed, use --force to override
+[0/5] Running Kani first-time setup...
+[1/5] Ensuring the existence of: <home>/.kani/kani-0.68.0
+[2/5] Downloading Kani release bundle: kani-0.68.0-x86_64-apple-darwin.tar.gz
+[3/5] Installing rust toolchain version: nightly-2026-08-21-x86_64-apple-darwin
+info: syncing channel updates for nightly-2026-08-21-x86_64-apple-darwin
+
+  nightly-2026-08-21-x86_64-apple-darwin unchanged - rustc 1.100.0-nightly (8925ea358 2026-08-20)
+
+info: checking for self-update (current version: 1.29.3)
+[5/5] Successfully completed Kani first-time setup.
+KANI version=0.68.0 (Kani uses its own bundled nightly, not NIGHTLY=nightly-2026-02-11)
+Kani Rust Verifier 0.68.0 (cargo plugin)
+CBMC 6.11.0
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: trailing semicolon in macro used in expression position
+   --> crates/chunk-store/src/run.rs:107:15
+    |
+107 | const _: () = assert!(MIN_ENTRY == 25 && MAX_PER_PAGE == 163 && FOOTER == 112);
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+    = note: `#[warn(semicolon_in_expressions_from_non_local_macros)]` (part of `#[warn(future_incompatible)]`) on by default
+    = note: this warning originates in the macro `assert` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: trailing semicolon in macro used in expression position
+  --> crates/metadata/src/store_io.rs:47:15
+   |
+47 | const _: () = assert!(chunk_store::ID_LEN == slicefs_traits::key::KEY_BYTES);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: `#[warn(semicolon_in_expressions_from_non_local_macros)]` (part of `#[warn(future_incompatible)]`) on by default
+   = note: this warning originates in the macro `assert` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+  --> crates/metadata/src/store_io.rs:48:15
+   |
+48 | const _: () = assert!(chunk_store::DIGEST_LEN == slicefs_traits::key::DIGEST_BYTES);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+   = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+   = note: this warning originates in the macro `assert` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: trailing semicolon in macro used in expression position
+    --> crates/slicefs-cli/src/filesystem.rs:7413:24
+     |
+7413 |             Some(e) => assert!(u128::from(e) == sum && e <= MAX_FILE_SIZE),
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+     = note: `#[warn(semicolon_in_expressions_from_non_local_macros)]` (part of `#[warn(future_incompatible)]`) on by default
+     = note: this warning originates in the macro `assert` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: trailing semicolon in macro used in expression position
+    --> crates/slicefs-cli/src/filesystem.rs:7414:21
+     |
+7414 |             None => assert!(sum > u128::from(MAX_FILE_SIZE)),
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #79813 <https://github.com/rust-lang/rust/issues/79813>
+     = note: this warning originates in the macro `assert` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of an unstable feature
+ --> <crate attribute>:1:12
+  |
+1 | #![feature(register_tool)]
+  |            ^^^^^^^^^^^^^
+  |
+  = note: requested on the command line with `--force-warn unstable-features`
+
+warning: Found the following unsupported constructs:
+             - caller_location (1)
+             - foreign function (1)
+         
+         Verification will fail if one or more of these constructs is reachable.
+         See https://model-checking.github.io/kani/rust-feature-support.html for more details.
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.05s
+warning: the following packages contain code that will be rejected by a future version of Rust: chunk-store v0.1.0 (<repo>/crates/chunk-store), metadata v0.1.0 (<repo>/crates/metadata), nix v0.31.3, slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 2`
+Checking harness filesystem::proofs::dirty_total_stays_the_sum_of_costs...
+
+VERIFICATION RESULT:
+ ** 0 of 113 failed (1 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 14.203002s
+
+Checking harness filesystem::proofs::hard_cap_is_at_least_the_limit...
+
+VERIFICATION RESULT:
+ ** 0 of 4 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.042404417s
+
+Checking harness filesystem::proofs::write_end_is_exact_and_bounded...
+
+VERIFICATION RESULT:
+ ** 0 of 12 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.06623572s
+
+Checking harness header::proofs::class_word_total...
+
+VERIFICATION RESULT:
+ ** 0 of 154 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.2520595s
+
+Checking harness header::proofs::first_line_number_total...
+
+VERIFICATION RESULT:
+ ** 0 of 305 failed (5 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 17.930225s
+
+Checking harness header::proofs::release_bytes_total...
+
+VERIFICATION RESULT:
+ ** 0 of 138 failed (1 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.85276026s
+
+Checking harness header::proofs::name_bytes_total...
+
+VERIFICATION RESULT:
+ ** 0 of 299 failed (1 unreachable)
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 3.9633222s
+
+Checking harness locks::proofs::stripe_in_range...
+
+VERIFICATION RESULT:
+ ** 0 of 3 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.038275823s
+
+Checking harness pool::proofs::workers_for_cpus_in_range...
+
+VERIFICATION RESULT:
+ ** 0 of 59 failed
+
+VERIFICATION:- SUCCESSFUL
+Verification Time: 0.17585152s
+
+Manual Harness Summary:
+Complete - 9 successfully verified harnesses, 0 failures, 9 total.
+KANI harness=filesystem::proofs::dirty_total_stays_the_sum_of_costs result=SUCCESSFUL secs=14.20
+KANI harness=filesystem::proofs::hard_cap_is_at_least_the_limit result=SUCCESSFUL secs=0.04
+KANI harness=filesystem::proofs::write_end_is_exact_and_bounded result=SUCCESSFUL secs=0.07
+KANI harness=header::proofs::class_word_total result=SUCCESSFUL secs=0.25
+KANI harness=header::proofs::first_line_number_total result=SUCCESSFUL secs=17.93
+KANI harness=header::proofs::release_bytes_total result=SUCCESSFUL secs=0.85
+KANI harness=header::proofs::name_bytes_total result=SUCCESSFUL secs=3.96
+KANI harness=locks::proofs::stripe_in_range result=SUCCESSFUL secs=0.04
+KANI harness=pool::proofs::workers_for_cpus_in_range result=SUCCESSFUL secs=0.18
+KANI ok harnesses=9
+kani.sh exit=0

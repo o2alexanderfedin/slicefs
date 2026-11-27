@@ -8,8 +8,17 @@
 # container is 45 s old before the first mount (the cargo build counts).
 # Usage: scripts/docker-linux-test/run.sh [smoke|test|all|verify|pjdfstest]   (default: all)
 #        scripts/docker-linux-test/run.sh bigwrite [size-MiB ...]   (#98 memory check; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh s1   (spike S1 control: the probe shows request overlap on Linux; by hand)
+#        scripts/docker-linux-test/run.sh s4   (spike S4: FUSE queue depth during random writes and readahead; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh s6 [files]   (spike S6: small fsynced files per WAL strategy; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh harness <test-name>   (one ignored test of the stress harness in release, no mount: s3_store_lock, s5_gate_fairness, s7_budget_baseline (S7_SERIALIZE=0 for the parallel form, S7_FLUSHER=1 for the flusher form, S7_THREADS=n writers, default 4; S7_STORE_WAIT_MS=n shortens the store wait of 10 s, so a slow sync gives busy stores); HARNESS_FEATURES=lock-stats for lock rows; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh pool-bench   (POOL-05 bench: 16 clients at 1-16 workers, release; POOL_BENCH_QUICK=1, POOL_BENCH_N, POOL_BENCH_ROUNDS, POOL_BENCH_EXTRA; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh coverage   (TSAFE-05: line coverage of the tests and the FUSE smoke; COVERAGE_FLOOR gates the tests number; see coverage.sh)
 #        scripts/docker-linux-test/run.sh index-bench [SIZES...]   (default sizes: 1000000 10000000)
 #        scripts/docker-linux-test/run.sh index-bench-cold [SIZES...]   (cold page cache; privileged; by hand)
+#        scripts/docker-linux-test/run.sh chunk-profiles-smoke   (chunk profile benchmark, SMOKE=1, no FUSE; by hand, not in CI)
+#        scripts/docker-linux-test/run.sh prolly-bench-smoke   (prolly prototype smoke, SMOKE=1, no FUSE; by hand, not in CI)
+# SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
 set -euo pipefail
@@ -17,14 +26,38 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
   -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF slicefs-fusetest unshare -m --propagation private)
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS
+  -e POOL_BENCH_QUICK -e POOL_BENCH_N -e POOL_BENCH_ROUNDS -e POOL_BENCH_EXTRA
+  -e COVERAGE_FLOOR -e COVERAGE_REPORT_ONLY -e CARGO_BUILD_JOBS slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
   smoke) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   test)  "${RUN[@]}" bash -c 'cargo test -q --workspace && rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib' ;;
   all)   "${RUN[@]}" bash -c 'cargo test -q --workspace && (rm -rf /tmp/fuser && cp -r vendor/fuser /tmp/fuser && cd /tmp/fuser && cargo test -q --lib) && cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/mt-linux.sh /target/debug/slicefs && /dk/dedup-probe.sh /target/debug/slicefs' ;;
   verify) "${RUN[@]}" bash -c 'cargo build -q -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/verify-phases.sh /target/debug/slicefs' ;;
+  coverage) "${RUN[@]}" bash /dk/coverage.sh ;;
   pjdfstest) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/pjdfstest.sh /target/release/slicefs' ;;
   bigwrite) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/bigwrite.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
+  s1) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli --example s1_probe && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && WORK=/tmp/s1 /src/scripts/macos-mount-test/s1-overlap.sh /target/release/examples/s1_probe' ;;
+  s4)
+    # --privileged only if the fusectl mount fails with SYS_ADMIN alone (see s4-waiting.sh).
+    shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s4-waiting.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
+  pool-bench) "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/pool-bench.sh /target/release/slicefs' ;;
+  s6) shift; "${RUN[@]}" bash -c 'cargo build -q --release -p slicefs-cli && { w=$((45 - SECONDS)); [ $w -le 0 ] || sleep $w; } && /dk/s6-smallfsync.sh /target/release/slicefs "$@"' _ ${@+"$@"} ;;
+  harness)
+    # One ignored test of the stress harness (spikes S3, S5, S6, S7), in release.
+    # This mode does not mount anything: no FUSE device, no SYS_ADMIN, no unshare.
+    # HARNESS_FEATURES (for example lock-stats) is passed to cargo only when set;
+    # the STRESS_*, S3_*, S5_*, S6_* and S7_* variables pass through from the host.
+    # The recorder is process-global, so run one test per call, nothing else beside it.
+    shift
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target -e HARNESS_FEATURES \
+      -e STRESS_SEED -e STRESS_THREADS -e STRESS_SECS -e STRESS_FILE_MIB -e STRESS_SERIALIZE -e STRESS_MODE \
+      -e S3_THREADS -e S3_FILE_MIB -e S3_SERIALIZE -e S5_FILES -e S5_SECS -e S5_HOLD_MS \
+      -e S6_FILES -e S7_FILE_MIB -e S7_WRITE_MIB -e S7_COMMIT_SECS -e S7_SERIALIZE -e S7_FLUSHER -e S7_THREADS -e S7_STORE_WAIT_MS \
+      slicefs-fusetest bash -c '
+        rustc -V
+        cargo test -q --release -p slicefs-cli ${HARNESS_FEATURES:+--features "$HARNESS_FEATURES"} --test stress_harness -- --ignored --exact --nocapture "$@"' harness ${@+"$@"} ;;
   index-bench)
     # The chunk index benchmark (#66). This mode does not mount anything: it needs
     # no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
@@ -38,6 +71,35 @@ case "${1:-all}" in
           /target/release/index-bench run --dir /bench/$n --objects $n || exit 1
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
+  chunk-profiles-smoke)
+    # The smoke mode of the chunk profile benchmark (#67, PROF-03). It mounts
+    # nothing: no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+        rustc -V
+        timeout 1200 cargo build -q --release --locked -j 1 -p chunk-store --example chunk_profile_bench || exit 1
+        echo "# load before: $(cat /proc/loadavg)"
+        SMOKE=1 RUNS=1 PROFILES="4/8/32 16/64/256" WORK=/tmp/cp BIN=/target/release/examples/chunk_profile_bench \
+          timeout 600 bash /src/scripts/chunk-profiles/bench.sh || exit 1
+        echo "# load after: $(cat /proc/loadavg)"
+        echo "# edits.csv rows: $(($(wc -l < /tmp/cp/edits.csv) - 1))"
+        cat /tmp/cp/machine.txt' ;;
+  prolly-bench-smoke)
+    # The prolly tests (the golden root on Linux) and the smoke of the prolly
+    # benchmark (#19, PROLLY-02). It mounts nothing: no FUSE device, no SYS_ADMIN
+    # and no unshare, so it does not use RUN.
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+        set -o pipefail
+        rustc -V || exit 1
+        timeout 2400 cargo test -q --release --locked -j 2 -p prolly || exit 1
+        timeout 600 cargo test --release --locked -j 2 -p prolly --lib -- --exact tests::golden_root 2>&1 | grep -E "^test |^test result" || exit 1
+        timeout 2400 cargo build -q --release --locked -j 2 -p prolly-bench || exit 1
+        echo "# load before: $(cat /proc/loadavg)" || exit 1
+        SMOKE=1 RUNS=1 WORK=/tmp/pp BIN=/target/release/prolly-bench timeout 900 bash /src/scripts/prolly-bench/bench.sh || exit 1
+        echo "# load after: $(cat /proc/loadavg)" || exit 1
+        echo "# checks ok: $(grep -c ok=1 /tmp/pp/shape.txt)" || exit 1
+        cat /tmp/pp/machine.txt || exit 1' ;;
   index-bench-cold)
     # The chunk index with a cold page cache (by hand). --privileged, because
     # only then can root in the container write /proc/sys/vm/drop_caches; this
@@ -67,5 +129,5 @@ case "${1:-all}" in
           done; done
           echo "# size $n, load after: $(cat /proc/loadavg)"
         done' index-bench ${*:-1000000 10000000} ;;
-  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | bigwrite [size-MiB ...] (by hand; not in CI) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
+  *) echo "usage: $0 [smoke|test|all|verify|pjdfstest] | coverage | bigwrite [size-MiB ...] (by hand; not in CI) | s1 (by hand) | s4 (by hand; not in CI) | s6 [files] (by hand; not in CI) | pool-bench (by hand; not in CI) | harness <test-name> (by hand; not in CI; HARNESS_FEATURES=lock-stats for lock rows) | index-bench [SIZES...] | index-bench-cold [SIZES...]"; exit 2 ;;
 esac

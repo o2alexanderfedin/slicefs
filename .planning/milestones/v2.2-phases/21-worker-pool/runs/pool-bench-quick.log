@@ -1,0 +1,27 @@
+# pool-bench quick check (POOL_BENCH_QUICK=1): Docker mount form, tar stream of the committed clean tree at 7853542, volume slicefs-target-p21, release build
+Linux 3a19787d2fb7 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+0.00 0.05 0.44 1/779 20
+nproc 32
+uname -r 7.2.12-orbstack-00394-gbecdd6130068
+loadavg 0.00 0.04 0.42 1/792 38
+clients=4 file_mib=8 files_per_client=250
+detail n=1 round=1 trace=off arena=default mount=a steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+detail n=1 round=1 trace=off arena=default mount=b steps: save_steps=2 steps_per_s=1.28 freed_per_step=5767360 freed_bytes=11534720
+detail n=1 round=1 trace=off arena=default mount=m steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+detail n=1 round=1 trace=off arena=default mount=v steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+bench n=1 round=1 trace=off arena=default write_mbs=75.5 read_mbs=592.6 meta_fps=4504.5 rand_mbs=45.3 vmhwm_a_mib=26 vmhwm_b_mib=39 mismatches=0 max_weight=na max_queue_wait_ms=na load=0.00 meta_stat_ops=27027.0 meta_read_ops=9803.9 meta_unlink_ops=20833.3 randcheck_mbs=264.5 vmhwm_m_mib=12 vmhwm_v_mib=6
+detail n=2 round=1 trace=off arena=default mount=a pool: workers=2 jobs=89 max_weight=1048576 max_queue_wait_ms=25 queue_max=3 jobs_per_worker=49,40
+detail n=2 round=1 trace=off arena=default mount=a steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+detail n=2 round=1 trace=off arena=default mount=b pool: workers=2 jobs=641 max_weight=1048576 max_queue_wait_ms=46 queue_max=4 jobs_per_worker=318,323
+detail n=2 round=1 trace=off arena=default mount=b steps: save_steps=4 steps_per_s=4.26 freed_per_step=5767360 freed_bytes=23069440
+detail n=2 round=1 trace=off arena=default mount=m pool: workers=2 jobs=12013 max_weight=4096 max_queue_wait_ms=0 queue_max=4 jobs_per_worker=6077,5936
+detail n=2 round=1 trace=off arena=default mount=m steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+detail n=2 round=1 trace=off arena=default mount=v pool: workers=2 jobs=273 max_weight=0 max_queue_wait_ms=2 queue_max=4 jobs_per_worker=135,138
+detail n=2 round=1 trace=off arena=default mount=v steps: save_steps=0 steps_per_s=0.00 freed_per_step=0 freed_bytes=0
+bench n=2 round=1 trace=off arena=default write_mbs=116.8 read_mbs=820.5 meta_fps=5814.0 rand_mbs=132.2 vmhwm_a_mib=33 vmhwm_b_mib=49 mismatches=0 max_weight=1048576 max_queue_wait_ms=46 load=0.00 meta_stat_ops=33333.3 meta_read_ops=10309.3 meta_unlink_ops=22727.3 randcheck_mbs=329.9 vmhwm_m_mib=12 vmhwm_v_mib=7
+loadavg-end 0.00 0.03 0.41 1/795 666
+pool-bench: done
+rc=0
+exit=0

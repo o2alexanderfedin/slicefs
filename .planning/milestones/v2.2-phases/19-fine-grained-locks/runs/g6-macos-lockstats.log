@@ -1,0 +1,1439 @@
+ProductName:		macOS
+ProductVersion:		26.2
+BuildVersion:		25C56
+rustc 1.95.0-nightly (9e79395f9 2026-02-10)
+commit 74561f6
+  Executable tests/stress_harness.rs (target/debug/deps/stress_harness-0fe249ea42622ea8)
+load before: 15:02  up 31 days, 19:23, 8 users, load averages: 15.04 16.50 19.56
+=== run 1
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/stress_harness.rs (target/debug/deps/stress_harness-0fe249ea42622ea8)
+
+running 1 test
+STRESS seed=1795388555463427000 mode=one-file threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:35.601][FUSE] write: fh=2 ino=2 switches to overlay (offset=3342336 len=57344 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388555.970][commit-cut] begin_ms=0 relog_bytes=3198976 relog_ms=6
+[t=1795388556.161][commit-cut] finish_ms=191
+[t=1795388556.439][commit-cut] begin_ms=0 relog_bytes=3960832 relog_ms=8
+[t=1795388556.582][commit-cut] finish_ms=143
+[t=1795388556.873][commit-cut] begin_ms=0 relog_bytes=4104192 relog_ms=10
+[t=1795388557.018][commit-cut] finish_ms=144
+[t=1795388557.287][commit-cut] begin_ms=0 relog_bytes=4141056 relog_ms=9
+[t=1795388557.397][commit-cut] finish_ms=110
+[t=1795388557.708][rebase] ino=2 size=4194304 free=8388608 cost_before=4258816 taken=9/4157440 rechunked=4194304 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=101.1
+[t=1795388557.709][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388557.791][commit-cut] finish_ms=82
+[t=1795388557.792][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388557.855][commit-cut] finish_ms=62
+report mode=one-file (closed loop: no coordinated-omission correction)
+op=read n=1418 p50_us=16.7 p99_us=702.5 p999_us=3244.0 max_us=3584.0
+op=write n=832 p50_us=312.1 p99_us=41386.0 p999_us=74252.3 max_us=74252.3
+op=fsync n=59 p50_us=21774.3 p99_us=144310.3 p999_us=144310.3 max_us=144310.3
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=4 p50_us=31.8 p99_us=48.3 p999_us=48.3 max_us=48.3
+op=release n=4 p50_us=22.4 p99_us=104136.7 p999_us=104136.7 max_us=104136.7
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2317 p50_us=0.5 p99_us=3.8 p999_us=11730.9 max_us=27000.8
+op=gate_hold n=2317 p50_us=38.4 p99_us=40337.4 p999_us=122617.9 max_us=144310.3
+op=commit_gate_wait n=6 p50_us=7946.2 p99_us=21102.6 p999_us=21102.6 max_us=21102.6
+op=commit_hold n=6 p50_us=7458.8 p99_us=11477.0 p999_us=11477.0 max_us=11477.0
+op=commit_total n=6 p50_us=123142.1 p99_us=218628.1 p999_us=218628.1 max_us=218628.1
+max_inflight=4
+lock site=store n=3972 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=40.1 hold_p50_us=1.7 hold_p99_us=6.8 hold_max_us=66.5
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=566.8 hold_max_us=566.8
+lock site=wal n=2020 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=1.9 hold_max_us=13.4
+lock site=wal_writer n=3320 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=67.5 hold_p50_us=1.5 hold_p99_us=18.3 hold_max_us=50.2
+lock site=wal_queue n=1851 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.8 hold_p50_us=0.7 hold_p99_us=10.0 hold_max_us=32.7
+lock site=readers n=1250 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.7 hold_p99_us=2.2 hold_max_us=32.4
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.1 hold_max_us=16.3
+lock site=inode_live n=248 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=8.7 hold_max_us=28.1
+lock site=handles n=906 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.7 hold_p50_us=1.1 hold_p99_us=4.4 hold_max_us=21.1
+lock site=file_cell n=2442 wait_p50_us=0.0 wait_p99_us=1200.1 wait_max_us=3549.2 hold_p50_us=9.6 hold_p99_us=688.6 hold_max_us=3567.6
+lock site=cell_map n=3443 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=29.8 hold_p50_us=0.7 hold_p99_us=4.7 hold_max_us=35.6
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=13.2 hold_p99_us=323.6 hold_max_us=323.6
+STRESS seed=1795388557958978000 mode=many-files threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:38.055][FUSE] write: fh=7 ino=8 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.055][FUSE] write: fh=5 ino=11 switches to overlay (offset=12288 len=12288 expected=0 pending=8192 fresh=true overlap=true)
+[23:02:38.056][FUSE] write: fh=11 ino=9 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.079][rebase] ino=9 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=57344 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[23:02:38.079][FUSE] write: fh=14 ino=14 switches to overlay (offset=32768 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.100][rebase] ino=11 size=24576 free=8388608 cost_before=12352 taken=1/12288 rechunked=24576 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=20.7
+[t=1795388558.100][rebase] ino=14 size=45056 free=8388608 cost_before=4160 taken=1/4096 rechunked=12288 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.5
+[t=1795388558.121][rebase] ino=8 size=53248 free=8388608 cost_before=8256 taken=1/8192 rechunked=11210 base_read=3018 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=20.3
+[23:02:38.121][FUSE] write: fh=8 ino=13 switches to overlay (offset=49152 len=4096 expected=0 pending=24576 fresh=true overlap=true)
+[23:02:38.121][FUSE] write: fh=18 ino=8 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.121][FUSE] write: fh=19 ino=9 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.122][FUSE] write: fh=20 ino=16 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.124][FUSE] write: fh=23 ino=21 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.145][FUSE] write: fh=25 ino=22 switches to overlay (offset=16384 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.145][rebase] ino=13 size=65536 free=8388608 cost_before=41152 taken=3/40960 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.7
+[t=1795388558.146][rebase] ino=21 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:38.147][FUSE] write: fh=29 ino=19 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.147][rebase] ino=8 size=53248 free=8388608 cost_before=12352 taken=1/12288 rechunked=20480 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388558.147][rebase] ino=22 size=53248 free=8388608 cost_before=20544 taken=1/20480 rechunked=45456 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:38.148][FUSE] write: fh=30 ino=26 switches to overlay (offset=4096 len=16384 expected=0 pending=24576 fresh=true overlap=true)
+[t=1795388558.148][rebase] ino=9 size=57344 free=8388608 cost_before=28736 taken=1/28672 rechunked=45124 base_read=24576 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[t=1795388558.170][rebase] ino=26 size=65536 free=8388608 cost_before=28800 taken=2/28672 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=1.0
+[23:02:38.170][FUSE] write: fh=35 ino=28 switches to overlay (offset=32768 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.171][FUSE] write: fh=36 ino=27 switches to overlay (offset=32768 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.192][rebase] ino=27 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=26808 base_read=29776 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=20.2
+[23:02:38.233][FUSE] write: fh=44 ino=31 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.234][FUSE] write: fh=47 ino=34 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.235][rebase] ino=28 size=49152 free=8388608 cost_before=32896 taken=2/32768 rechunked=49152 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[23:02:38.235][FUSE] write: fh=49 ino=35 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.235][FUSE] write: fh=50 ino=32 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.236][rebase] ino=19 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=21522 base_read=8192 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388558.237][rebase] ino=32 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=20937 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388558.237][rebase] ino=16 size=61440 free=8388608 cost_before=49280 taken=2/49152 rechunked=61440 base_read=14720 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[t=1795388558.238][rebase] ino=35 size=57344 free=8388608 cost_before=8256 taken=1/8192 rechunked=57344 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:38.239][FUSE] write: fh=53 ino=40 switches to overlay (offset=0 len=16384 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:38.259][FUSE] write: fh=48 ino=23 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.262][rebase] ino=34 size=53248 free=8388608 cost_before=8320 taken=2/8192 rechunked=53248 base_read=53248 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[23:02:38.283][FUSE] write: fh=63 ino=44 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.285][FUSE] write: fh=65 ino=35 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.285][rebase] ino=31 size=57344 free=8388608 cost_before=37056 taken=3/36864 rechunked=57344 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=22.2
+[23:02:38.285][FUSE] write: fh=66 ino=49 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.285][rebase] ino=44 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=21308 base_read=828 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388558.306][rebase] ino=23 size=65536 free=8388608 cost_before=24640 taken=1/24576 rechunked=32768 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.4
+[23:02:38.307][FUSE] write: fh=72 ino=32 switches to overlay (offset=12288 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.307][FUSE] write: fh=73 ino=28 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.308][FUSE] write: fh=75 ino=44 switches to overlay (offset=32768 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.308][FUSE] write: fh=69 ino=27 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.309][FUSE] write: fh=77 ino=31 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.331][FUSE] write: fh=80 ino=9 switches to overlay (offset=16384 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.351][rebase] ino=40 size=57344 free=8388608 cost_before=45184 taken=2/45056 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=41.7
+[23:02:38.351][FUSE] write: fh=81 ino=58 switches to overlay (offset=4096 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.352][rebase] ino=31 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=18909 base_read=10717 reused_entries=5 reused_nodes=0 nodes_loaded=1 splice_ms=20.5
+[23:02:38.352][FUSE] write: fh=82 ino=38 switches to overlay (offset=36864 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.372][rebase] ino=28 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=17108 base_read=724 reused_entries=5 reused_nodes=0 nodes_loaded=1 splice_ms=20.2
+[t=1795388558.374][commit-cut] begin_ms=0 relog_bytes=167936 relog_ms=0
+[23:02:38.374][FUSE] write: fh=85 ino=56 switches to overlay (offset=8192 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.374][FUSE] write: fh=86 ino=45 switches to overlay (offset=28672 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.375][FUSE] write: fh=87 ino=34 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.376][rebase] ino=27 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=25595 base_read=13307 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388558.376][rebase] ino=9 size=57344 free=8388608 cost_before=12416 taken=2/12288 rechunked=35439 base_read=27179 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[23:02:38.376][FUSE] write: fh=89 ino=48 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.377][rebase] ino=32 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=40880 base_read=28672 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388558.377][rebase] ino=56 size=24576 free=8388608 cost_before=8256 taken=1/8192 rechunked=19360 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388558.440][rebase] ino=48 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=53959 base_read=45056 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=41.0
+[23:02:38.440][FUSE] write: fh=95 ino=56 switches to overlay (offset=45056 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.440][rebase] ino=44 size=57344 free=8388608 cost_before=36992 taken=2/36864 rechunked=57344 base_read=21308 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=61.2
+[23:02:38.440][FUSE] write: fh=97 ino=64 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.547][FUSE] write: fh=105 ino=61 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.568][FUSE] write: fh=91 ino=32 switches to overlay (offset=16384 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.568][FUSE] write: fh=106 ino=62 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.608][FUSE] write: fh=107 ino=70 switches to overlay (offset=12288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.649][commit-cut] finish_ms=275
+[23:02:38.650][FUSE] write: fh=114 ino=72 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.650][FUSE] write: fh=115 ino=47 switches to overlay (offset=0 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.650][rebase] ino=34 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=53248 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388558.671][rebase] ino=47 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=32768 base_read=32768 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=20.6
+[23:02:38.693][FUSE] write: fh=100 ino=68 switches to overlay (offset=49152 len=8192 expected=0 pending=12288 fresh=true overlap=true)
+[t=1795388558.693][rebase] ino=38 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=9030 base_read=838 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[23:02:38.694][FUSE] write: fh=123 ino=54 switches to overlay (offset=8192 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.715][rebase] ino=64 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=23333 base_read=6949 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388558.716][rebase] ino=58 size=32768 free=8388608 cost_before=8256 taken=1/8192 rechunked=32768 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:38.716][FUSE] write: fh=128 ino=34 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.716][FUSE] write: fh=99 ino=67 switches to overlay (offset=32768 len=8192 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:38.717][FUSE] write: fh=117 ino=43 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.718][FUSE] write: fh=130 ino=81 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.718][rebase] ino=49 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=30438 base_read=20480 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:38.719][FUSE] write: fh=134 ino=9 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.719][FUSE] write: fh=112 ino=50 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.720][FUSE] write: fh=136 ino=78 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.741][rebase] ino=9 size=57344 free=8388608 cost_before=8256 taken=1/8192 rechunked=25723 base_read=21279 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=20.3
+[t=1795388558.742][rebase] ino=81 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=27679 base_read=24576 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:38.764][FUSE] write: fh=139 ino=87 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.764][FUSE] write: fh=141 ino=77 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.765][rebase] ino=78 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=11882 base_read=7786 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[23:02:38.765][FUSE] write: fh=143 ino=78 switches to overlay (offset=24576 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.785][FUSE] write: fh=145 ino=58 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.786][FUSE] write: fh=147 ino=52 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.786][FUSE] write: fh=146 ino=71 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.787][rebase] ino=52 size=53248 free=8388608 cost_before=8256 taken=1/8192 rechunked=14913 base_read=2625 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388558.787][rebase] ino=70 size=16384 free=8388608 cost_before=8320 taken=2/8192 rechunked=16384 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:38.808][FUSE] write: fh=132 ino=83 switches to overlay (offset=16384 len=8192 expected=0 pending=24576 fresh=true overlap=true)
+[t=1795388558.833][rebase] ino=56 size=49152 free=8388608 cost_before=4160 taken=1/4096 rechunked=29792 base_read=5216 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=22.5
+[23:02:38.833][FUSE] write: fh=157 ino=49 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388558.854][rebase] ino=78 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=53654 base_read=49152 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.5
+[23:02:38.855][FUSE] write: fh=152 ino=94 switches to overlay (offset=20480 len=16384 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:38.857][FUSE] write: fh=161 ino=101 switches to overlay (offset=36864 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[t=1795388558.858][rebase] ino=34 size=53248 free=8388608 cost_before=36928 taken=1/36864 rechunked=53248 base_read=16384 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.4
+[23:02:38.858][FUSE] write: fh=158 ino=96 switches to overlay (offset=16384 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.859][FUSE] write: fh=166 ino=53 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.860][FUSE] write: fh=168 ino=31 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.902][FUSE] write: fh=165 ino=104 switches to overlay (offset=0 len=4096 expected=12288 pending=0 fresh=true overlap=false)
+[t=1795388558.904][rebase] ino=53 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=21266 base_read=4882 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388558.946][rebase] ino=96 size=49152 free=8388608 cost_before=4160 taken=1/4096 rechunked=47553 base_read=45056 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=22.2
+[t=1795388558.970][commit-cut] begin_ms=0 relog_bytes=593920 relog_ms=2
+[23:02:38.970][FUSE] write: fh=180 ino=41 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.970][FUSE] write: fh=181 ino=9 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:38.971][FUSE] write: fh=183 ino=89 switches to overlay (offset=4096 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.052][rebase] ino=94 size=36864 free=8388608 cost_before=28736 taken=1/28672 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=60.8
+[23:02:39.052][FUSE] write: fh=153 ino=95 switches to overlay (offset=8192 len=4096 expected=0 pending=12288 fresh=true overlap=true)
+[t=1795388559.052][rebase] ino=83 size=65536 free=8388608 cost_before=45184 taken=2/45056 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=80.8
+[t=1795388559.053][rebase] ino=43 size=40960 free=8388608 cost_before=12416 taken=2/12288 rechunked=40960 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:39.055][FUSE] write: fh=194 ino=86 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.055][FUSE] write: fh=195 ino=53 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.055][rebase] ino=71 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=21236 base_read=4852 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388559.056][rebase] ino=41 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=38278 base_read=5510 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:39.056][FUSE] write: fh=196 ino=52 switches to overlay (offset=16384 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.057][FUSE] write: fh=197 ino=111 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.057][rebase] ino=49 size=45056 free=8388608 cost_before=12352 taken=1/12288 rechunked=25825 base_read=13537 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388559.057][rebase] ino=32 size=61440 free=8388608 cost_before=41152 taken=3/40960 rechunked=61440 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.1
+[t=1795388559.099][rebase] ino=68 size=61440 free=8388608 cost_before=41152 taken=3/40960 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=21.8
+[23:02:39.099][FUSE] write: fh=201 ino=108 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.121][FUSE] write: fh=203 ino=122 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.122][FUSE] write: fh=172 ino=109 switches to overlay (offset=12288 len=16384 expected=0 pending=24576 fresh=true overlap=true)
+[23:02:39.163][FUSE] write: fh=205 ino=43 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.246][FUSE] write: fh=213 ino=119 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.266][commit-cut] finish_ms=296
+[23:02:39.267][FUSE] write: fh=221 ino=105 switches to overlay (offset=0 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.289][rebase] ino=45 size=36864 free=8388608 cost_before=32832 taken=1/32768 rechunked=36864 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.4
+[t=1795388559.289][rebase] ino=87 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=32768 base_read=14848 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:39.289][FUSE] write: fh=160 ino=100 switches to overlay (offset=28672 len=16384 expected=0 pending=8192 fresh=true overlap=true)
+[t=1795388559.290][rebase] ino=77 size=53248 free=8388608 cost_before=28800 taken=2/28672 rechunked=53248 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388559.290][rebase] ino=101 size=49152 free=8388608 cost_before=20544 taken=1/20480 rechunked=49152 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.8
+[23:02:39.292][FUSE] write: fh=227 ino=131 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.292][rebase] ino=54 size=57344 free=8388608 cost_before=8320 taken=2/8192 rechunked=57344 base_read=49152 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388559.292][rebase] ino=122 size=45056 free=8388608 cost_before=4160 taken=1/4096 rechunked=12288 base_read=4096 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388559.293][rebase] ino=35 size=57344 free=8388608 cost_before=36992 taken=2/36864 rechunked=57344 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:39.294][FUSE] write: fh=169 ino=106 switches to overlay (offset=57344 len=4096 expected=0 pending=8192 fresh=true overlap=true)
+[t=1795388559.294][rebase] ino=67 size=61440 free=8388608 cost_before=28800 taken=2/28672 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:39.294][FUSE] write: fh=224 ino=134 switches to overlay (offset=45056 len=8192 expected=0 pending=4096 fresh=true overlap=true)
+[t=1795388559.295][rebase] ino=104 size=53248 free=8388608 cost_before=8320 taken=2/8192 rechunked=53248 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:39.315][FUSE] write: fh=230 ino=130 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.316][rebase] ino=106 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=32768 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388559.317][rebase] ino=31 size=61440 free=8388608 cost_before=49216 taken=1/49152 rechunked=61440 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[23:02:39.318][FUSE] write: fh=178 ino=113 switches to overlay (offset=20480 len=8192 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:39.318][FUSE] write: fh=237 ino=35 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.339][FUSE] write: fh=192 ino=115 switches to overlay (offset=49152 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.340][FUSE] write: fh=245 ino=144 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.341][FUSE] write: fh=217 ino=125 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.341][FUSE] write: fh=185 ino=64 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.362][FUSE] write: fh=164 ino=103 switches to overlay (offset=45056 len=16384 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:39.362][FUSE] write: fh=235 ino=143 switches to overlay (offset=12288 len=4096 expected=0 pending=8192 fresh=true overlap=true)
+[t=1795388559.382][rebase] ino=113 size=36864 free=8388608 cost_before=16448 taken=1/16384 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.0
+[t=1795388559.383][rebase] ino=125 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=58155 base_read=13099 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.2
+[23:02:39.384][FUSE] write: fh=255 ino=153 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.384][FUSE] write: fh=251 ino=139 switches to overlay (offset=4096 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.384][FUSE] write: fh=257 ino=99 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.384][rebase] ino=134 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.6
+[23:02:39.385][FUSE] write: fh=259 ino=125 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.385][rebase] ino=64 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=27429 base_read=11045 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:39.386][FUSE] write: fh=242 ino=136 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.386][rebase] ino=131 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[t=1795388559.386][rebase] ino=58 size=61440 free=8388608 cost_before=41152 taken=3/40960 rechunked=50856 base_read=1704 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:39.387][FUSE] write: fh=232 ino=140 switches to overlay (offset=24576 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:39.387][FUSE] write: fh=236 ino=104 switches to overlay (offset=16384 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.389][FUSE] write: fh=272 ino=123 switches to overlay (offset=16384 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.389][FUSE] write: fh=261 ino=48 switches to overlay (offset=24576 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.389][rebase] ino=99 size=40960 free=8388608 cost_before=4160 taken=1/4096 rechunked=20179 base_read=16083 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:39.390][FUSE] write: fh=273 ino=152 switches to overlay (offset=12288 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.411][FUSE] write: fh=277 ino=150 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.432][FUSE] write: fh=279 ino=82 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.432][rebase] ino=140 size=36864 free=8388608 cost_before=16448 taken=1/16384 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=20.8
+[t=1795388559.435][rebase] ino=61 size=57344 free=8388608 cost_before=41088 taken=2/40960 rechunked=57344 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.3
+[23:02:39.435][FUSE] write: fh=247 ino=149 switches to overlay (offset=49152 len=12288 expected=0 pending=4096 fresh=true overlap=true)
+[23:02:39.436][FUSE] write: fh=275 ino=131 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.436][FUSE] write: fh=187 ino=110 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.436][rebase] ino=108 size=61440 free=8388608 cost_before=28864 taken=3/28672 rechunked=61440 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[23:02:39.436][FUSE] write: fh=284 ino=165 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.437][rebase] ino=111 size=32768 free=8388608 cost_before=16448 taken=1/16384 rechunked=20439 base_read=4055 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388559.437][rebase] ino=149 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=28672 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.5
+[23:02:39.437][FUSE] write: fh=287 ino=140 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.439][rebase] ino=119 size=53248 free=8388608 cost_before=20544 taken=1/20480 rechunked=51024 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:39.461][FUSE] write: fh=293 ino=172 switches to overlay (offset=16384 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.461][rebase] ino=152 size=20480 free=8388608 cost_before=8256 taken=1/8192 rechunked=12007 base_read=3815 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[t=1795388559.462][rebase] ino=52 size=53248 free=8388608 cost_before=12352 taken=1/12288 rechunked=27140 base_read=21573 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388559.482][rebase] ino=165 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=45948 base_read=53248 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=20.3
+[t=1795388559.584][rebase] ino=110 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=29696 base_read=9216 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.4
+[t=1795388559.584][rebase] ino=136 size=65536 free=8388608 cost_before=32832 taken=1/32768 rechunked=32768 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=60.7
+[t=1795388559.584][rebase] ino=125 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=25387 base_read=13099 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=40.1
+[t=1795388559.589][commit-cut] begin_ms=0 relog_bytes=917504 relog_ms=3
+[23:02:39.611][FUSE] write: fh=240 ino=114 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.631][rebase] ino=104 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=51850 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=41.0
+[23:02:39.652][FUSE] write: fh=298 ino=135 switches to overlay (offset=0 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.673][rebase] ino=82 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=28672 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.9
+[t=1795388559.713][rebase] ino=150 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=19387 base_read=7099 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.8
+[23:02:39.714][FUSE] write: fh=303 ino=167 switches to overlay (offset=12288 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.737][rebase] ino=130 size=53248 free=8388608 cost_before=12352 taken=1/12288 rechunked=37963 base_read=1099 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388559.737][rebase] ino=109 size=57344 free=8388608 cost_before=49216 taken=1/49152 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.3
+[23:02:39.738][FUSE] write: fh=256 ino=155 switches to overlay (offset=49152 len=12288 expected=0 pending=8192 fresh=true overlap=true)
+[t=1795388559.759][rebase] ino=35 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=20292 base_read=3908 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=20.8
+[23:02:39.759][FUSE] write: fh=313 ino=189 switches to overlay (offset=24576 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.759][FUSE] write: fh=286 ino=162 switches to overlay (offset=16384 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.760][FUSE] write: fh=314 ino=175 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.760][rebase] ino=172 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=40791 base_read=24576 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:39.760][FUSE] write: fh=315 ino=130 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.761][rebase] ino=162 size=49152 free=8388608 cost_before=8256 taken=1/8192 rechunked=47539 base_read=40960 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:39.761][FUSE] write: fh=317 ino=64 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.783][FUSE] write: fh=321 ino=182 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.804][rebase] ino=139 size=24576 free=8388608 cost_before=8256 taken=1/8192 rechunked=23257 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.2
+[t=1795388559.825][rebase] ino=43 size=57344 free=8388608 cost_before=24704 taken=2/24576 rechunked=57344 base_read=27880 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=62.8
+[23:02:39.909][FUSE] write: fh=326 ino=186 switches to overlay (offset=40960 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.972][commit-cut] finish_ms=382
+[t=1795388559.972][rebase] ino=114 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=19274 base_read=12288 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=21.0
+[t=1795388559.972][rebase] ino=95 size=65536 free=8388608 cost_before=49408 taken=4/49152 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=22.3
+[23:02:39.973][FUSE] write: fh=333 ino=174 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.973][rebase] ino=115 size=65536 free=8388608 cost_before=57984 taken=2/57344 rechunked=65536 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.7
+[23:02:39.973][FUSE] write: fh=334 ino=115 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.973][rebase] ino=9 size=57344 free=8388608 cost_before=28800 taken=2/28672 rechunked=53596 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:39.974][FUSE] write: fh=335 ino=165 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:39.974][FUSE] write: fh=228 ino=137 switches to overlay (offset=40960 len=16384 expected=0 pending=24576 fresh=true overlap=true)
+[23:02:39.974][FUSE] write: fh=328 ino=132 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.974][rebase] ino=135 size=16384 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[23:02:39.975][FUSE] write: fh=276 ino=118 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.975][rebase] ino=123 size=40960 free=8388608 cost_before=24704 taken=2/24576 rechunked=35413 base_read=2645 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388559.976][rebase] ino=186 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=28672 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388559.996][rebase] ino=131 size=49152 free=8388608 cost_before=20608 taken=2/20480 rechunked=49152 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.4
+[23:02:39.996][FUSE] write: fh=338 ino=108 switches to overlay (offset=12288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.996][rebase] ino=165 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=13192 base_read=11396 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=19.8
+[23:02:39.996][FUSE] write: fh=332 ino=52 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388559.997][rebase] ino=130 size=53248 free=8388608 cost_before=12352 taken=1/12288 rechunked=15285 base_read=8192 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388559.997][rebase] ino=105 size=61440 free=8388608 cost_before=24832 taken=4/24576 rechunked=61440 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[23:02:39.997][FUSE] write: fh=337 ino=31 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:40.018][FUSE] write: fh=295 ino=177 switches to overlay (offset=0 len=16384 expected=0 pending=20480 fresh=true overlap=true)
+[23:02:40.018][FUSE] write: fh=346 ino=183 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388560.042][rebase] ino=183 size=53248 free=8388608 cost_before=4160 taken=1/4096 rechunked=53248 base_read=49152 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=23.2
+[t=1795388560.064][rebase] ino=140 size=36864 free=8388608 cost_before=4160 taken=1/4096 rechunked=22651 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.5
+[t=1795388560.065][rebase] ino=167 size=20480 free=8388608 cost_before=8256 taken=1/8192 rechunked=20480 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.2
+[t=1795388560.066][rebase] ino=100 size=57344 free=8388608 cost_before=49280 taken=2/49152 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388560.066][rebase] ino=108 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=25799 base_read=28672 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388560.066][rebase] ino=144 size=53248 free=8388608 cost_before=24704 taken=2/24576 rechunked=53248 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[t=1795388560.066][rebase] ino=64 size=65536 free=8388608 cost_before=16512 taken=2/16384 rechunked=44992 base_read=31963 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.6
+[t=1795388560.067][rebase] ino=155 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=32768 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388560.068][rebase] ino=175 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=28672 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388560.068][rebase] ino=174 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=54666 base_read=1418 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388560.068][rebase] ino=72 size=61440 free=8388608 cost_before=37056 taken=3/36864 rechunked=61440 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[t=1795388560.069][rebase] ino=143 size=20480 free=8388608 cost_before=8256 taken=1/8192 rechunked=20480 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.4
+[t=1795388560.069][rebase] ino=189 size=57344 free=8388608 cost_before=20544 taken=1/20480 rechunked=57344 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388560.069][rebase] ino=62 size=40960 free=8388608 cost_before=36992 taken=2/36864 rechunked=40960 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388560.070][rebase] ino=153 size=45056 free=8388608 cost_before=20608 taken=2/20480 rechunked=45056 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388560.070][rebase] ino=48 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=43263 base_read=34360 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388560.071][rebase] ino=182 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=61440 base_read=53248 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388560.071][rebase] ino=132 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=32768 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388560.071][rebase] ino=86 size=53248 free=8388608 cost_before=8256 taken=1/8192 rechunked=29184 base_read=12800 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388560.072][rebase] ino=118 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=12714 base_read=426 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388560.072][rebase] ino=31 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=19303 base_read=12084 reused_entries=5 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388560.073][rebase] ino=137 size=57344 free=8388608 cost_before=32896 taken=2/32768 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388560.073][rebase] ino=115 size=65536 free=8388608 cost_before=20544 taken=1/20480 rechunked=33069 base_read=24576 reused_entries=5 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388560.073][rebase] ino=52 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=19009 base_read=2625 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388560.075][rebase] ino=53 size=61440 free=8388608 cost_before=28800 taken=2/28672 rechunked=53280 base_read=29490 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388560.076][rebase] ino=89 size=57344 free=8388608 cost_before=32896 taken=2/32768 rechunked=53658 base_read=24576 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388560.077][rebase] ino=103 size=61440 free=8388608 cost_before=41088 taken=2/40960 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388560.078][rebase] ino=50 size=57344 free=8388608 cost_before=57408 taken=1/57344 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388560.080][rebase] ino=177 size=57344 free=8388608 cost_before=41088 taken=2/40960 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388560.153][commit-cut] begin_ms=20 relog_bytes=0 relog_ms=0
+[t=1795388560.304][commit-cut] finish_ms=150
+report mode=many-files (closed loop: no coordinated-omission correction)
+op=read n=754 p50_us=39.4 p99_us=19710.0 p999_us=61145.1 max_us=61145.1
+op=write n=514 p50_us=168.8 p99_us=21758.0 p999_us=40370.2 max_us=40370.2
+op=fsync n=57 p50_us=20856.8 p99_us=80805.9 p999_us=80805.9 max_us=80805.9
+op=create n=203 p50_us=99.8 p99_us=20971.5 p999_us=21692.4 max_us=21692.4
+op=rename n=129 p50_us=85.6 p99_us=21053.4 p999_us=21348.4 max_us=21348.4
+op=unlink n=120 p50_us=144.5 p99_us=21413.9 p999_us=21659.6 max_us=21659.6
+op=open n=146 p50_us=17.3 p99_us=62.0 p999_us=109.4 max_us=109.4
+op=release n=349 p50_us=1117.2 p99_us=65634.3 p999_us=85590.0 max_us=85590.0
+op=lookup n=581 p50_us=9.3 p99_us=48.6 p999_us=82.5 max_us=82.5
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2853 p50_us=0.5 p99_us=2.3 p999_us=5095.4 max_us=5787.6
+op=gate_hold n=2853 p50_us=75.2 p99_us=42401.8 p999_us=80871.4 max_us=85590.0
+op=commit_gate_wait n=4 p50_us=498.4 p99_us=971.8 p999_us=971.8 max_us=971.8
+op=commit_hold n=4 p50_us=3221.5 p99_us=20807.7 p999_us=20807.7 max_us=20807.7
+op=commit_total n=4 p50_us=277348.4 p99_us=388497.4 p999_us=388497.4 max_us=388497.4
+max_inflight=4
+lock site=store n=11324 wait_p50_us=0.0 wait_p99_us=32.0 wait_max_us=117.4 hold_p50_us=2.3 hold_p99_us=25.9 hold_max_us=122.2
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=466.7 hold_max_us=466.7
+lock site=wal n=3512 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.9 hold_p50_us=0.4 hold_p99_us=1.7 hold_max_us=27.3
+lock site=wal_writer n=4942 wait_p50_us=0.0 wait_p99_us=0.9 wait_max_us=22.6 hold_p50_us=1.2 hold_p99_us=16.8 hold_max_us=53.2
+lock site=wal_queue n=3074 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.4 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=18.1
+lock site=readers n=560 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=11.9 hold_p50_us=1.3 hold_p99_us=11.0 hold_max_us=48.8
+lock site=dir_live n=2323 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=39.1 hold_p50_us=3.1 hold_p99_us=17.6 hold_max_us=32.6
+lock site=inode_live n=4039 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.8 hold_p50_us=1.8 hold_p99_us=9.9 hold_max_us=99.4
+lock site=handles n=1987 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.5 hold_p50_us=1.6 hold_p99_us=5.3 hold_max_us=34.4
+lock site=file_cell n=3889 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.7 hold_p99_us=96.3 hold_max_us=356.1
+lock site=cell_map n=3183 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.4 hold_p50_us=1.1 hold_p99_us=5.4 hold_max_us=14.8
+lock site=stripe n=1638 wait_p50_us=0.0 wait_p99_us=16.4 wait_max_us=122.1 hold_p50_us=28.6 hold_p99_us=165.8 hold_max_us=21545.0
+STRESS seed=1795388560379425000 mode=multi-handle threads=4 serialize=false ops_per_thread=timed secs=1
+[23:02:40.518][FUSE] write: fh=3 ino=2 switches to overlay (offset=266240 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388560.861][commit-cut] begin_ms=0 relog_bytes=321536 relog_ms=3
+[t=1795388561.163][commit-cut] finish_ms=301
+[t=1795388561.446][commit-cut] begin_ms=0 relog_bytes=837120 relog_ms=5
+[t=1795388561.589][commit-cut] finish_ms=142
+[t=1795388561.630][rebase] ino=2 size=4253184 free=8388608 cost_before=915678 taken=163/902656 rechunked=3859968 base_read=3244662 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=81.2
+[t=1795388561.688][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388561.835][commit-cut] finish_ms=146
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+op=read n=392 p50_us=21.4 p99_us=165.1 p999_us=194.2 max_us=194.2
+op=write n=225 p50_us=189.3 p99_us=53837.8 p999_us=81788.9 max_us=81788.9
+op=fsync n=23 p50_us=42991.6 p99_us=160956.4 p999_us=160956.4 max_us=160956.4
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=12 p50_us=26.6 p99_us=70.1 p999_us=70.1 max_us=70.1
+op=release n=12 p50_us=9.4 p99_us=81920.0 p999_us=81920.0 max_us=81920.0
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=115 p50_us=142.8 p99_us=41287.7 p999_us=53805.1 max_us=53805.1
+op=gate_wait n=779 p50_us=0.5 p99_us=4370.4 p999_us=6492.2 max_us=6492.2
+op=gate_hold n=779 p50_us=57.2 p99_us=78118.9 p999_us=160956.4 max_us=160956.4
+op=commit_gate_wait n=3 p50_us=663.6 p99_us=19710.0 p999_us=19710.0 max_us=19710.0
+op=commit_hold n=3 p50_us=4362.2 p99_us=6201.3 p999_us=6201.3 max_us=6201.3
+op=commit_total n=3 p50_us=168034.3 p99_us=306708.5 p999_us=306708.5 max_us=306708.5
+max_inflight=4
+lock site=store n=3096 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.9 hold_p99_us=5.6 hold_max_us=62.1
+lock site=io n=6 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=309.8 hold_max_us=309.8
+lock site=wal n=1225 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.4 hold_p50_us=0.3 hold_p99_us=1.9 hold_max_us=11.8
+lock site=wal_writer n=1933 wait_p50_us=0.0 wait_p99_us=2.6 wait_max_us=45.9 hold_p50_us=1.1 hold_p99_us=19.3 hold_max_us=55.6
+lock site=wal_queue n=1108 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=24.8
+lock site=readers n=1292 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.8 hold_p50_us=0.7 hold_p99_us=2.6 hold_max_us=5.3
+lock site=dir_live n=131 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.0 hold_max_us=12.3
+lock site=inode_live n=159 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=8.1 hold_max_us=13.9
+lock site=handles n=402 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=5.3 hold_p50_us=1.2 hold_p99_us=16.5 hold_max_us=31.3
+lock site=file_cell n=1015 wait_p50_us=0.0 wait_p99_us=88.1 wait_max_us=134.4 hold_p50_us=6.0 hold_p99_us=75.1 hold_max_us=398.1
+lock site=cell_map n=1851 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=19.8 hold_p50_us=0.4 hold_p99_us=5.8 hold_max_us=18.0
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=1.0 wait_max_us=1.0 hold_p50_us=5.8 hold_p99_us=254.5 hold_max_us=254.5
+test serialize_off_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.46s
+
+load after: 15:02  up 31 days, 19:23, 8 users, load averages: 15.36 16.50 19.51
+load before: 15:02  up 31 days, 19:23, 8 users, load averages: 15.36 16.50 19.51
+=== run 2
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/stress_harness.rs (target/debug/deps/stress_harness-0fe249ea42622ea8)
+
+running 1 test
+STRESS seed=1795388564932083000 mode=one-file threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:45.100][FUSE] write: fh=3 ino=2 switches to overlay (offset=3149824 len=20480 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388565.419][commit-cut] begin_ms=0 relog_bytes=3268608 relog_ms=6
+[t=1795388565.549][commit-cut] finish_ms=129
+[t=1795388565.837][commit-cut] begin_ms=0 relog_bytes=3936256 relog_ms=8
+[t=1795388565.924][commit-cut] finish_ms=86
+[t=1795388566.189][commit-cut] begin_ms=0 relog_bytes=4104192 relog_ms=11
+[t=1795388566.320][commit-cut] finish_ms=131
+[t=1795388566.586][commit-cut] begin_ms=0 relog_bytes=4161536 relog_ms=12
+[t=1795388566.675][commit-cut] finish_ms=88
+[t=1795388566.953][commit-cut] begin_ms=0 relog_bytes=4177920 relog_ms=10
+[t=1795388567.080][commit-cut] finish_ms=126
+[t=1795388567.161][rebase] ino=2 size=4194304 free=8388608 cost_before=4287552 taken=4/4177920 rechunked=4194304 base_read=16384 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=57.0
+[t=1795388567.195][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388567.279][commit-cut] finish_ms=83
+report mode=one-file (closed loop: no coordinated-omission correction)
+op=read n=1596 p50_us=17.0 p99_us=1142.8 p999_us=4886.5 max_us=4984.8
+op=write n=963 p50_us=260.5 p99_us=38862.8 p999_us=43974.7 max_us=43974.7
+op=fsync n=56 p50_us=21463.0 p99_us=119406.6 p999_us=119406.6 max_us=119406.6
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=4 p50_us=36.5 p99_us=54.4 p999_us=54.4 max_us=54.4
+op=release n=4 p50_us=16.1 p99_us=59539.5 p999_us=59539.5 max_us=59539.5
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2623 p50_us=0.6 p99_us=9.5 p999_us=29261.8 max_us=29556.7
+op=gate_hold n=2623 p50_us=41.2 p99_us=34832.4 p999_us=74973.2 max_us=119406.6
+op=commit_gate_wait n=6 p50_us=436.0 p99_us=25624.6 p999_us=25624.6 max_us=25624.6
+op=commit_hold n=6 p50_us=9314.3 p99_us=13484.0 p999_us=13484.0 max_us=13484.0
+op=commit_total n=6 p50_us=121438.2 p99_us=149291.0 p999_us=149291.0 max_us=149291.0
+max_inflight=4
+lock site=store n=3986 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.7 hold_p99_us=6.4 hold_max_us=67.5
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=563.7 hold_max_us=563.7
+lock site=wal n=2296 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=1.9 hold_max_us=25.6
+lock site=wal_writer n=3751 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=33.6 hold_p50_us=1.5 hold_p99_us=20.4 hold_max_us=37.8
+lock site=wal_queue n=2110 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.7 hold_p99_us=9.0 hold_max_us=35.1
+lock site=readers n=1221 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.8 hold_p99_us=2.5 hold_max_us=7.0
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.5 hold_max_us=14.4
+lock site=inode_live n=249 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.8 hold_max_us=29.8
+lock site=handles n=1034 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=89.5 hold_p50_us=1.5 hold_p99_us=4.9 hold_max_us=25.6
+lock site=file_cell n=2759 wait_p50_us=0.0 wait_p99_us=1198.1 wait_max_us=6254.6 hold_p50_us=10.4 hold_p99_us=758.3 hold_max_us=6627.3
+lock site=cell_map n=3749 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=27.0 hold_p50_us=0.8 hold_p99_us=5.4 hold_max_us=31.4
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=13.9 hold_p99_us=330.5 hold_max_us=330.5
+STRESS seed=1795388567386771000 mode=many-files threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:47.503][FUSE] write: fh=5 ino=8 switches to overlay (offset=36864 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.504][FUSE] write: fh=8 ino=9 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.524][FUSE] write: fh=11 ino=11 switches to overlay (offset=20480 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.524][FUSE] write: fh=4 ino=10 switches to overlay (offset=16384 len=16384 expected=0 pending=20480 fresh=true overlap=true)
+[t=1795388567.526][rebase] ino=10 size=65536 free=8388608 cost_before=28800 taken=2/28672 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:47.527][FUSE] write: fh=16 ino=14 switches to overlay (offset=0 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.529][rebase] ino=9 size=32768 free=8388608 cost_before=24704 taken=2/24576 rechunked=32768 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:47.529][FUSE] write: fh=19 ino=19 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.529][FUSE] write: fh=20 ino=9 switches to overlay (offset=12288 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.530][rebase] ino=11 size=32768 free=8388608 cost_before=12352 taken=1/12288 rechunked=14135 base_read=1847 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[23:02:47.530][FUSE] write: fh=21 ino=13 switches to overlay (offset=8192 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.530][rebase] ino=8 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=12288 base_read=4096 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:47.532][FUSE] write: fh=28 ino=21 switches to overlay (offset=24576 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.532][rebase] ino=14 size=57344 free=8388608 cost_before=4160 taken=1/4096 rechunked=32768 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:47.533][FUSE] write: fh=30 ino=18 switches to overlay (offset=12288 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.534][FUSE] write: fh=35 ino=20 switches to overlay (offset=8192 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.535][FUSE] write: fh=12 ino=15 switches to overlay (offset=57344 len=4096 expected=0 pending=20480 fresh=true overlap=true)
+[t=1795388567.536][rebase] ino=13 size=40960 free=8388608 cost_before=20608 taken=2/20480 rechunked=40960 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388567.537][rebase] ino=20 size=49152 free=8388608 cost_before=8256 taken=1/8192 rechunked=49140 base_read=40960 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:47.537][FUSE] write: fh=40 ino=10 switches to overlay (offset=32768 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.537][FUSE] write: fh=41 ino=26 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.559][FUSE] write: fh=26 ino=8 switches to overlay (offset=57344 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.559][FUSE] write: fh=43 ino=17 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.560][FUSE] write: fh=44 ino=34 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.561][rebase] ino=18 size=65536 free=8388608 cost_before=16512 taken=2/16384 rechunked=65536 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.1
+[t=1795388567.562][rebase] ino=34 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=42664 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388567.562][rebase] ino=10 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=37437 base_read=21870 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.9
+[23:02:47.563][FUSE] write: fh=48 ino=20 switches to overlay (offset=57344 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.563][rebase] ino=21 size=65536 free=8388608 cost_before=20544 taken=1/20480 rechunked=65536 base_read=45056 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[23:02:47.585][FUSE] write: fh=51 ino=36 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.586][rebase] ino=9 size=32768 free=8388608 cost_before=8256 taken=1/8192 rechunked=30523 base_read=24576 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388567.586][rebase] ino=15 size=61440 free=8388608 cost_before=28800 taken=2/28672 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=1.3
+[23:02:47.589][FUSE] write: fh=63 ino=46 switches to overlay (offset=24576 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.590][rebase] ino=19 size=65536 free=8388608 cost_before=41152 taken=3/40960 rechunked=65536 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[t=1795388567.590][rebase] ino=46 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=48934 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388567.591][rebase] ino=20 size=61440 free=8388608 cost_before=16512 taken=2/16384 rechunked=52683 base_read=28119 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.6
+[23:02:47.592][FUSE] write: fh=65 ino=9 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.612][FUSE] write: fh=66 ino=34 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.612][FUSE] write: fh=70 ino=48 switches to overlay (offset=8192 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.613][rebase] ino=9 size=32768 free=8388608 cost_before=4160 taken=1/4096 rechunked=30523 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388567.616][rebase] ino=8 size=65536 free=8388608 cost_before=24704 taken=2/24576 rechunked=54814 base_read=38430 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[23:02:47.616][FUSE] write: fh=80 ino=45 switches to overlay (offset=20480 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.617][rebase] ino=48 size=12288 free=8388608 cost_before=4160 taken=1/4096 rechunked=12288 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:47.677][FUSE] write: fh=83 ino=52 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.677][FUSE] write: fh=84 ino=48 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.678][FUSE] write: fh=85 ino=53 switches to overlay (offset=16384 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.719][rebase] ino=36 size=61440 free=8388608 cost_before=37056 taken=3/36864 rechunked=61440 base_read=21919 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=42.3
+[23:02:47.777][FUSE] write: fh=89 ino=42 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.819][rebase] ino=48 size=45056 free=8388608 cost_before=16512 taken=2/16384 rechunked=45056 base_read=8956 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=41.3
+[t=1795388567.819][rebase] ino=52 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=41260 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.1
+[t=1795388567.819][rebase] ino=34 size=49152 free=8388608 cost_before=16512 taken=2/16384 rechunked=49152 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=41.7
+[t=1795388567.821][commit-cut] begin_ms=0 relog_bytes=159744 relog_ms=0
+[23:02:47.842][FUSE] write: fh=92 ino=13 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.842][FUSE] write: fh=91 ino=36 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.922][FUSE] write: fh=98 ino=54 switches to overlay (offset=49152 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.923][FUSE] write: fh=90 ino=60 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.924][FUSE] write: fh=99 ino=34 switches to overlay (offset=49152 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388567.924][rebase] ino=17 size=65536 free=8388608 cost_before=32896 taken=2/32768 rechunked=65536 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.6
+[t=1795388567.924][rebase] ino=42 size=40960 free=8388608 cost_before=4160 taken=1/4096 rechunked=40960 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.3
+[23:02:47.925][FUSE] write: fh=103 ino=18 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:47.925][FUSE] write: fh=82 ino=61 switches to overlay (offset=12288 len=12288 expected=0 pending=20480 fresh=true overlap=true)
+[t=1795388568.054][rebase] ino=13 size=40960 free=8388608 cost_before=24640 taken=1/24576 rechunked=39855 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=106.1
+[t=1795388568.074][rebase] ino=53 size=61440 free=8388608 cost_before=20608 taken=2/20480 rechunked=61440 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=66.2
+[23:02:48.075][FUSE] write: fh=109 ino=30 switches to overlay (offset=20480 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.097][FUSE] write: fh=106 ino=35 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.133][FUSE] write: fh=61 ino=49 switches to overlay (offset=32768 len=16384 expected=0 pending=20480 fresh=true overlap=true)
+[t=1795388568.206][commit-cut] finish_ms=385
+[23:02:48.207][FUSE] write: fh=116 ino=48 switches to overlay (offset=20480 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.208][rebase] ino=49 size=57344 free=8388608 cost_before=24640 taken=1/24576 rechunked=24576 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[23:02:48.208][FUSE] write: fh=93 ino=52 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.209][FUSE] write: fh=69 ino=23 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.209][FUSE] write: fh=101 ino=39 switches to overlay (offset=36864 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.211][FUSE] write: fh=87 ino=20 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.213][FUSE] write: fh=115 ino=53 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.213][FUSE] write: fh=122 ino=50 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.236][rebase] ino=48 size=45056 free=8388608 cost_before=12352 taken=1/12288 rechunked=23031 base_read=17148 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:48.288][FUSE] write: fh=135 ino=67 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.288][rebase] ino=50 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=25705 base_read=9321 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:48.289][FUSE] write: fh=137 ino=82 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.289][FUSE] write: fh=107 ino=69 switches to overlay (offset=40960 len=8192 expected=0 pending=28672 fresh=true overlap=true)
+[23:02:48.326][FUSE] write: fh=73 ino=55 switches to overlay (offset=28672 len=8192 expected=0 pending=24576 fresh=true overlap=true)
+[23:02:48.327][FUSE] write: fh=142 ino=81 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.328][rebase] ino=34 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=16701 base_read=317 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388568.328][rebase] ino=23 size=65536 free=8388608 cost_before=24640 taken=1/24576 rechunked=32768 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:48.328][FUSE] write: fh=145 ino=86 switches to overlay (offset=16384 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.329][FUSE] write: fh=132 ino=88 switches to overlay (offset=28672 len=4096 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:48.329][FUSE] write: fh=130 ino=80 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.366][rebase] ino=53 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=35013 base_read=30917 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=36.3
+[23:02:48.424][FUSE] write: fh=152 ino=62 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.425][FUSE] write: fh=154 ino=23 switches to overlay (offset=32768 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.425][FUSE] write: fh=147 ino=91 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.466][rebase] ino=23 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=42468 base_read=40960 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=20.6
+[23:02:48.466][FUSE] write: fh=156 ino=79 switches to overlay (offset=8192 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.503][FUSE] write: fh=158 ino=99 switches to overlay (offset=20480 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.504][FUSE] write: fh=123 ino=78 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.528][commit-cut] begin_ms=0 relog_bytes=606208 relog_ms=2
+[23:02:48.528][FUSE] write: fh=113 ino=74 switches to overlay (offset=16384 len=8192 expected=20480 pending=12288 fresh=true overlap=false)
+[23:02:48.530][FUSE] write: fh=164 ino=53 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.531][rebase] ino=39 size=65536 free=8388608 cost_before=24704 taken=2/24576 rechunked=59251 base_read=6003 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=2.3
+[23:02:48.531][FUSE] write: fh=165 ino=23 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.575][rebase] ino=55 size=36864 free=8388608 cost_before=24704 taken=2/24576 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=43.8
+[t=1795388568.576][rebase] ino=82 size=57344 free=8388608 cost_before=4160 taken=1/4096 rechunked=16005 base_read=12288 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388568.597][rebase] ino=74 size=49152 free=8388608 cost_before=20608 taken=2/20480 rechunked=35463 base_read=2695 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.4
+[23:02:48.598][FUSE] write: fh=168 ino=100 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.622][rebase] ino=60 size=32768 free=8388608 cost_before=4160 taken=1/4096 rechunked=32768 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=23.8
+[t=1795388568.623][rebase] ino=78 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=54988 base_read=1740 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[23:02:48.650][FUSE] write: fh=170 ino=98 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.650][FUSE] write: fh=157 ino=104 switches to overlay (offset=36864 len=16384 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:48.651][FUSE] write: fh=172 ino=103 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.651][FUSE] write: fh=173 ino=17 switches to overlay (offset=16384 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.756][FUSE] write: fh=178 ino=105 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.756][FUSE] write: fh=179 ino=84 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.756][FUSE] write: fh=180 ino=115 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.776][FUSE] write: fh=181 ino=48 switches to overlay (offset=16384 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.776][FUSE] write: fh=94 ino=63 switches to overlay (offset=20480 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[t=1795388568.817][rebase] ino=53 size=61440 free=8388608 cost_before=28736 taken=1/28672 rechunked=61440 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=40.6
+[t=1795388568.837][commit-cut] finish_ms=309
+[t=1795388568.838][rebase] ino=84 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=45056 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=40.8
+[23:02:48.838][FUSE] write: fh=185 ino=94 switches to overlay (offset=0 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.839][FUSE] write: fh=193 ino=113 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.840][rebase] ino=81 size=53248 free=8388608 cost_before=20608 taken=2/20480 rechunked=50996 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:48.862][FUSE] write: fh=128 ino=85 switches to overlay (offset=16384 len=12288 expected=0 pending=32768 fresh=true overlap=true)
+[t=1795388568.862][rebase] ino=35 size=49152 free=8388608 cost_before=28800 taken=2/28672 rechunked=44143 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[t=1795388568.863][rebase] ino=45 size=57344 free=8388608 cost_before=20544 taken=1/20480 rechunked=45494 base_read=28672 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[23:02:48.864][FUSE] write: fh=201 ino=81 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.864][FUSE] write: fh=202 ino=72 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.865][rebase] ino=81 size=53248 free=8388608 cost_before=8256 taken=1/8192 rechunked=17119 base_read=8927 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388568.866][rebase] ino=88 size=40960 free=8388608 cost_before=12352 taken=1/12288 rechunked=40960 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.7
+[t=1795388568.888][rebase] ino=98 size=53248 free=8388608 cost_before=28800 taken=2/28672 rechunked=44978 base_read=18213 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388568.888][rebase] ino=36 size=61440 free=8388608 cost_before=20544 taken=1/20480 rechunked=30111 base_read=9631 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[23:02:48.888][FUSE] write: fh=139 ino=93 switches to overlay (offset=40960 len=16384 expected=12288 pending=16384 fresh=true overlap=true)
+[23:02:48.888][FUSE] write: fh=213 ino=36 switches to overlay (offset=16384 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.889][FUSE] write: fh=207 ino=134 switches to overlay (offset=28672 len=8192 expected=0 pending=24576 fresh=true overlap=true)
+[t=1795388568.890][rebase] ino=99 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=41646 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:48.890][FUSE] write: fh=218 ino=101 switches to overlay (offset=32768 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.890][FUSE] write: fh=222 ino=74 switches to overlay (offset=20480 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.891][rebase] ino=62 size=45056 free=8388608 cost_before=24704 taken=2/24576 rechunked=45056 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388568.912][rebase] ino=36 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=43152 base_read=32768 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=20.7
+[23:02:48.912][FUSE] write: fh=225 ino=133 switches to overlay (offset=12288 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.914][FUSE] write: fh=227 ino=143 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.914][rebase] ino=134 size=53248 free=8388608 cost_before=28800 taken=2/28672 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=1.1
+[23:02:48.914][FUSE] write: fh=228 ino=138 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.915][FUSE] write: fh=186 ino=120 switches to overlay (offset=28672 len=8192 expected=0 pending=24576 fresh=true overlap=true)
+[23:02:48.915][FUSE] write: fh=216 ino=127 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.992][rebase] ino=100 size=57344 free=8388608 cost_before=28864 taken=3/28672 rechunked=57344 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=37.0
+[t=1795388568.993][rebase] ino=143 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:48.994][FUSE] write: fh=232 ino=100 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:48.995][FUSE] write: fh=235 ino=144 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.995][rebase] ino=86 size=61440 free=8388608 cost_before=45120 taken=1/45056 rechunked=61440 base_read=16384 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[23:02:48.997][FUSE] write: fh=240 ino=128 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388568.998][rebase] ino=74 size=49152 free=8388608 cost_before=4160 taken=1/4096 rechunked=26998 base_read=23175 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:49.020][FUSE] write: fh=247 ino=78 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.021][FUSE] write: fh=177 ino=116 switches to overlay (offset=12288 len=16384 expected=0 pending=28672 fresh=true overlap=true)
+[23:02:49.043][FUSE] write: fh=252 ino=134 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.064][FUSE] write: fh=254 ino=147 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.064][FUSE] write: fh=257 ino=146 switches to overlay (offset=57344 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.087][rebase] ino=61 size=57344 free=8388608 cost_before=28864 taken=3/28672 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.7
+[t=1795388569.087][rebase] ino=93 size=65536 free=8388608 cost_before=28736 taken=1/28672 rechunked=65536 base_read=12288 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.9
+[t=1795388569.089][rebase] ino=78 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=53077 base_read=46796 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[23:02:49.090][FUSE] write: fh=262 ino=154 switches to overlay (offset=16384 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.091][FUSE] write: fh=265 ino=151 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.091][rebase] ino=80 size=57344 free=8388608 cost_before=41088 taken=2/40960 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:49.092][FUSE] write: fh=269 ino=159 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.133][rebase] ino=79 size=45056 free=8388608 cost_before=12416 taken=2/12288 rechunked=45056 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=40.8
+[t=1795388569.133][rebase] ino=146 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=39138 base_read=6370 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=39.9
+[t=1795388569.133][rebase] ino=20 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=24266 base_read=10161 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=40.5
+[t=1795388569.133][rebase] ino=105 size=61440 free=8388608 cost_before=41088 taken=2/40960 rechunked=53413 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=41.4
+[t=1795388569.139][commit-cut] begin_ms=0 relog_bytes=929792 relog_ms=4
+[23:02:49.139][FUSE] write: fh=208 ino=135 switches to overlay (offset=32768 len=12288 expected=0 pending=24576 fresh=true overlap=true)
+[t=1795388569.141][rebase] ino=134 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=25977 base_read=17785 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388569.142][rebase] ino=63 size=61440 free=8388608 cost_before=20608 taken=2/20480 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.0
+[23:02:49.143][FUSE] write: fh=275 ino=96 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.163][FUSE] write: fh=276 ino=61 switches to overlay (offset=32768 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.204][FUSE] write: fh=279 ino=157 switches to overlay (offset=20480 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.204][FUSE] write: fh=261 ino=168 switches to overlay (offset=49152 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:49.205][FUSE] write: fh=264 ino=162 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.206][rebase] ino=67 size=57344 free=8388608 cost_before=37120 taken=4/36864 rechunked=57344 base_read=18488 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.5
+[23:02:49.207][FUSE] write: fh=287 ino=93 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.208][rebase] ino=120 size=36864 free=8388608 cost_before=24704 taken=2/24576 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.8
+[23:02:49.208][FUSE] write: fh=289 ino=155 switches to overlay (offset=24576 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.209][rebase] ino=127 size=40960 free=8388608 cost_before=16512 taken=2/16384 rechunked=29960 base_read=5384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.230][rebase] ino=18 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=59492 base_read=45056 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.6
+[t=1795388569.231][rebase] ino=151 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=27084 base_read=16384 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:49.252][FUSE] write: fh=297 ino=163 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.252][FUSE] write: fh=298 ino=176 switches to overlay (offset=28672 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.252][FUSE] write: fh=299 ino=181 switches to overlay (offset=45056 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.334][rebase] ino=69 size=65536 free=8388608 cost_before=32960 taken=3/32768 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=61.5
+[t=1795388569.355][rebase] ino=54 size=57344 free=8388608 cost_before=53376 taken=2/53248 rechunked=57344 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=81.0
+[t=1795388569.375][rebase] ino=85 size=53248 free=8388608 cost_before=32960 taken=3/32768 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=80.8
+[23:02:49.375][FUSE] write: fh=220 ino=142 switches to overlay (offset=16384 len=12288 expected=0 pending=28672 fresh=true overlap=true)
+[23:02:49.395][FUSE] write: fh=305 ino=185 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:49.415][FUSE] write: fh=241 ino=114 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.435][commit-cut] finish_ms=296
+[23:02:49.491][FUSE] write: fh=309 ino=18 switches to overlay (offset=49152 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388569.491][rebase] ino=101 size=40960 free=8388608 cost_before=12352 taken=1/12288 rechunked=19255 base_read=6967 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=19.2
+[t=1795388569.515][rebase] ino=100 size=57344 free=8388608 cost_before=4160 taken=1/4096 rechunked=38741 base_read=40422 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.515][rebase] ino=26 size=65536 free=8388608 cost_before=45120 taken=1/45056 rechunked=52904 base_read=7848 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.516][rebase] ino=18 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=32768 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.516][rebase] ino=138 size=40960 free=8388608 cost_before=16448 taken=1/16384 rechunked=29998 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.516][rebase] ino=93 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=45464 base_read=40960 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388569.517][rebase] ino=155 size=28672 free=8388608 cost_before=4160 taken=1/4096 rechunked=28672 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388569.517][rebase] ino=103 size=49152 free=8388608 cost_before=28736 taken=1/28672 rechunked=45236 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388569.517][rebase] ino=142 size=36864 free=8388608 cost_before=28736 taken=1/28672 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388569.518][rebase] ino=159 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=18956 base_read=2572 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388569.519][rebase] ino=163 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=27692 base_read=3116 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.519][rebase] ino=154 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=49163 base_read=36864 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.519][rebase] ino=30 size=65536 free=8388608 cost_before=41152 taken=3/40960 rechunked=65536 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388569.520][rebase] ino=116 size=57344 free=8388608 cost_before=41088 taken=2/40960 rechunked=57344 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.9
+[t=1795388569.520][rebase] ino=162 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=37006 base_read=142 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.520][rebase] ino=181 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=46788 base_read=1732 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.520][rebase] ino=52 size=49152 free=8388608 cost_before=32896 taken=2/32768 rechunked=49152 base_read=16384 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388569.521][rebase] ino=91 size=65536 free=8388608 cost_before=16512 taken=2/16384 rechunked=54663 base_read=1415 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388569.522][rebase] ino=185 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=41593 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.522][rebase] ino=114 size=49152 free=8388608 cost_before=8256 taken=1/8192 rechunked=29148 base_read=22987 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.522][rebase] ino=23 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=42468 base_read=24576 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388569.522][rebase] ino=135 size=65536 free=8388608 cost_before=32896 taken=2/32768 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388569.522][rebase] ino=61 size=57344 free=8388608 cost_before=8256 taken=1/8192 rechunked=26492 base_read=20644 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.523][rebase] ino=133 size=24576 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.523][rebase] ino=115 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=12570 base_read=282 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388569.523][rebase] ino=96 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=41785 base_read=32768 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388569.524][rebase] ino=144 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[t=1795388569.524][rebase] ino=94 size=16384 free=8388608 cost_before=12416 taken=2/12288 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388569.525][rebase] ino=48 size=45056 free=8388608 cost_before=20608 taken=2/20480 rechunked=45056 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.525][rebase] ino=147 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=61440 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388569.526][rebase] ino=104 size=53248 free=8388608 cost_before=32832 taken=1/32768 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388569.526][rebase] ino=157 size=24576 free=8388608 cost_before=4160 taken=1/4096 rechunked=9775 base_read=5679 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.3
+[t=1795388569.526][rebase] ino=17 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=65079 base_read=49152 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.527][rebase] ino=113 size=61440 free=8388608 cost_before=16576 taken=3/16384 rechunked=61440 base_read=45056 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388569.527][rebase] ino=176 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=44641 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388569.528][rebase] ino=72 size=61440 free=8388608 cost_before=41088 taken=2/40960 rechunked=61440 base_read=16384 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388569.529][rebase] ino=128 size=65536 free=8388608 cost_before=20544 taken=1/20480 rechunked=43323 base_read=2363 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388569.530][rebase] ino=168 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388569.560][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388569.672][commit-cut] finish_ms=111
+report mode=many-files (closed loop: no coordinated-omission correction)
+op=read n=647 p50_us=46.9 p99_us=963.1 p999_us=20922.4 max_us=20922.4
+op=write n=455 p50_us=171.1 p99_us=39387.1 p999_us=73269.2 max_us=73269.2
+op=fsync n=48 p50_us=36339.7 p99_us=100270.1 p999_us=100270.1 max_us=100270.1
+op=create n=195 p50_us=90.0 p99_us=35815.4 p999_us=36339.7 max_us=36339.7
+op=rename n=108 p50_us=101.2 p99_us=36405.2 p999_us=50593.8 max_us=50593.8
+op=unlink n=88 p50_us=150.7 p99_us=22937.6 p999_us=22937.6 max_us=22937.6
+op=open n=117 p50_us=20.1 p99_us=60.6 p999_us=78.9 max_us=78.9
+op=release n=312 p50_us=1086.5 p99_us=83296.3 p999_us=128647.2 max_us=128647.2
+op=lookup n=499 p50_us=9.6 p99_us=53.5 p999_us=90.1 max_us=90.1
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2469 p50_us=0.5 p99_us=2.6 p999_us=6271.0 max_us=6340.6
+op=gate_hold n=2469 p50_us=79.4 p99_us=57278.5 p999_us=100794.4 max_us=128647.2
+op=commit_gate_wait n=4 p50_us=603.6 p99_us=1114.1 p999_us=1114.1 max_us=1114.1
+op=commit_hold n=4 p50_us=1289.2 p99_us=6012.9 p999_us=6012.9 max_us=6012.9
+op=commit_total n=4 p50_us=303824.9 p99_us=388235.3 p999_us=388235.3 max_us=388235.3
+max_inflight=4
+lock site=store n=10792 wait_p50_us=0.0 wait_p99_us=33.2 wait_max_us=174.1 hold_p50_us=2.3 hold_p99_us=24.7 hold_max_us=82.8
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=376.3 hold_max_us=376.3
+lock site=wal n=3262 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.2 hold_p50_us=0.4 hold_p99_us=1.8 hold_max_us=14.3
+lock site=wal_writer n=4544 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=33.7 hold_p50_us=1.3 hold_p99_us=16.8 hold_max_us=77.3
+lock site=wal_queue n=2859 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.4 hold_p50_us=0.5 hold_p99_us=2.2 hold_max_us=18.3
+lock site=readers n=493 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.1 hold_p50_us=1.3 hold_p99_us=14.5 hold_max_us=60.6
+lock site=dir_live n=2003 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=28.4 hold_p50_us=3.3 hold_p99_us=19.6 hold_max_us=39.4
+lock site=inode_live n=3743 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=4.8 hold_p50_us=1.8 hold_p99_us=9.4 hold_max_us=31.0
+lock site=handles n=1848 wait_p50_us=0.0 wait_p99_us=0.1 wait_max_us=96.1 hold_p50_us=1.6 hold_p99_us=5.4 hold_max_us=18.8
+lock site=file_cell n=3656 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.6 hold_p99_us=87.2 hold_max_us=256.4
+lock site=cell_map n=2988 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=35.4 hold_p50_us=1.2 hold_p99_us=5.7 hold_max_us=33.7
+lock site=stripe n=1484 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=94.0 hold_p50_us=27.1 hold_p99_us=213.2 hold_max_us=20217.9
+STRESS seed=1795388569763789000 mode=multi-handle threads=4 serialize=false ops_per_thread=timed secs=1
+[23:02:49.966][FUSE] write: fh=9 ino=2 switches to overlay (offset=757760 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388570.272][commit-cut] begin_ms=0 relog_bytes=547840 relog_ms=3
+[t=1795388570.417][commit-cut] finish_ms=145
+[t=1795388570.698][commit-cut] begin_ms=0 relog_bytes=1120256 relog_ms=7
+[t=1795388570.784][commit-cut] finish_ms=86
+[t=1795388571.091][rebase] ino=2 size=4295680 free=8388608 cost_before=1620656 taken=232/1596416 rechunked=4295680 base_read=2699264 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=113.1
+[t=1795388571.092][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388571.195][commit-cut] finish_ms=102
+[t=1795388571.195][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388571.258][commit-cut] finish_ms=63
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+op=read n=831 p50_us=21.7 p99_us=450.6 p999_us=10821.6 max_us=10821.6
+op=write n=467 p50_us=171.9 p99_us=22691.8 p999_us=25526.3 max_us=25526.3
+op=fsync n=33 p50_us=20873.2 p99_us=80412.7 p999_us=80412.7 max_us=80412.7
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=12 p50_us=10.9 p99_us=45.6 p999_us=45.6 max_us=45.6
+op=release n=12 p50_us=11.6 p99_us=114753.5 p999_us=114753.5 max_us=114753.5
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=198 p50_us=162.9 p99_us=23969.8 p999_us=27328.5 max_us=27328.5
+op=gate_wait n=1553 p50_us=0.6 p99_us=6.2 p999_us=8675.3 max_us=8732.7
+op=gate_hold n=1553 p50_us=64.1 p99_us=23134.2 p999_us=80412.7 max_us=114753.5
+op=commit_gate_wait n=4 p50_us=255.1 p99_us=16146.4 p999_us=16146.4 max_us=16146.4
+op=commit_hold n=4 p50_us=574.5 p99_us=8552.4 p999_us=8552.4 max_us=8552.4
+op=commit_total n=4 p50_us=110493.7 p99_us=150339.6 p999_us=150339.6 max_us=150339.6
+max_inflight=4
+lock site=store n=3388 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=4.7 hold_p50_us=2.0 hold_p99_us=8.8 hold_max_us=262.4
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=355.8 hold_max_us=355.8
+lock site=wal n=2058 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=2.0 hold_max_us=16.5
+lock site=wal_writer n=3250 wait_p50_us=0.0 wait_p99_us=7.0 wait_max_us=5124.1 hold_p50_us=1.1 hold_p99_us=20.5 hold_max_us=1775.6
+lock site=wal_queue n=1876 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.5 hold_p99_us=2.0 hold_max_us=26.7
+lock site=readers n=1707 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.2 hold_p50_us=0.8 hold_p99_us=3.1 hold_max_us=25.6
+lock site=dir_live n=163 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=10.2 hold_max_us=26.5
+lock site=inode_live n=191 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.7 hold_p99_us=14.0 hold_max_us=16.1
+lock site=handles n=737 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=12.6 hold_p50_us=1.6 hold_p99_us=6.6 hold_max_us=54.4
+lock site=file_cell n=1869 wait_p50_us=0.0 wait_p99_us=129.2 wait_max_us=10747.9 hold_p50_us=7.2 hold_p99_us=94.0 hold_max_us=1200.1
+lock site=cell_map n=2642 wait_p50_us=0.0 wait_p99_us=0.6 wait_max_us=28.7 hold_p50_us=0.8 hold_p99_us=5.0 hold_max_us=43.1
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=5.5 hold_p99_us=211.8 hold_max_us=211.8
+test serialize_off_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.42s
+
+load after: 15:02  up 31 days, 19:23, 8 users, load averages: 15.51 16.49 19.47
+load before: 15:02  up 31 days, 19:23, 8 users, load averages: 15.51 16.49 19.47
+=== run 3
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/stress_harness.rs (target/debug/deps/stress_harness-0fe249ea42622ea8)
+
+running 1 test
+STRESS seed=1795388574423300000 mode=one-file threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:54.577][FUSE] write: fh=2 ino=2 switches to overlay (offset=4026368 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388574.912][commit-cut] begin_ms=0 relog_bytes=3108864 relog_ms=5
+[t=1795388575.039][commit-cut] finish_ms=127
+[t=1795388575.302][commit-cut] begin_ms=0 relog_bytes=3997696 relog_ms=6
+[t=1795388575.405][commit-cut] finish_ms=102
+[t=1795388575.693][commit-cut] begin_ms=0 relog_bytes=4063232 relog_ms=9
+[t=1795388575.837][commit-cut] finish_ms=143
+[t=1795388576.115][commit-cut] begin_ms=0 relog_bytes=4157440 relog_ms=10
+[t=1795388576.223][commit-cut] finish_ms=108
+[t=1795388576.498][commit-cut] begin_ms=0 relog_bytes=4173824 relog_ms=11
+[t=1795388576.642][commit-cut] finish_ms=143
+[t=1795388576.704][rebase] ino=2 size=4194304 free=8388608 cost_before=4181376 taken=6/4173824 rechunked=4194304 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=80.8
+[t=1795388576.754][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388576.838][commit-cut] finish_ms=83
+report mode=one-file (closed loop: no coordinated-omission correction)
+op=read n=1693 p50_us=17.1 p99_us=1015.8 p999_us=3147.8 max_us=3258.4
+op=write n=1016 p50_us=253.4 p99_us=38600.7 p999_us=54820.9 max_us=54886.4
+op=fsync n=61 p50_us=21168.1 p99_us=122159.1 p999_us=122159.1 max_us=122159.1
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=4 p50_us=36.0 p99_us=76.5 p999_us=76.5 max_us=76.5
+op=release n=4 p50_us=16.8 p99_us=84148.2 p999_us=84148.2 max_us=84148.2
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2778 p50_us=0.6 p99_us=4.3 p999_us=12140.5 max_us=26279.9
+op=gate_hold n=2778 p50_us=41.9 p99_us=38535.2 p999_us=101449.7 max_us=122159.1
+op=commit_gate_wait n=6 p50_us=9609.2 p99_us=20365.3 p999_us=20365.3 max_us=20365.3
+op=commit_hold n=6 p50_us=7315.5 p99_us=12001.3 p999_us=12001.3 max_us=12001.3
+op=commit_total n=6 p50_us=128712.7 p99_us=168820.7 p999_us=168820.7 max_us=168820.7
+max_inflight=4
+lock site=store n=3992 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.8 hold_p99_us=7.7 hold_max_us=80.7
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=551.4 hold_max_us=551.4
+lock site=wal n=2410 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=25.4
+lock site=wal_writer n=3930 wait_p50_us=0.0 wait_p99_us=0.7 wait_max_us=29.4 hold_p50_us=1.6 hold_p99_us=20.3 hold_max_us=43.2
+lock site=wal_queue n=2240 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.7 hold_p99_us=2.8 hold_max_us=25.8
+lock site=readers n=1252 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.8 hold_p99_us=2.6 hold_max_us=11.1
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=8.0 hold_max_us=16.1
+lock site=inode_live n=249 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=8.9 hold_max_us=47.5
+lock site=handles n=1092 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=6.0 hold_p50_us=1.6 hold_p99_us=6.4 hold_max_us=35.8
+lock site=file_cell n=2913 wait_p50_us=0.0 wait_p99_us=1103.9 wait_max_us=5697.5 hold_p50_us=10.3 hold_p99_us=907.3 hold_max_us=7856.1
+lock site=cell_map n=3904 wait_p50_us=0.0 wait_p99_us=0.1 wait_max_us=25.1 hold_p50_us=0.8 hold_p99_us=5.7 hold_max_us=21.6
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=13.9 hold_p99_us=498.2 hold_max_us=498.2
+STRESS seed=1795388576945006000 mode=many-files threads=4 serialize=false ops_per_thread=timed secs=2
+[23:02:57.081][FUSE] write: fh=2 ino=8 switches to overlay (offset=24576 len=12288 expected=0 pending=8192 fresh=true overlap=true)
+[23:02:57.102][FUSE] write: fh=6 ino=7 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.102][FUSE] write: fh=7 ino=9 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.102][rebase] ino=8 size=36864 free=8388608 cost_before=12352 taken=1/12288 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.7
+[23:02:57.103][FUSE] write: fh=9 ino=8 switches to overlay (offset=24576 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.104][rebase] ino=8 size=36864 free=8388608 cost_before=4160 taken=1/4096 rechunked=36864 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:57.104][FUSE] write: fh=11 ino=14 switches to overlay (offset=24576 len=16384 expected=0 pending=12288 fresh=true overlap=true)
+[t=1795388577.105][rebase] ino=14 size=45056 free=8388608 cost_before=20544 taken=1/20480 rechunked=45056 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.6
+[t=1795388577.126][rebase] ino=7 size=57344 free=8388608 cost_before=24704 taken=2/24576 rechunked=57344 base_read=35866 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=22.0
+[23:02:57.127][FUSE] write: fh=19 ino=13 switches to overlay (offset=24576 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.149][FUSE] write: fh=21 ino=21 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.188][FUSE] write: fh=22 ino=7 switches to overlay (offset=8192 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.189][rebase] ino=13 size=36864 free=8388608 cost_before=12352 taken=1/12288 rechunked=36864 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:57.190][FUSE] write: fh=8 ino=12 switches to overlay (offset=12288 len=12288 expected=0 pending=20480 fresh=true overlap=true)
+[t=1795388577.190][rebase] ino=7 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=27051 base_read=16384 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388577.191][rebase] ino=21 size=49152 free=8388608 cost_before=4160 taken=1/4096 rechunked=12070 base_read=7974 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[t=1795388577.192][rebase] ino=9 size=61440 free=8388608 cost_before=45184 taken=2/45056 rechunked=54052 base_read=12288 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[23:02:57.194][FUSE] write: fh=31 ino=25 switches to overlay (offset=8192 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.196][FUSE] write: fh=37 ino=33 switches to overlay (offset=24576 len=8192 expected=0 pending=12288 fresh=true overlap=true)
+[t=1795388577.196][rebase] ino=25 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=65474 base_read=61440 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388577.237][rebase] ino=33 size=36864 free=8388608 cost_before=12352 taken=1/12288 rechunked=36864 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=20.8
+[23:02:57.238][FUSE] write: fh=40 ino=34 switches to overlay (offset=32768 len=16384 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:57.258][FUSE] write: fh=45 ino=21 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.258][FUSE] write: fh=34 ino=11 switches to overlay (offset=16384 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.259][rebase] ino=34 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.6
+[23:02:57.259][FUSE] write: fh=41 ino=29 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.259][rebase] ino=21 size=57344 free=8388608 cost_before=4160 taken=1/4096 rechunked=20262 base_read=12070 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:57.259][FUSE] write: fh=46 ino=26 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.260][FUSE] write: fh=49 ino=33 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.280][FUSE] write: fh=42 ino=32 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.280][FUSE] write: fh=50 ino=30 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.281][rebase] ino=26 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=23154 base_read=6770 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388577.282][rebase] ino=12 size=53248 free=8388608 cost_before=28800 taken=2/28672 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:57.283][FUSE] write: fh=55 ino=39 switches to overlay (offset=36864 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.283][FUSE] write: fh=53 ino=36 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.283][rebase] ino=30 size=20480 free=8388608 cost_before=20544 taken=1/20480 rechunked=20480 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388577.284][rebase] ino=32 size=40960 free=8388608 cost_before=12352 taken=1/12288 rechunked=16614 base_read=4326 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388577.285][rebase] ino=39 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=36714 base_read=8042 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:57.285][FUSE] write: fh=39 ino=31 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.286][FUSE] write: fh=59 ino=39 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.286][rebase] ino=33 size=65536 free=8388608 cost_before=41216 taken=4/40960 rechunked=65536 base_read=20075 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.3
+[23:02:57.287][FUSE] write: fh=61 ino=33 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.287][FUSE] write: fh=62 ino=20 switches to overlay (offset=0 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.327][rebase] ino=33 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=16872 base_read=20075 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=40.3
+[t=1795388577.327][rebase] ino=39 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=37308 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=40.6
+[t=1795388577.329][rebase] ino=11 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=65536 base_read=47787 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.1
+[t=1795388577.392][commit-cut] begin_ms=0 relog_bytes=69632 relog_ms=0
+[23:02:57.393][FUSE] write: fh=70 ino=48 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.393][FUSE] write: fh=72 ino=46 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.393][FUSE] write: fh=73 ino=44 switches to overlay (offset=12288 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.393][rebase] ino=31 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=47489 base_read=2433 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:57.395][FUSE] write: fh=67 ino=47 switches to overlay (offset=36864 len=16384 expected=0 pending=24576 fresh=true overlap=true)
+[t=1795388577.395][rebase] ino=36 size=16384 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388577.396][rebase] ino=44 size=36864 free=8388608 cost_before=16448 taken=1/16384 rechunked=28979 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388577.396][rebase] ino=46 size=32768 free=8388608 cost_before=4160 taken=1/4096 rechunked=10548 base_read=6452 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[23:02:57.396][FUSE] write: fh=79 ino=49 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.397][FUSE] write: fh=80 ino=39 switches to overlay (offset=24576 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.397][FUSE] write: fh=82 ino=11 switches to overlay (offset=45056 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.398][FUSE] write: fh=77 ino=53 switches to overlay (offset=8192 len=8192 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:57.418][FUSE] write: fh=84 ino=54 switches to overlay (offset=20480 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.438][rebase] ino=49 size=49152 free=8388608 cost_before=12352 taken=1/12288 rechunked=16384 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.8
+[23:02:57.439][FUSE] write: fh=85 ino=46 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.480][rebase] ino=39 size=45056 free=8388608 cost_before=12352 taken=1/12288 rechunked=29776 base_read=17488 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=61.8
+[t=1795388577.500][rebase] ino=47 size=53248 free=8388608 cost_before=32832 taken=1/32768 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=41.7
+[23:02:57.500][FUSE] write: fh=87 ino=57 switches to overlay (offset=0 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.500][rebase] ino=46 size=32768 free=8388608 cost_before=4160 taken=1/4096 rechunked=10548 base_read=6452 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=19.8
+[t=1795388577.500][rebase] ino=53 size=24576 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.5
+[23:02:57.501][FUSE] write: fh=88 ino=55 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.571][FUSE] write: fh=90 ino=41 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.667][commit-cut] finish_ms=274
+[t=1795388577.667][rebase] ino=54 size=36864 free=8388608 cost_before=16448 taken=1/16384 rechunked=36864 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=56.1
+[t=1795388577.687][rebase] ino=57 size=53248 free=8388608 cost_before=8256 taken=1/8192 rechunked=53248 base_read=45056 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=115.5
+[t=1795388577.688][rebase] ino=20 size=57344 free=8388608 cost_before=8256 taken=1/8192 rechunked=32768 base_read=32768 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=20.6
+[23:02:57.688][FUSE] write: fh=74 ino=51 switches to overlay (offset=4096 len=16384 expected=0 pending=40960 fresh=true overlap=true)
+[23:02:57.688][FUSE] write: fh=93 ino=59 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.690][rebase] ino=51 size=65536 free=8388608 cost_before=49344 taken=3/49152 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=1.5
+[23:02:57.690][FUSE] write: fh=96 ino=61 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.690][FUSE] write: fh=97 ino=51 switches to overlay (offset=40960 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.690][rebase] ino=11 size=65536 free=8388608 cost_before=24704 taken=2/24576 rechunked=52399 base_read=35499 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[t=1795388577.730][rebase] ino=51 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=48034 base_read=34030 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=39.3
+[23:02:57.732][FUSE] write: fh=105 ino=58 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.732][rebase] ino=41 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=54940 base_read=49152 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:57.733][FUSE] write: fh=108 ino=65 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.735][rebase] ino=58 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=51456 base_read=10496 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[23:02:57.736][FUSE] write: fh=100 ino=11 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.736][rebase] ino=61 size=57344 free=8388608 cost_before=16512 taken=2/16384 rechunked=50194 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388577.737][rebase] ino=55 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=37783 base_read=919 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:57.737][FUSE] write: fh=116 ino=75 switches to overlay (offset=36864 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[t=1795388577.737][rebase] ino=65 size=53248 free=8388608 cost_before=16448 taken=1/16384 rechunked=53248 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:57.738][FUSE] write: fh=117 ino=40 switches to overlay (offset=28672 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.738][rebase] ino=48 size=65536 free=8388608 cost_before=24768 taken=3/24576 rechunked=65536 base_read=39299 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=2.1
+[23:02:57.759][FUSE] write: fh=121 ino=74 switches to overlay (offset=45056 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.759][rebase] ino=75 size=49152 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=20.5
+[23:02:57.759][FUSE] write: fh=122 ino=41 switches to overlay (offset=8192 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.760][FUSE] write: fh=124 ino=56 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.782][FUSE] write: fh=127 ino=48 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.802][rebase] ino=40 size=57344 free=8388608 cost_before=8320 taken=2/8192 rechunked=38258 base_read=1394 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.8
+[23:02:57.802][FUSE] write: fh=128 ino=67 switches to overlay (offset=32768 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.805][rebase] ino=29 size=61440 free=8388608 cost_before=53376 taken=2/53248 rechunked=61440 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[23:02:57.806][FUSE] write: fh=136 ino=73 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.806][FUSE] write: fh=125 ino=46 switches to overlay (offset=57344 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.808][rebase] ino=11 size=65536 free=8388608 cost_before=28800 taken=2/28672 rechunked=52399 base_read=38996 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[t=1795388577.808][rebase] ino=56 size=57344 free=8388608 cost_before=16512 taken=2/16384 rechunked=45290 base_read=4330 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[23:02:57.810][FUSE] write: fh=123 ino=79 switches to overlay (offset=45056 len=16384 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:57.811][FUSE] write: fh=145 ino=89 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.811][FUSE] write: fh=146 ino=85 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.811][FUSE] write: fh=147 ino=81 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.812][FUSE] write: fh=148 ino=90 switches to overlay (offset=24576 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.812][FUSE] write: fh=150 ino=83 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.813][rebase] ino=79 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=28672 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.8
+[23:02:57.813][FUSE] write: fh=151 ino=91 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.834][FUSE] write: fh=153 ino=82 switches to overlay (offset=8192 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.834][FUSE] write: fh=156 ino=92 switches to overlay (offset=8192 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:57.854][FUSE] write: fh=152 ino=79 switches to overlay (offset=12288 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388577.856][rebase] ino=92 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=57344 base_read=45056 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.8
+[t=1795388577.892][rebase] ino=67 size=49152 free=8388608 cost_before=24640 taken=1/24576 rechunked=49152 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=37.0
+[t=1795388577.971][rebase] ino=85 size=32768 free=8388608 cost_before=24640 taken=1/24576 rechunked=32768 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=78.7
+[t=1795388577.994][commit-cut] begin_ms=0 relog_bytes=376832 relog_ms=1
+[23:02:57.995][FUSE] write: fh=163 ino=67 switches to overlay (offset=4096 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.058][rebase] ino=83 size=65536 free=8388608 cost_before=32896 taken=2/32768 rechunked=65536 base_read=35838 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.9
+[23:02:58.059][FUSE] write: fh=118 ino=76 switches to overlay (offset=24576 len=4096 expected=0 pending=28672 fresh=true overlap=true)
+[23:02:58.060][FUSE] write: fh=174 ino=100 switches to overlay (offset=0 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.060][FUSE] write: fh=175 ino=94 switches to overlay (offset=0 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.060][rebase] ino=74 size=65536 free=8388608 cost_before=32832 taken=1/32768 rechunked=59261 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[23:02:58.140][FUSE] write: fh=177 ino=78 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.160][rebase] ino=100 size=65536 free=8388608 cost_before=24704 taken=2/24576 rechunked=65536 base_read=19942 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=60.0
+[23:02:58.160][FUSE] write: fh=178 ino=93 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.180][FUSE] write: fh=179 ino=77 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.260][FUSE] write: fh=160 ino=96 switches to overlay (offset=57344 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.260][FUSE] write: fh=184 ino=111 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.261][FUSE] write: fh=186 ino=72 switches to overlay (offset=24576 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.282][commit-cut] finish_ms=288
+[t=1795388578.283][rebase] ino=72 size=32768 free=8388608 cost_before=8256 taken=1/8192 rechunked=17619 base_read=1235 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.4
+[t=1795388578.285][rebase] ino=41 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=54940 base_read=49152 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388578.306][rebase] ino=96 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=65536 base_read=27306 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.5
+[t=1795388578.306][rebase] ino=111 size=57344 free=8388608 cost_before=24704 taken=2/24576 rechunked=57344 base_read=35553 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=22.0
+[23:02:58.306][FUSE] write: fh=191 ino=100 switches to overlay (offset=61440 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.328][FUSE] write: fh=171 ino=107 switches to overlay (offset=12288 len=16384 expected=0 pending=32768 fresh=true overlap=true)
+[t=1795388578.348][rebase] ino=100 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=15846 base_read=11750 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=19.6
+[23:02:58.348][FUSE] write: fh=196 ino=74 switches to overlay (offset=24576 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.370][rebase] ino=76 size=49152 free=8388608 cost_before=28800 taken=2/28672 rechunked=49152 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.7
+[23:02:58.370][FUSE] write: fh=198 ino=71 switches to overlay (offset=36864 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.390][FUSE] write: fh=203 ino=97 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.391][rebase] ino=48 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=42199 base_read=32346 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388578.391][rebase] ino=74 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=16361 base_read=12721 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:58.413][FUSE] write: fh=207 ino=125 switches to overlay (offset=40960 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.414][rebase] ino=81 size=65536 free=8388608 cost_before=32960 taken=3/32768 rechunked=60394 base_read=25241 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.7
+[23:02:58.415][FUSE] write: fh=193 ino=120 switches to overlay (offset=12288 len=8192 expected=16384 pending=16384 fresh=true overlap=false)
+[23:02:58.415][FUSE] write: fh=133 ino=84 switches to overlay (offset=49152 len=12288 expected=0 pending=32768 fresh=true overlap=true)
+[t=1795388578.415][rebase] ino=90 size=61440 free=8388608 cost_before=41152 taken=3/40960 rechunked=61440 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.6
+[23:02:58.416][FUSE] write: fh=211 ino=130 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.416][rebase] ino=120 size=40960 free=8388608 cost_before=24704 taken=2/24576 rechunked=31624 base_read=2952 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388578.416][rebase] ino=78 size=53248 free=8388608 cost_before=12352 taken=1/12288 rechunked=20480 base_read=8192 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:58.417][FUSE] write: fh=212 ino=127 switches to overlay (offset=0 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.417][rebase] ino=130 size=16384 free=8388608 cost_before=16448 taken=1/16384 rechunked=16384 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388578.417][rebase] ino=71 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=32768 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[23:02:58.417][FUSE] write: fh=197 ino=108 switches to overlay (offset=24576 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.417][rebase] ino=127 size=20480 free=8388608 cost_before=4160 taken=1/4096 rechunked=8234 base_read=8192 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[23:02:58.418][FUSE] write: fh=216 ino=130 switches to overlay (offset=4096 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.419][FUSE] write: fh=195 ino=122 switches to overlay (offset=20480 len=12288 expected=0 pending=12288 fresh=true overlap=true)
+[23:02:58.480][FUSE] write: fh=222 ino=99 switches to overlay (offset=24576 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.481][rebase] ino=59 size=61440 free=8388608 cost_before=24704 taken=2/24576 rechunked=28672 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.4
+[23:02:58.482][FUSE] write: fh=223 ino=134 switches to overlay (offset=36864 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.502][rebase] ino=82 size=57344 free=8388608 cost_before=8256 taken=1/8192 rechunked=55540 base_read=49152 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:58.525][FUSE] write: fh=221 ino=135 switches to overlay (offset=24576 len=12288 expected=12288 pending=24576 fresh=true overlap=true)
+[t=1795388578.525][rebase] ino=99 size=40960 free=8388608 cost_before=16448 taken=1/16384 rechunked=21963 base_read=1483 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:58.525][FUSE] write: fh=230 ino=123 switches to overlay (offset=28672 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.609][commit-cut] begin_ms=0 relog_bytes=618496 relog_ms=2
+[t=1795388578.631][rebase] ino=107 size=61440 free=8388608 cost_before=45248 taken=3/45056 rechunked=61440 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=2.0
+[23:02:58.651][FUSE] write: fh=234 ino=141 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.694][rebase] ino=84 size=65536 free=8388608 cost_before=41152 taken=3/40960 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=22.1
+[23:02:58.694][FUSE] write: fh=239 ino=76 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.695][FUSE] write: fh=187 ino=115 switches to overlay (offset=16384 len=16384 expected=0 pending=8192 fresh=true overlap=true)
+[t=1795388578.697][rebase] ino=123 size=40960 free=8388608 cost_before=12352 taken=1/12288 rechunked=40960 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[t=1795388578.737][rebase] ino=134 size=49152 free=8388608 cost_before=16512 taken=2/16384 rechunked=49152 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=21.1
+[t=1795388578.738][rebase] ino=122 size=53248 free=8388608 cost_before=24704 taken=2/24576 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=41.3
+[t=1795388578.758][rebase] ino=97 size=57344 free=8388608 cost_before=16512 taken=2/16384 rechunked=57344 base_read=41118 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=41.6
+[23:02:58.780][FUSE] write: fh=248 ino=152 switches to overlay (offset=49152 len=12288 expected=0 pending=16384 fresh=true overlap=true)
+[23:02:58.799][FUSE] write: fh=217 ino=78 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.799][FUSE] write: fh=218 ino=132 switches to overlay (offset=4096 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.840][rebase] ino=141 size=61440 free=8388608 cost_before=24640 taken=1/24576 rechunked=55770 base_read=36864 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=41.0
+[t=1795388578.861][commit-cut] finish_ms=251
+[t=1795388578.861][rebase] ino=77 size=36864 free=8388608 cost_before=4160 taken=1/4096 rechunked=28230 base_read=28672 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=20.3
+[t=1795388578.862][rebase] ino=115 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=65536 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388578.862][rebase] ino=152 size=61440 free=8388608 cost_before=24640 taken=1/24576 rechunked=28672 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.7
+[23:02:58.862][FUSE] write: fh=259 ino=156 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.883][rebase] ino=78 size=57344 free=8388608 cost_before=20544 taken=1/20480 rechunked=24576 base_read=4096 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=19.8
+[t=1795388578.884][rebase] ino=132 size=49152 free=8388608 cost_before=16512 taken=2/16384 rechunked=49152 base_read=36864 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=20.6
+[23:02:58.884][FUSE] write: fh=261 ino=153 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.884][FUSE] write: fh=263 ino=152 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.885][rebase] ino=135 size=57344 free=8388608 cost_before=45248 taken=3/45056 rechunked=57344 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.8
+[23:02:58.886][FUSE] write: fh=266 ino=150 switches to overlay (offset=49152 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.886][FUSE] write: fh=269 ino=78 switches to overlay (offset=0 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.887][FUSE] write: fh=270 ino=141 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.887][FUSE] write: fh=236 ino=59 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.908][FUSE] write: fh=189 ino=117 switches to overlay (offset=36864 len=8192 expected=0 pending=32768 fresh=true overlap=true)
+[23:02:58.930][FUSE] write: fh=276 ino=167 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.973][rebase] ino=150 size=65536 free=8388608 cost_before=16448 taken=1/16384 rechunked=51555 base_read=2403 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=21.2
+[t=1795388578.974][rebase] ino=130 size=32768 free=8388608 cost_before=24704 taken=2/24576 rechunked=32768 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388578.995][rebase] ino=141 size=61440 free=8388608 cost_before=16448 taken=1/16384 rechunked=45664 base_read=29280 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=21.7
+[23:02:58.995][FUSE] write: fh=289 ino=141 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.996][FUSE] write: fh=291 ino=151 switches to overlay (offset=20480 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:58.996][FUSE] write: fh=287 ino=84 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.997][rebase] ino=167 size=36864 free=8388608 cost_before=8256 taken=1/8192 rechunked=36864 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388578.997][rebase] ino=141 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=17413 base_read=9221 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[23:02:58.997][FUSE] write: fh=293 ino=175 switches to overlay (offset=16384 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.997][rebase] ino=156 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=14079 base_read=1791 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[23:02:58.998][FUSE] write: fh=296 ino=130 switches to overlay (offset=49152 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388578.998][rebase] ino=89 size=57344 free=8388608 cost_before=36928 taken=1/36864 rechunked=53212 base_read=12252 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[23:02:58.998][FUSE] write: fh=298 ino=144 switches to overlay (offset=32768 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.000][FUSE] write: fh=302 ino=150 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.000][rebase] ino=175 size=45056 free=8388608 cost_before=8256 taken=1/8192 rechunked=38717 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388579.000][rebase] ino=84 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=19298 base_read=19031 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:59.001][FUSE] write: fh=304 ino=180 switches to overlay (offset=53248 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.001][rebase] ino=108 size=65536 free=8388608 cost_before=16512 taken=2/16384 rechunked=54906 base_read=45056 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[23:02:59.002][FUSE] write: fh=309 ino=161 switches to overlay (offset=40960 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.002][FUSE] write: fh=311 ino=162 switches to overlay (offset=20480 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.003][rebase] ino=91 size=65536 free=8388608 cost_before=24640 taken=1/24576 rechunked=29953 base_read=1281 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[23:02:59.004][FUSE] write: fh=202 ino=112 switches to overlay (offset=0 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.024][FUSE] write: fh=314 ino=172 switches to overlay (offset=28672 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.024][FUSE] write: fh=294 ino=179 switches to overlay (offset=36864 len=16384 expected=0 pending=8192 fresh=true overlap=true)
+[23:02:59.025][FUSE] write: fh=316 ino=137 switches to overlay (offset=20480 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.025][FUSE] write: fh=256 ino=158 switches to overlay (offset=8192 len=16384 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.026][FUSE] write: fh=320 ino=170 switches to overlay (offset=53248 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.026][FUSE] write: fh=321 ino=122 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.027][rebase] ino=180 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=18941 base_read=6653 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[23:02:59.027][FUSE] write: fh=300 ino=141 switches to overlay (offset=53248 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.027][FUSE] write: fh=324 ino=184 switches to overlay (offset=12288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.028][FUSE] write: fh=284 ino=41 switches to overlay (offset=45056 len=8192 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.048][FUSE] write: fh=328 ino=129 switches to overlay (offset=20480 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.068][FUSE] write: fh=286 ino=113 switches to overlay (offset=45056 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[23:02:59.069][FUSE] write: fh=297 ino=169 switches to overlay (offset=36864 len=12288 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.089][rebase] ino=76 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=18894 base_read=2510 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388579.090][rebase] ino=67 size=53248 free=8388608 cost_before=49216 taken=1/49152 rechunked=53248 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388579.090][rebase] ino=150 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=44672 base_read=43363 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388579.090][rebase] ino=137 size=40960 free=8388608 cost_before=16448 taken=1/16384 rechunked=40960 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.091][rebase] ino=59 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=18851 base_read=18363 reused_entries=3 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388579.091][rebase] ino=125 size=57344 free=8388608 cost_before=49280 taken=2/49152 rechunked=57344 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[t=1795388579.091][rebase] ino=151 size=49152 free=8388608 cost_before=8256 taken=1/8192 rechunked=44651 base_read=40960 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388579.092][rebase] ino=130 size=57344 free=8388608 cost_before=12416 taken=2/12288 rechunked=36400 base_read=11824 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.092][rebase] ino=179 size=53248 free=8388608 cost_before=20544 taken=1/20480 rechunked=20480 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=0 splice_ms=0.6
+[t=1795388579.092][rebase] ino=152 size=61440 free=8388608 cost_before=20608 taken=2/20480 rechunked=41298 base_read=28672 reused_entries=2 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388579.092][rebase] ino=113 size=61440 free=8388608 cost_before=12352 taken=1/12288 rechunked=28672 base_read=16384 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388579.092][rebase] ino=169 size=57344 free=8388608 cost_before=12352 taken=1/12288 rechunked=24576 base_read=12288 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.093][rebase] ino=172 size=45056 free=8388608 cost_before=16448 taken=1/16384 rechunked=45056 base_read=28672 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388579.093][rebase] ino=161 size=45056 free=8388608 cost_before=4160 taken=1/4096 rechunked=45056 base_read=20480 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.093][rebase] ino=93 size=61440 free=8388608 cost_before=36992 taken=2/36864 rechunked=61440 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.4
+[t=1795388579.094][rebase] ino=170 size=65536 free=8388608 cost_before=12352 taken=1/12288 rechunked=55996 base_read=2748 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.094][rebase] ino=94 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=32768 base_read=32768 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.095][rebase] ino=144 size=57344 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.6
+[t=1795388579.095][rebase] ino=158 size=24576 free=8388608 cost_before=16448 taken=1/16384 rechunked=24576 base_read=8192 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388579.095][rebase] ino=112 size=12288 free=8388608 cost_before=8256 taken=1/8192 rechunked=12288 base_read=4096 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.3
+[t=1795388579.096][rebase] ino=184 size=65536 free=8388608 cost_before=4160 taken=1/4096 rechunked=57719 base_read=61440 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+[t=1795388579.096][rebase] ino=117 size=53248 free=8388608 cost_before=36992 taken=2/36864 rechunked=53248 base_read=0 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388579.096][rebase] ino=141 size=61440 free=8388608 cost_before=4160 taken=1/4096 rechunked=17413 base_read=13317 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=0.4
+[t=1795388579.097][rebase] ino=78 size=57344 free=8388608 cost_before=24704 taken=2/24576 rechunked=57344 base_read=32768 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.2
+[t=1795388579.098][rebase] ino=73 size=65536 free=8388608 cost_before=37056 taken=3/36864 rechunked=65536 base_read=29661 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.3
+[t=1795388579.098][rebase] ino=129 size=49152 free=8388608 cost_before=4160 taken=1/4096 rechunked=49152 base_read=45056 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.099][rebase] ino=46 size=65536 free=8388608 cost_before=20608 taken=2/20480 rechunked=43316 base_read=10548 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.8
+[t=1795388579.099][rebase] ino=79 size=61440 free=8388608 cost_before=37056 taken=3/36864 rechunked=61440 base_read=24576 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=1.1
+[t=1795388579.099][rebase] ino=162 size=28672 free=8388608 cost_before=8256 taken=1/8192 rechunked=16902 base_read=518 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.3
+[t=1795388579.100][rebase] ino=122 size=57344 free=8388608 cost_before=12416 taken=2/12288 rechunked=26908 base_read=22351 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.7
+[t=1795388579.101][rebase] ino=41 size=65536 free=8388608 cost_before=8256 taken=1/8192 rechunked=10225 base_read=8533 reused_entries=4 reused_nodes=0 nodes_loaded=1 splice_ms=0.3
+[t=1795388579.101][rebase] ino=153 size=61440 free=8388608 cost_before=8256 taken=1/8192 rechunked=28672 base_read=20480 reused_entries=1 reused_nodes=0 nodes_loaded=1 splice_ms=0.5
+[t=1795388579.133][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388579.224][commit-cut] finish_ms=90
+report mode=many-files (closed loop: no coordinated-omission correction)
+op=read n=704 p50_us=46.7 p99_us=1008.6 p999_us=40697.9 max_us=40697.9
+op=write n=476 p50_us=174.2 p99_us=21217.3 p999_us=126025.7 max_us=126025.7
+op=fsync n=56 p50_us=20807.7 p99_us=186777.6 p999_us=186777.6 max_us=186777.6
+op=create n=189 p50_us=92.4 p99_us=21184.5 p999_us=39747.6 max_us=39747.6
+op=rename n=108 p50_us=95.4 p99_us=20168.7 p999_us=69599.2 max_us=69599.2
+op=unlink n=110 p50_us=125.9 p99_us=20348.9 p999_us=39190.5 max_us=39190.5
+op=open n=140 p50_us=17.8 p99_us=61.1 p999_us=78.8 max_us=78.8
+op=release n=329 p50_us=1018.4 p99_us=79102.0 p999_us=115736.6 max_us=115736.6
+op=lookup n=515 p50_us=9.3 p99_us=46.5 p999_us=61.1 max_us=61.1
+op=append n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=gate_wait n=2627 p50_us=0.5 p99_us=2.8 p999_us=3538.9 max_us=3690.5
+op=gate_hold n=2627 p50_us=77.1 p99_us=41222.1 p999_us=115736.6 max_us=186777.6
+op=commit_gate_wait n=4 p50_us=253.1 p99_us=557.6 p999_us=557.6 max_us=557.6
+op=commit_hold n=4 p50_us=1110.0 p99_us=3481.6 p999_us=3481.6 max_us=3481.6
+op=commit_total n=4 p50_us=255459.3 p99_us=291504.1 p999_us=291504.1 max_us=291504.1
+max_inflight=4
+lock site=store n=10331 wait_p50_us=0.0 wait_p99_us=27.5 wait_max_us=125.7 hold_p50_us=2.2 hold_p99_us=23.5 hold_max_us=89.3
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=378.6 hold_max_us=378.6
+lock site=wal n=3185 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=4.7 hold_p50_us=0.4 hold_p99_us=2.3 hold_max_us=42.6
+lock site=wal_writer n=4448 wait_p50_us=0.0 wait_p99_us=2.2 wait_max_us=57.4 hold_p50_us=1.3 hold_p99_us=17.2 hold_max_us=43.5
+lock site=wal_queue n=2771 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.5 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=21.4
+lock site=readers n=504 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.8 hold_p50_us=1.3 hold_p99_us=10.6 hold_max_us=49.0
+lock site=dir_live n=2073 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=28.4 hold_p50_us=3.1 hold_p99_us=20.6 hold_max_us=51.1
+lock site=inode_live n=3704 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20.8 hold_p50_us=1.8 hold_p99_us=10.0 hold_max_us=28.8
+lock site=handles n=1866 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=17.1 hold_p50_us=1.6 hold_p99_us=6.7 hold_max_us=21.2
+lock site=file_cell n=3582 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.7 hold_p99_us=87.7 hold_max_us=261.8
+lock site=cell_map n=2979 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=1.2 hold_p99_us=6.6 hold_max_us=26.6
+lock site=stripe n=1513 wait_p50_us=0.0 wait_p99_us=2.5 wait_max_us=78.7 hold_p50_us=27.4 hold_p99_us=187.6 hold_max_us=20234.2
+STRESS seed=1795388579299608000 mode=multi-handle threads=4 serialize=false ops_per_thread=timed secs=1
+[23:02:59.455][FUSE] write: fh=3 ino=2 switches to overlay (offset=2166784 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388579.791][commit-cut] begin_ms=0 relog_bytes=570880 relog_ms=4
+[t=1795388580.012][commit-cut] finish_ms=221
+[t=1795388580.311][commit-cut] begin_ms=0 relog_bytes=1118720 relog_ms=6
+[t=1795388580.433][commit-cut] finish_ms=122
+[t=1795388580.523][rebase] ino=2 size=4276224 free=8388608 cost_before=1212535 taken=188/1191936 rechunked=4145152 base_read=3026551 reused_entries=0 reused_nodes=0 nodes_loaded=1 splice_ms=48.2
+[t=1795388580.556][commit-cut] begin_ms=0 relog_bytes=0 relog_ms=0
+[t=1795388580.660][commit-cut] finish_ms=103
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+op=read n=610 p50_us=19.4 p99_us=113.1 p999_us=160.3 max_us=160.3
+op=write n=317 p50_us=167.7 p99_us=36012.0 p999_us=39813.1 max_us=39813.1
+op=fsync n=36 p50_us=20938.8 p99_us=115474.4 p999_us=115474.4 max_us=115474.4
+op=create n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=rename n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=unlink n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=open n=12 p50_us=15.5 p99_us=37.8 p999_us=37.8 max_us=37.8
+op=release n=12 p50_us=14.7 p99_us=49709.1 p999_us=49709.1 max_us=49709.1
+op=lookup n=0 p50_us=0.0 p99_us=0.0 p999_us=0.0 max_us=0.0
+op=append n=160 p50_us=130.0 p99_us=39878.7 p999_us=40402.9 max_us=40402.9
+op=gate_wait n=1147 p50_us=0.5 p99_us=11.5 p999_us=26525.7 max_us=26558.5
+op=gate_hold n=1147 p50_us=54.1 p99_us=40468.5 p999_us=100663.3 max_us=115474.4
+op=commit_gate_wait n=3 p50_us=283.4 p99_us=37683.2 p999_us=37683.2 max_us=37683.2
+op=commit_hold n=3 p50_us=4907.0 p99_us=6549.5 p999_us=6549.5 max_us=6549.5
+op=commit_total n=3 p50_us=167116.8 p99_us=226492.4 p999_us=226492.4 max_us=226492.4
+max_inflight=4
+lock site=store n=3203 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.7 hold_p50_us=1.5 hold_p99_us=7.2 hold_max_us=61.2
+lock site=io n=6 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=339.7 hold_max_us=339.7
+lock site=wal n=1659 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=1.8 hold_max_us=14.7
+lock site=wal_writer n=2638 wait_p50_us=0.0 wait_p99_us=4.0 wait_max_us=29.7 hold_p50_us=1.1 hold_p99_us=20.9 hold_max_us=43.6
+lock site=wal_queue n=1507 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.1 hold_p50_us=0.5 hold_p99_us=1.9 hold_max_us=13.9
+lock site=readers n=1513 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.8 hold_p50_us=0.7 hold_p99_us=2.8 hold_max_us=19.7
+lock site=dir_live n=131 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.4 hold_max_us=9.9
+lock site=inode_live n=159 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.3 hold_max_us=12.2
+lock site=handles n=552 wait_p50_us=0.0 wait_p99_us=0.8 wait_max_us=7.3 hold_p50_us=1.2 hold_p99_us=5.8 hold_max_us=14.3
+lock site=file_cell n=1449 wait_p50_us=0.0 wait_p99_us=85.5 wait_max_us=141.8 hold_p50_us=5.5 hold_p99_us=83.1 hold_max_us=803.3
+lock site=cell_map n=2220 wait_p50_us=0.0 wait_p99_us=0.2 wait_max_us=15.0 hold_p50_us=0.6 hold_p99_us=5.0 hold_max_us=16.1
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=3.6 wait_max_us=3.6 hold_p50_us=5.8 hold_p99_us=204.9 hold_max_us=204.9
+test serialize_off_target ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.32s
+
+load after: 15:03  up 31 days, 19:23, 8 users, load averages: 15.88 16.54 19.45
+=== lock_wait_rows
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/lock_wait_rows.rs (target/debug/deps/lock_wait_rows-62100cc00d545e7e)
+
+running 4 tests
+[23:03:09.878][FUSE] write: fh=2 ino=2 switches to overlay (offset=524288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388589.888][rebase] ino=2 size=1048576 free=135296 cost_before=135296 taken=2/135168 rechunked=165174 base_read=36333 reused_entries=76 reused_nodes=0 nodes_loaded=1 splice_ms=3.1
+rows other_files_do_not_wait
+lock site=store n=517 wait_max_us=0.0 hold_max_us=14.0
+lock site=io n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal n=102 wait_max_us=0.0 hold_max_us=2.0
+lock site=wal_writer n=180 wait_max_us=0.0 hold_max_us=22.6
+lock site=wal_pending n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal_queue n=101 wait_max_us=0.0 hold_max_us=10.8
+lock site=readers n=21 wait_max_us=0.0 hold_max_us=6.4
+lock site=dir_live n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=inode_live n=22 wait_max_us=0.0 hold_max_us=9.2
+lock site=handles n=41 wait_max_us=0.0 hold_max_us=7.9
+lock site=file_cell n=103 wait_max_us=0.0 hold_max_us=150.8
+lock site=cell_map n=61 wait_max_us=0.0 hold_max_us=9.0
+lock site=stripe n=0 wait_max_us=0.0 hold_max_us=0.0
+slowest_y_round_us=25146.2
+test other_files_do_not_wait_rows ... ok
+[23:03:10.559][FUSE] write: fh=2 ino=2 switches to overlay (offset=524288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388590.587][rebase] ino=2 size=1048576 free=135296 cost_before=135296 taken=2/135168 rechunked=165174 base_read=36333 reused_entries=76 reused_nodes=0 nodes_loaded=1 splice_ms=4.0
+rows readers_do_not_wait_for_writer_io
+lock site=store n=180 wait_max_us=2.0 hold_max_us=7.9
+lock site=io n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal n=2 wait_max_us=0.0 hold_max_us=1.8
+lock site=wal_writer n=3 wait_max_us=0.0 hold_max_us=3.8
+lock site=wal_pending n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal_queue n=2 wait_max_us=0.0 hold_max_us=1.6
+lock site=readers n=52 wait_max_us=0.0 hold_max_us=4.3
+lock site=dir_live n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=inode_live n=1 wait_max_us=0.0 hold_max_us=8.6
+lock site=handles n=1 wait_max_us=0.0 hold_max_us=7.8
+lock site=file_cell n=102 wait_max_us=1.3 hold_max_us=252.0
+lock site=cell_map n=101 wait_max_us=1.4 hold_max_us=5.6
+lock site=stripe n=0 wait_max_us=0.0 hold_max_us=0.0
+slowest_read_us=163.9
+test readers_do_not_wait_for_writer_io_rows ... ok
+[23:03:11.036][FUSE] write: fh=2 ino=2 switches to overlay (offset=524288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388591.058][rebase] ino=2 size=1048576 free=8388608 cost_before=4160 taken=1/4096 rechunked=18265 base_read=14576 reused_entries=87 reused_nodes=0 nodes_loaded=1 splice_ms=0.9
+[t=1795388591.058][rebase] ino=2 size=1048576 free=8388608 cost_before=4160 taken=1/4096 rechunked=18265 base_read=14576 reused_entries=87 reused_nodes=0 nodes_loaded=1 splice_ms=0.3
+rows release_with_drops_does_not_block_readers
+lock site=store n=150 wait_max_us=1.5 hold_max_us=5.8
+lock site=io n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal n=2 wait_max_us=0.0 hold_max_us=0.9
+lock site=wal_writer n=3 wait_max_us=0.0 hold_max_us=3.1
+lock site=wal_pending n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal_queue n=2 wait_max_us=0.0 hold_max_us=1.8
+lock site=readers n=52 wait_max_us=0.0 hold_max_us=4.2
+lock site=dir_live n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=inode_live n=1 wait_max_us=0.0 hold_max_us=7.6
+lock site=handles n=2 wait_max_us=0.0 hold_max_us=6.6
+lock site=file_cell n=103 wait_max_us=14.8 hold_max_us=62.7
+lock site=cell_map n=102 wait_max_us=1.1 hold_max_us=6.2
+lock site=stripe n=1 wait_max_us=0.0 hold_max_us=5.0
+slowest_read_us=163.1 rebase_steps=2
+test release_with_drops_does_not_block_readers_rows ... ok
+[23:03:11.565][FUSE] write: fh=2 ino=2 switches to overlay (offset=524288 len=4096 expected=0 pending=0 fresh=false overlap=false)
+[t=1795388591.593][rebase] ino=2 size=1048576 free=135296 cost_before=135296 taken=2/135168 rechunked=165174 base_read=36333 reused_entries=76 reused_nodes=0 nodes_loaded=1 splice_ms=3.5
+[t=1795388591.594][rebase] ino=2 size=1048576 free=135296 cost_before=135296 taken=2/135168 rechunked=165174 base_read=36333 reused_entries=76 reused_nodes=0 nodes_loaded=1 splice_ms=1.0
+rows readers_do_not_wait_when_steps_drop
+lock site=store n=198 wait_max_us=2.1 hold_max_us=8.8
+lock site=io n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal n=2 wait_max_us=0.0 hold_max_us=1.8
+lock site=wal_writer n=3 wait_max_us=0.0 hold_max_us=4.6
+lock site=wal_pending n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=wal_queue n=2 wait_max_us=0.0 hold_max_us=1.4
+lock site=readers n=52 wait_max_us=0.0 hold_max_us=4.1
+lock site=dir_live n=0 wait_max_us=0.0 hold_max_us=0.0
+lock site=inode_live n=1 wait_max_us=0.0 hold_max_us=11.6
+lock site=handles n=1 wait_max_us=0.0 hold_max_us=8.1
+lock site=file_cell n=103 wait_max_us=17.5 hold_max_us=150.1
+lock site=cell_map n=101 wait_max_us=4.1 hold_max_us=6.0
+lock site=stripe n=0 wait_max_us=0.0 hold_max_us=0.0
+slowest_read_us=166.3 rebase_steps=2
+test readers_do_not_wait_when_steps_drop_rows ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.19s
+
+=== lock_stats_report
+warning: struct `fuse_rename_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:264:19
+    |
+264 | pub(crate) struct fuse_rename_in {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:539:19
+    |
+539 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:548:19
+    |
+548 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:593:19
+    |
+593 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:714:19
+    |
+714 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:724:19
+    |
+724 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 6 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running tests/lock_stats_report.rs (target/debug/deps/lock_stats_report-2d7d3aacb38a13d6)
+
+running 1 test
+test lock_stats_report ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+load end: 15:03  up 31 days, 19:24, 8 users, load averages: 15.08 16.31 19.30
+exit=0

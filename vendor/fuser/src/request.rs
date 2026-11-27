@@ -12,8 +12,8 @@ use log::debug;
 use log::error;
 
 use crate::Filesystem;
+use crate::Owner;
 use crate::PollNotifier;
-use crate::RenameFlags;
 use crate::Request;
 use crate::channel::ChannelSender;
 use crate::forget_one::ForgetOne;
@@ -21,6 +21,8 @@ use crate::ll;
 use crate::ll::Errno;
 use crate::ll::ResponseData;
 use crate::ll::ResponseErrno;
+use crate::ll::flags::init_flags::InitFlags;
+use crate::ll::fuse_abi::fuse_in_header;
 use crate::reply::Reply;
 use crate::reply::ReplyDirectory;
 use crate::reply::ReplyDirectoryPlus;
@@ -36,20 +38,47 @@ pub(crate) struct RequestWithSender<'a> {
     ch: ChannelSender,
     /// Parsed request
     pub(crate) request: ll::AnyRequest<'a>,
+    /// The header as the filesystem sees it, where that differs from the one on the wire.
+    ///
+    /// An idmapped mount has no caller ids to report. The kernel already leaves them out of
+    /// most requests; the ones it does send ids for are sending the owner for an inode they
+    /// create, which is those ids mapped through the mount and so not the caller's. Reporting
+    /// them as the caller's would invite a filesystem to decide policy against a mapped id -
+    /// letting an idmapping that lands on uid 0 pass a check for root. They reach the
+    /// filesystem as an `Owner` argument instead, and the caller reads as unknown here
+    masked_header: Option<fuse_in_header>,
 }
 
 impl<'a> RequestWithSender<'a> {
     /// Create a new request from the given data
-    pub(crate) fn new(ch: ChannelSender, data: &'a [u8]) -> Option<RequestWithSender<'a>> {
-        let request = match ll::AnyRequest::try_from(data) {
+    pub(crate) fn new(
+        ch: ChannelSender,
+        data: &'a [u8],
+        negotiated: InitFlags,
+    ) -> Option<RequestWithSender<'a>> {
+        let mut request = match ll::AnyRequest::try_from(data) {
             Ok(request) => request,
             Err(err) => {
                 error!("{err}");
                 return None;
             }
         };
+        request.set_negotiated(negotiated);
 
-        Some(Self { ch, request })
+        let masked_header =
+            negotiated
+                .contains(InitFlags::FUSE_ALLOW_IDMAP)
+                .then(|| fuse_in_header {
+                    uid: crate::FUSE_INVALID_UIDGID,
+                    gid: crate::FUSE_INVALID_UIDGID,
+                    ..request.header().clone()
+                });
+
+        Some(Self {
+            ch,
+            request,
+            masked_header,
+        })
     }
 
     /// Dispatch request to the given filesystem.
@@ -154,6 +183,7 @@ impl<'a> RequestWithSender<'a> {
                     x.chgtime(),
                     x.bkuptime(),
                     x.flags(),
+                    x.kill_suid_gid(),
                     self.reply(),
                 );
             }
@@ -168,6 +198,7 @@ impl<'a> RequestWithSender<'a> {
                     x.mode(),
                     x.umask(),
                     x.rdev(),
+                    self.owner(),
                     self.reply(),
                 );
             }
@@ -178,6 +209,7 @@ impl<'a> RequestWithSender<'a> {
                     x.name().as_ref(),
                     x.mode(),
                     x.umask(),
+                    self.owner(),
                     self.reply(),
                 );
             }
@@ -203,17 +235,25 @@ impl<'a> RequestWithSender<'a> {
                     self.request.nodeid(),
                     x.link_name().as_ref(),
                     Path::new(x.target()),
+                    self.owner(),
                     self.reply(),
                 );
             }
             ll::Operation::Rename(x) => {
+                // Only macFUSE carries flags on the plain rename opcode. Everywhere else the
+                // extended flags arrive via FUSE_RENAME2.
+                #[cfg(target_os = "macos")]
+                let flags = x.flags();
+                #[cfg(not(target_os = "macos"))]
+                let flags = crate::RenameFlags::empty();
                 filesystem.rename(
                     self.request_header(),
                     self.request.nodeid(),
                     x.src().name.as_ref(),
                     x.dest().dir,
                     x.dest().name.as_ref(),
-                    RenameFlags::empty(),
+                    flags,
+                    self.whiteout_owner(flags),
                     self.reply(),
                 );
             }
@@ -231,6 +271,7 @@ impl<'a> RequestWithSender<'a> {
                     self.request_header(),
                     self.request.nodeid(),
                     x.flags(),
+                    x.kill_suid_gid(),
                     self.reply(),
                 );
             }
@@ -331,6 +372,14 @@ impl<'a> RequestWithSender<'a> {
                 filesystem.statfs(self.request_header(), self.request.nodeid(), self.reply());
             }
             ll::Operation::SetXAttr(x) => {
+                // The only flag defined here is FUSE_SETXATTR_ACL_KILL_SGID, which asks
+                // the filesystem to drop SGID as part of an ACL update. Filesystem cannot
+                // be told about it yet, and acknowledging a request to drop privileges
+                // without dropping them would leave SGID set on a file the kernel wanted
+                // it cleared on, so refuse the request instead
+                if x.setxattr_flags() != 0 {
+                    return Err(Errno::ENOTSUP);
+                }
                 filesystem.setxattr(
                     self.request_header(),
                     self.request.nodeid(),
@@ -382,6 +431,8 @@ impl<'a> RequestWithSender<'a> {
                     x.mode(),
                     x.umask(),
                     x.flags(),
+                    x.kill_suid_gid(),
+                    self.owner(),
                     self.reply(),
                 );
             }
@@ -438,7 +489,12 @@ impl<'a> RequestWithSender<'a> {
                 );
             }
             ll::Operation::Poll(x) => {
-                let ph = PollNotifier::new(se.ch.sender(), x.kernel_handle());
+                let ph = PollNotifier::new(
+                    se.ch.sender(),
+                    x.kernel_handle(),
+                    se.kernel_capabilities,
+                    se.kernel_abi,
+                );
 
                 filesystem.poll(
                     self.request_header(),
@@ -492,6 +548,7 @@ impl<'a> RequestWithSender<'a> {
                     x.to().dir,
                     x.to().name.as_ref(),
                     x.flags(),
+                    self.whiteout_owner(x.flags()),
                     self.reply(),
                 );
             }
@@ -517,6 +574,31 @@ impl<'a> RequestWithSender<'a> {
                     o.offset,
                     x.len(),
                     x.flags(),
+                    self.reply(),
+                );
+            }
+            ll::Operation::SyncFs(_x) => {
+                filesystem.syncfs(self.request_header(), self.request.nodeid(), self.reply());
+            }
+            ll::Operation::StatX(x) => {
+                filesystem.statx(
+                    self.request_header(),
+                    self.request.nodeid(),
+                    x.file_handle(),
+                    x.flags(),
+                    x.mask(),
+                    self.reply(),
+                );
+            }
+            ll::Operation::TmpFile(x) => {
+                filesystem.tmpfile(
+                    self.request_header(),
+                    self.request.nodeid(),
+                    x.mode(),
+                    x.umask(),
+                    x.flags(),
+                    x.kill_suid_gid(),
+                    self.owner(),
                     self.reply(),
                 );
             }
@@ -551,6 +633,40 @@ impl<'a> RequestWithSender<'a> {
 
     /// Create a reply object for this request that can be passed to the filesystem
     /// implementation and makes sure that a request is replied exactly once
+    /// The owner for an inode this request creates.
+    ///
+    /// On an idmapped mount these are the caller's ids mapped through the mount's idmapping,
+    /// which is why they are not the caller's ids; otherwise they are the caller's unchanged.
+    fn owner(&self) -> Owner {
+        Owner {
+            uid: self.request.header().uid,
+            gid: self.request.header().gid,
+        }
+    }
+
+    /// The owner for the inode a `RENAME_WHITEOUT` leaves behind, and `None` for any other
+    /// rename, which creates no inode for anyone to own.
+    ///
+    /// The flags decide this rather than whether ids were sent: off an idmapped mount every
+    /// request carries them, so reading them alone would name an owner for renames that
+    /// create nothing.
+    #[cfg_attr(not(target_os = "linux"), expect(unused_variables))]
+    fn whiteout_owner(&self, flags: crate::RenameFlags) -> Option<Owner> {
+        // Whiteouts are Linux's; no other platform has a rename that creates an inode
+        #[cfg(not(target_os = "linux"))]
+        return None;
+
+        #[cfg(target_os = "linux")]
+        {
+            if !flags.contains(crate::RenameFlags::RENAME_WHITEOUT) {
+                return None;
+            }
+            let owner = self.owner();
+            (owner.uid != crate::FUSE_INVALID_UIDGID && owner.gid != crate::FUSE_INVALID_UIDGID)
+                .then_some(owner)
+        }
+    }
+
     pub(crate) fn reply<T: Reply>(&self) -> T {
         Reply::new(self.request.unique(), ReplySender::Channel(self.ch.clone()))
     }
@@ -558,6 +674,6 @@ impl<'a> RequestWithSender<'a> {
     /// Returns a Request reference for this request
     #[inline]
     fn request_header(&self) -> &Request {
-        Request::ref_cast(self.request.header())
+        Request::ref_cast(self.masked_header.as_ref().unwrap_or(self.request.header()))
     }
 }

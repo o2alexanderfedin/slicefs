@@ -25,6 +25,17 @@ Measured on the macOS CI round trip (Boost 1.85, 77,655 files, FSKit):
 - Chunking: FastCDC v2020, average 8 KiB (min 4 KiB, max 32 KiB). The minimum is one
   4 KiB disk block; min 2 KiB stored less than 1 % less data on source trees and
   tars, with 5-9 % more chunks.
+  The profile (min/avg/max) is per store: `Options::profile` (a
+  `ChunkProfile`), read back with `ChunkStore::profile()`. It is set at
+  `seed` (`--chunk-profile MIN/AVG/MAX`, in KiB) and kept in FORMAT (the
+  `chunks` line and the ro_compat flag `chunk-profile`, see
+  `docs/design/store-format.md`). The default is 4/8/32 KiB. The max is
+  at most 1 MiB (`ChunkProfile::MAX_LIMIT`), which bounds the stream
+  buffer (see "Memory of a stream" below). The five measured profiles
+  (max up to 512 KiB) are in `docs/research/chunk-profiles.md`. Metadata
+  values (`metadata::store_io`) are cut with the same profile as file
+  data. Manifest node boundaries (`LEAF_ENTRIES`, `NODE_MIN`, `is_cut` on
+  IDs) do not depend on the profile.
 - Object ID: a hash tag byte, then the hash of the uncompressed bytes, the
   full 256 bits (33 bytes in all, the size of the `ObjectKey` that the
   metadata uses; collision strength 128 bits). The default hash is BLAKE3.
@@ -92,15 +103,24 @@ these inputs at a rebase.
 - Whole-node reuse: in copy mode, a whole old manifest node that ends before
   the next change is pushed as one entry one level up, so its entries are
   not read one by one.
-- Exact zero shortcut: a 32 KiB range that is known to be zeros (past
-  `keep`, or old zero chunks) and has no change is pushed as the zero chunk
-  without a read or a hash.
+- Exact zero shortcut: a range of the store max (32 KiB at the default
+  profile) that is known to be zeros (past `keep`, or old zero chunks) and
+  has no change is pushed as the zero chunk of the store without a read or
+  a hash.
 - The output key is always the key of a full `FileWriter` write of the same
   bytes (oracle tests). Chunking stays deterministic: the same bytes give
   the same chunks whatever the write history, so there is no forced cut. On long repeating non-zero data, FastCDC finds no old cut to
   resync at, so a rebase can cut again up to the end of the file. The CPU
   then follows the file size, but the memory stays fixed: one piece of at
-  most 2 x `CHUNK_MAX` and one decoded node per tree level.
+  most 2 x max of the store profile and one decoded node per tree level.
+- Memory of a stream: a `FileWriter` keeps under 2 x max bytes of the store
+  profile, and a stream step clones it. This buffer is not counted in
+  `--dirty-budget`. At the 1 MiB limit of max, that is under 2 MiB per
+  streaming file plus the clone during a step (under 4 MiB): bounded, not
+  O(file size). The total is N x that for N files that stream at the same
+  time (for example 50 streams: under 100 MiB, under 200 MiB during steps),
+  on top of the budget. At the default profile it is under 64 KiB per
+  stream.
 
 Small splices (debug build, tests in `file.rs` and `write_path_tests.rs`):
 
@@ -151,9 +171,9 @@ snapshots are 33-byte keys in the `RootUpdate` and `Snapshot` records.
 
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
-BLAKE3-256 of the name (no object is stored for it). The store format is 6;
-a store of format 5 (224-bit object IDs) or 4 (metadata in `vt0/`) is
-refused.
+BLAKE3-256 of the name (no object is stored for it). The store format
+number and the store header are in `docs/design/store-format.md` (format 7;
+a store of an older format is refused).
 
 ## Object IDs and the hash
 
@@ -167,11 +187,22 @@ ObjectId = tag (1 byte) | digest (32 bytes)
   entries and roots name their hash too, and a peer can verify the content
   that a key refers to.
 - A hash is an `ObjectHasher` (`chunk_store::hash`: name, tag, digest). The
-  build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`).
+  build knows a fixed list of them (`hasher_by_name`, `hasher_by_tag`):
+  `blake3-256` (tag `0x1e`) and `sha256` (tag `0x12`, the multihash code of
+  sha2-256).
+- SHA-256 comes from the RustCrypto `sha2` crate. At run time it uses the
+  SHA-NI instructions on x86_64 or the ARMv8 SHA2 instructions on aarch64,
+  if the CPU has them. On a CPU without them it runs the software code:
+  about 250 MB/s per core on the test machine, about 16 times slower than
+  BLAKE3. A store that can hold SHA-256 objects has the incompat header
+  flag `hash-sha256` (see `docs/design/store-format.md`). The flag is
+  written before the first SHA-256 object, and it stays when the store goes
+  back to BLAKE3-256.
 - Write hash: the store makes the IDs of new objects with one hasher,
   injected at open (`Options::hasher`, default BLAKE3-256), as the zstd
-  level is. The store records it in its format marker, as a second line
-  `hash blake3-256` (a marker without that line means blake3-256).
+  level is. The store records it in its store header (`FORMAT`, see
+  `docs/design/store-format.md`), as a line `hash blake3-256` (a header
+  without that line means blake3-256).
   `slicefs mount --hash <name>` and `slicefs seed --hash <name>` change it:
   the new name is recorded and new objects use it. Without `--hash`, the
   recorded hash stays. An unknown name is refused with the list of the
@@ -182,13 +213,181 @@ ObjectId = tag (1 byte) | digest (32 bytes)
   verifiable. A tag that the build does not know is an error (a damaged or
   newer store), never a panic.
 - The same bytes under two hashes are two objects: there is no dedup across
-  hashes. A conversion of a whole store to a new hash is future work
-  (#62, `slicefs rehash`).
+  hashes. `slicefs rehash` converts a whole store to one hash (see
+  "Rehash (#62)" below).
 - Keys that are not content addresses do not change with the write hash: a
   directory entry key is always BLAKE3-256 of the name, so lookups keep
   working for the life of the store.
 - The cut of the manifest nodes (`is_cut`) looks at the last 4 digest bytes,
   never at the tag.
+
+## Rehash (#62)
+
+```
+slicefs rehash --to <hash> [--dry-run] <store>
+```
+
+The command writes every live object of a store again under the hash
+`<hash>`. It does this for the current root and for each snapshot root.
+After the run every live object has the tag of `<hash>`, the files and the
+snapshots (version, name, `created_at`, content) do not change, and the
+header records `hash <hash>`. The engine is `metadata::rehash`, and the
+command is `slicefs-cli/src/rehash.rs`.
+
+### Offline only
+
+- The command takes the exclusive store lock (`header::lock_offline`, see
+  `docs/design/store-format.md`) and holds it to its end, GC included. It
+  is refused while a mount or another command holds the lock.
+- It refuses a store with a `mount.lock` file (a mount that did not end
+  cleanly).
+- It refuses a store whose write log has records after the last root.
+- For the last two refusals: mount and unmount the store once, then run
+  rehash again.
+- It refuses an unknown target hash (before it takes the lock) and a path
+  that is not a store.
+
+### Steps and crash states
+
+A run has these steps. Each row says what a crash after the step leaves. In
+every case, a second run of `rehash` finishes the job.
+
+| Step | What it does | A crash after it leaves |
+|------|--------------|-------------------------|
+| 1. Checks | lock, header, `mount.lock`, write log | the old store; nothing written |
+| 2. Flag | the header flag of the target (SHA-256 only), before its first object | the old root; the flag alone is valid |
+| 3. Rewrite | new objects; temp files in `<store>/rehash-tmp/` | the old root; the new objects are garbage for the next GC; the next writable open removes `rehash-tmp` |
+| 4. Sync | the packs and the index of the new objects are durable | the old root |
+| 5. Switch | one new segment with the new root and one record per snapshot | the new root, maybe with the old hash line (a mixed store, which is valid) |
+| 6. Header | the line `hash <hash>` | the new root; the old objects are not freed yet |
+| 7. GC | a full GC on the open store, with the new roots | the new root; the GC is crash-safe by its own design |
+| 8. Report | `rehash-tmp` is removed; the report | done |
+
+A run always does the full GC, also when no root changed. Thus a second run
+after a crash between the switch and the GC frees the old objects.
+
+An error that is not a crash (a damaged object, a failed write) removes
+`rehash-tmp` and any `segment-*.seg.tmp` before the command returns. An
+error before the switch says that the new objects of the run stay until
+the next `slicefs gc` or rehash run.
+
+### Conversion
+
+- Each value (a file content, and the inode, directory and xattr nodes) is
+  read with verified reads and streamed, in windows of 1 MiB, into a
+  `FileWriter` of the store. That store is open with the target hash and
+  the chunk profile of the header. Thus a file gets the key of a fresh
+  write of its bytes under the target hash and the store profile. The tree
+  is not translated node by node, because the manifest node cuts depend on
+  the IDs (`is_cut`).
+- The key-carrying nodes are rebuilt: the manifest lists, the `u64 -> key`
+  maps, the inode map, the refcount table and the root record. Each key is
+  replaced by its new key. These nodes are always rebuilt, also when they
+  have the target tag, because they can list keys of another tag.
+- Directory entry keys (BLAKE3-256 of the name) are not content addresses.
+  They are inside the copied bytes and do not change.
+- A value whose own key and every object of its tree already have the
+  target tag is kept as it is. Its nodes are read to check the tags; its
+  chunks are not read.
+- Every read is verified with the hasher of the tag of the object. A
+  damaged object, a missing object or an unknown tag stops the run before
+  the switch. The error names the node kind and the cause, and nothing is
+  switched.
+- The refcount rows get the new keys and are sorted by them in temp files
+  (49 bytes per row: new key, count, row index), with fixed RAM (a 4 MiB
+  sort chunk, at most 32 merge inputs of 64 KiB each). Rows that get one
+  new key are merged. A row whose object is missing is dropped, and the
+  report counts it.
+
+### Switch
+
+- The switch is one segment `segment-<N>.seg` with one `RootUpdate` and one
+  `SnapshotRecord` per snapshot. The snapshot records keep the version, the
+  name and `created_at`; only the root changes.
+- The segment is written as `segment-<N>.seg.tmp`, synced, renamed to
+  `.seg`, and the directory is synced. The rename is the one atomic step.
+  Then the older segments are removed.
+- A `.seg.tmp` file is ignored by every loader, and the next run removes
+  it.
+- When no root changes but more than one segment file is there (a crash
+  after the rename, before the older segments went), the run writes the
+  switch segment with the same roots. Thus the older segments are removed.
+  The write log is empty at that point, so the roots and the snapshot list
+  are all that the segments hold.
+- The loaders keep the last record of each snapshot version, in file
+  order. So old segments that a crash left after the rename change
+  nothing: the records of the switch segment win.
+
+### Old-to-new map
+
+- The map gives the new key of a (node kind, old key) that the run already
+  did, so a value that many inodes, roots or snapshots share is done once.
+  Its keys are files and nodes, not chunks: chunks dedup by themselves
+  under the target hash.
+- A miss only costs a rewrite with the same result. So a map that a crash
+  lost or cut is safe.
+- On disk: one file in `<store>/rehash-tmp/`, an open-addressing table of
+  67-byte slots (kind, old key, new key). A new file has 2^16 slots
+  (4.4 MB). At half load it grows to twice the slots. So a distinct key
+  costs 134 to 268 bytes of disk.
+- In RAM: a direct-mapped cache of `CACHE_SLOTS` (2^14) slots, about
+  1.1 MB. It is made once and does not grow with the number of keys.
+
+### Memory and disk
+
+- RAM does not grow with the object count during the rewrite. One path of
+  nested values is open at a time (root record, map, manifest list,
+  content), with one 1 MiB read window, one reader and one writer each. In
+  addition there are the map cache and the fixed buffers of the refcount
+  sort. No value and no map is read into RAM whole.
+- Disk: the run writes the new objects next to the old ones. So it needs
+  room for up to a second copy of the live data until the GC of step 7
+  frees the old objects. The report shows the store disk usage before and
+  after.
+- The GC of step 7 uses the mark of every GC (see "The mark walk" below):
+  the RAM of its walk does not grow with the file or root count. Its temp
+  files take about 33 bytes per key per root (about 3 keys per file), up
+  to twice that at the last merge, plus the exact mark (about 33 bytes per
+  object, up to twice that). The rewrite's own temp files (`rehash-tmp`)
+  are removed before this GC.
+- Time: a rehash to SHA-256 on a CPU without SHA instructions runs at about
+  250 MB/s per core for the hash, plus zstd. A large store can take hours.
+  The progress lines show where the run is.
+
+### Dry run
+
+`--dry-run` takes the same lock and makes the same checks, so it refuses
+what a real run refuses. Then it reads and verifies the live tree through a
+read-only open and writes nothing in the store: no temp files, no flag,
+no header change, no pack. Its old-to-new map is the on-disk map of a real
+run, in a new directory of the system temp dir (`TMPDIR`, not the store),
+removed at the end. So a value that files, roots or snapshots share is
+read and counted once, as in a real run. The map takes about 134 bytes per
+distinct key there. Where the temp dir is a RAM file system (tmpfs), the
+map is in RAM: for a large store, set `TMPDIR` to a directory on a disk.
+It reports the values read and verified, and the objects of
+another hash with their bytes. That count is an estimate of what a real
+run rewrites and of what its GC frees.
+
+### Report
+
+Progress lines go to stderr: one line at each step (`rehash: checks
+passed`, `flag written`, `synced`, `switch` or `no switch needed`,
+`header`, `gc`), and a line of the rewrite every 5 s
+(`rehash: rewrite: root i of n: ...`). The report on stdout has these
+lines:
+
+- `Rehash to <hash>: N roots (S snapshots).`
+- `Read: ...`: the values and bytes read. Each object read was verified.
+- `Rewritten: ...; new objects: ...`: the values written again, and the
+  new objects with their stored bytes. `Rewritten` also counts the
+  key-carrying nodes that get the same key again.
+- `Kept as is: ... Stale refcount rows dropped: ...`
+- `Every live object already has hash <hash>; no root changed.`, only
+  when no root changed.
+- `GC (full): ...`: the line of `slicefs gc`.
+- `Bytes freed: N.`: the stored bytes of the objects that the GC removed.
+- The store disk usage before and after.
 
 ## Pack files
 
@@ -1159,9 +1358,10 @@ files:
 
 So a root never refers to an object that is not durable.
 
-`fsync` of a file: today it makes the file's objects durable. With packs it
-syncs the active pack once (all files written since the last sync are
-covered), then the write log. A second `fsync` with no new data returns
+`fsync` of a file: it writes the streamed content of the file into its
+manifest, then syncs only the write log (`handle_fsync`). It does not sync
+the pack: the `Write` records in the log make the data durable, and replay
+writes it again after a crash. A second `fsync` with no new data returns
 without a disk flush.
 
 At open:
@@ -1346,6 +1546,42 @@ The RAM of a GC: the totals of each pack, the entries of one pack, the
 memtable copy, and the filters and fences of the pending runs of one
 group.
 
+The mark walk (#207) gives every key of every root (each metadata node,
+each manifest list, each file content key, and the file roots of open
+handles) to an external sort (`ChunkStore::gc_sorter`, the sorter of the
+full GC below) in `<store>/gc-tmp`, and reads the sorted keys without
+duplicates back one at a time. For each key it adds the objects of that
+value to the mark. A snapshot of the same tree gives the same keys again,
+but they go to disk, not to RAM. The map and manifest nodes are read in
+1 MiB windows of whole entries, never whole. RAM of the walk: one sort
+buffer (4 MiB), the merge buffers (32 x 64 KiB), and two read windows.
+Disk: none while the keys fit in the sort buffer (about 127,000 keys: the
+sort stays in RAM and makes no file). Above that, about 33 bytes per key
+per root (a tiny file is 3 keys: inode node, manifest list, content). The
+peak is at the last merge, where its inputs and its output exist at the
+same time: up to twice that. The files are removed at the end, also
+after an error or a stop. An online GC, `slicefs gc`, `gc --full` and the
+GC of `slicefs rehash` share this walk. The RAM that stays (measured in
+`docs/research/gc-memory.md`): the mark of a normal GC, a Bloom filter of
+about 1.25 bytes per stored object (`ChunkStore::live_filter`; it grows
+with the object count, so with the file count); the per-pack `.idx`
+decode (bounded by the pack limit); and the Bloom filters of the index
+runs (about 2.5 bytes per object).
+
+Before the walk, the mark checks the free space of the file system of
+`gc-tmp` (`ChunkStore::gc_temp_space_check`) against an estimate: the
+keys of each root from the sizes of its maps (no map is read), at 33
+bytes, twice, and for a full GC the exact mark (33 bytes per object,
+twice). If that does not fit with a reserve left for the writes of the
+store (`chunk_store::gc_tmp_reserve`: 1 % of the file system, at least
+64 MiB), the GC does not start: an I/O error of kind `StorageFull`,
+nothing deleted. The estimate can be low (a file with many extents), so
+each write of a run or a merge output checks again and stops the mark
+before the disk is full. The online GC logs the error and backs off as
+for any failed GC. A stop (unmount) is asked before each root, every
+4096 keys of a walk, in the merge passes (before each merge and every
+16384 records) and before each value of the read-back.
+
 The mark (#113) is a Bloom filter of the live IDs, not a set of them:
 10 bits (1.25 bytes) for each object of the store
 (`ChunkStore::live_filter`). A false positive only keeps a dead object; a
@@ -1380,8 +1616,9 @@ next one, and a dead object does not stay forever.
 mounted store), runs a GC that frees every dead object. It uses
 `gc_begin_full`, `metadata::gc::live_objects_exact` and `gc_finish_full`:
 
-- Exact mark in bounded RAM. The mark (and the objects put or read before
-  `gc_finish_full`, also the nodes that the mark reads) go to an external
+- Exact mark in bounded RAM (after the mark walk above). The mark (and
+  the objects put or read before `gc_finish_full`, also the nodes that
+  the mark reads) go to an external
   sort: a buffer of `Options::gc_sort_chunk_ids` IDs (default 4 MiB of
   IDs, 127,100) is sorted, deduplicated and written to a temp file. Then
   merges of at most `Options::gc_merge_fan_in` files (default 32; the

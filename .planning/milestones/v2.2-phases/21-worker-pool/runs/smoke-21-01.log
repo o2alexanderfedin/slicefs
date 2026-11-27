@@ -1,0 +1,49 @@
+# host: tar of the committed clean tree at f4856c3; docker mount form, volume slicefs-target-p21, debug build
+# smoke 21-01 at tree SLICEFS_WORKERS=4
+Linux cafc56651806 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+1.64 1.94 2.62 3/971 22
+warning: unreachable pattern
+   --> crates/chunk-store/src/pack_io.rs:491:34
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/metadata/src/store.rs:842:32
+842 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+842 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1451:32
+1451 -             self.logical_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+1451 +             self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/metadata/src/store.rs:1457:26
+1457 -         self.inode_count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+1457 +         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1405:25
+1405 -         self.fail_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1405 +         self.fail_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+    --> crates/slicefs-cli/src/filesystem.rs:1420:25
+1420 -         self.drop_steps.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+1420 +         self.drop_steps.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1)).is_ok()
+build-exit=0
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 4 (set)
+  pool-line: pool: workers=4 jobs=5 max_weight=0 max_queue_wait_ms=0 queue_max=1 jobs_per_worker=1,2,1,1
+CAS bytes        : 2.90 MiB (3046095 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+smoke-exit=0
+2.02 2.02 2.61 3/929 427
+exit=0

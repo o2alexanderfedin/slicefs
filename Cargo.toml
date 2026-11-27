@@ -5,16 +5,20 @@ members = [
     "crates/metadata",
     "crates/slicefs-cli",
     "crates/chunk-store",
+    "crates/prolly",
     "benchmarks/chunk-bench",
     "benchmarks/index-bench",
+    "benchmarks/prolly-bench",
 ]
 exclude = ["vendor/fuser"]
 resolver = "2"
 
 [workspace.dependencies]
 thiserror  = "2"
-sha2-compress = "0.7.1"
 blake3     = "1"
+# SHA-256 object IDs (tag 0x12). Picks SHA-NI or the ARMv8 SHA2
+# instructions at run time when the CPU has them.
+sha2       = { version = "0.11", default-features = false }
 fastbloom  = "0.14"
 proptest   = "1"
 tempfile   = "3"
@@ -25,7 +29,7 @@ criterion  = { version = "0.5", features = ["html_reports"] }
 clap       = { version = "4", features = ["derive"] }
 
 # Not used in Phase 1 but wired up for later phases:
-fuser      = { version = "0.18" }
+fuser      = { version = "0.19" }
 redb       = "3.1"
 fastcdc    = "3.2"
 tokio      = { version = "1", features = ["full"] }
@@ -33,7 +37,10 @@ libc       = "0.2"
 anyhow     = "1"
 zstd       = "0.13"
 serde_json = "1"
+# Locks of the hot crates, behind `chunk_store::sync` (Phase 19). 0.12 keeps one
+# copy in the tree with the vendored fuser.
+parking_lot = { version = "0.12", features = ["arc_lock"] }
 
-# Patched fuser (INIT reply sizing fix for FUSE-T 1.2.x). See vendor/fuser/PATCHES.md.
+# Patched fuser (FUSE-T fixes on macOS). See vendor/fuser/PATCHES.md.
 [patch.crates-io]
 fuser = { path = "vendor/fuser" }

@@ -1,0 +1,55 @@
+name: FUSE-T smoke
+
+# A real FUSE-T (FSKit) mount on macOS for every PR that changes how SliceFS
+# talks to FUSE: the vendored fuser, the FUSE callbacks, or the mount script.
+# The fuser patches in vendor/fuser are for FUSE-T, and its unit tests cannot
+# show what FUSE-T really sends (a rename bug passed them; see PATCHES.md).
+# large-copy.sh: 1 GiB copy, renames (in place, to another directory, over a
+# file), cmp, unmount, remount, cmp. About 15 min. The long Boost round trip
+# stays in macos-mounts.yml.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "vendor/fuser/**"
+      - "Cargo.lock"
+      - "crates/slicefs-cli/src/fuse_callbacks.rs"
+      - "crates/slicefs-cli/src/mount.rs"
+      - "scripts/macos-mount-test/large-copy.sh"
+      - ".github/workflows/fuse-t-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuse-t-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: macOS FUSE-T mount (copy, rename, remount)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pkg-config and FUSE-T
+        run: |
+          brew install pkg-config
+          brew install --cask macos-fuse-t/cask/fuse-t
+          sw_vers
+
+      - name: Enable the FUSE-T FSKit extension
+        run: scripts/macos-mount-test/enable-fskit.sh
+
+      - name: Build slicefs (release)
+        run: cargo build --release -p slicefs-cli
+
+      - name: Large copy and renames
+        timeout-minutes: 30
+        env:
+          SLICEFS: target/release/slicefs
+          WORK: ${{ runner.temp }}/work
+          STEP_TIMEOUT: "600"
+        run: scripts/macos-mount-test/large-copy.sh fskit

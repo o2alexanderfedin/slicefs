@@ -1,0 +1,62 @@
+# Safety run 45755055229 (workflow_dispatch, branch feature/phase-21.2-thread-safety, head bec5cc7), conclusion success
+# CI (ci.yml) run 45755062439 on bec5cc7: success
+# job conclusion minutes started completed
+clippy-linux	success	0.58	2026-11-26T04:25:02Z	2026-11-26T04:25:37Z
+clippy-macos	success	1.21	2026-11-26T04:25:02Z	2026-11-26T04:26:15Z
+coverage	success	3.35	2026-11-26T04:25:02Z	2026-11-26T04:28:23Z
+deadlock	success	1.86	2026-11-26T04:25:03Z	2026-11-26T04:26:55Z
+kani	success	1.21	2026-11-26T04:25:02Z	2026-11-26T04:26:15Z
+miri	success	11.83	2026-11-26T04:25:02Z	2026-11-26T04:36:52Z
+model	success	1.48	2026-11-26T04:25:03Z	2026-11-26T04:26:32Z
+tsan	success	3.9	2026-11-26T04:25:02Z	2026-11-26T04:28:56Z
+# evidence lines (job, step, line; timestamps cut)
+miri	Run scripts/safety/miri.sh	MIRI crate=chunk-store modules=pack_io::tests:: sync::tests:: lock_tail_tests:: run::tests:: index::tests::
+miri	Run scripts/safety/miri.sh	MIRI crate=chunk-store passed=52 ignored=7 secs=578
+miri	Run scripts/safety/miri.sh	MIRI crate=metadata modules=wal:: inode::tests:: xattr::tests::
+miri	Run scripts/safety/miri.sh	MIRI crate=metadata passed=41 ignored=15 secs=98
+miri	Run scripts/safety/miri.sh	MIRI ok
+coverage	Run scripts/safety/coverage.sh	COVERAGE tests workspace=91.29 cas-local=96.29 chunk-store=95.44 metadata=96.09 slicefs-cli=86.15 slicefs-traits=85.53 fuse_callbacks=9.60
+coverage	Run scripts/safety/coverage.sh	COVERAGE floor=90.27 result=ok
+coverage	Run scripts/safety/coverage.sh	COVERAGE merged workspace=93.10 fuse_callbacks=51.40
+model	Run scripts/safety/model.sh	MODEL bound=3
+model	Run scripts/safety/model.sh	MODEL crate=chunk-store passed=1
+model	Run scripts/safety/model.sh	MODEL crate=slicefs-cli passed=6
+model	Run scripts/safety/model.sh	MODEL ok
+clippy-macos	Run scripts/safety/clippy.sh	CLIPPY os=Darwin toolchain=1.100.0 result=ok
+clippy-macos	Run scripts/safety/clippy.sh	UNSAFE files=30 tokens=128 result=ok
+deadlock	Run scripts/safety/deadlock.sh	DEADLOCK STRESS_SECS=20 STRESS_THREADS=8 STRESS_SERIALIZE=0 STRESS_MODE=both STRESS_FILE_MIB=16 STRESS_SEED=2102
+deadlock	Run scripts/safety/deadlock.sh	DEADLOCK build secs=48 exit=0
+deadlock	Run scripts/safety/deadlock.sh	DEADLOCK long_run=ok max_inflight=8 secs=41
+deadlock	Run scripts/safety/deadlock.sh	DEADLOCK serialize_off_target=ok secs=5
+deadlock	Run scripts/safety/deadlock.sh	DEADLOCK ok
+kani	Run scripts/safety/kani.sh	KANI version=0.68.0 (Kani uses its own bundled nightly, not NIGHTLY=nightly-2026-02-11)
+kani	Run scripts/safety/kani.sh	Complete - 9 successfully verified harnesses, 0 failures, 9 total.
+kani	Run scripts/safety/kani.sh	KANI harness=filesystem::proofs::dirty_total_stays_the_sum_of_costs result=SUCCESSFUL secs=10.61
+kani	Run scripts/safety/kani.sh	KANI harness=filesystem::proofs::hard_cap_is_at_least_the_limit result=SUCCESSFUL secs=0.03
+kani	Run scripts/safety/kani.sh	KANI harness=filesystem::proofs::write_end_is_exact_and_bounded result=SUCCESSFUL secs=0.04
+kani	Run scripts/safety/kani.sh	KANI harness=header::proofs::class_word_total result=SUCCESSFUL secs=0.14
+kani	Run scripts/safety/kani.sh	KANI harness=header::proofs::first_line_number_total result=SUCCESSFUL secs=11.23
+kani	Run scripts/safety/kani.sh	KANI harness=header::proofs::release_bytes_total result=SUCCESSFUL secs=0.49
+kani	Run scripts/safety/kani.sh	KANI harness=header::proofs::name_bytes_total result=SUCCESSFUL secs=2.49
+kani	Run scripts/safety/kani.sh	KANI harness=locks::proofs::stripe_in_range result=SUCCESSFUL secs=0.02
+kani	Run scripts/safety/kani.sh	KANI harness=pool::proofs::workers_for_cpus_in_range result=SUCCESSFUL secs=0.10
+kani	Run scripts/safety/kani.sh	KANI ok harnesses=9
+tsan	TSan memory layout	vm.mmap_rnd_bits = 28
+tsan	Run scripts/safety/tsan.sh	TSAN host=x86_64-unknown-linux-gnu options=halt_on_error=0 second_deadlock_stack=1
+tsan	Run scripts/safety/tsan.sh	TSAN build secs=114 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=pool_tests result=ok reports=0 secs=0 passed=9 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=reply_after_locks result=ok reports=0 secs=0 passed=2 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=multi_handle_posix result=ok reports=0 secs=3 passed=13 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=lock_free_io result=ok reports=0 secs=9 passed=33 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=flusher_tests result=ok reports=0 secs=29 passed=26 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=dirty_budget_tests result=ok reports=0 secs=36 passed=1 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=race_closed_size_tests result=ok reports=0 secs=1 passed=3 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=rename_ancestor_tests result=ok reports=0 secs=1 passed=7 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=chunk-store:race_tests:: result=ok reports=0 secs=3 passed=14 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=chunk-store:lock_tail_tests:: result=ok reports=0 secs=0 passed=11 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=metadata:wal::per_op:: result=ok reports=0 secs=1 passed=13 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN target=long_run result=ok reports=0 secs=21 passed=1 exit=0
+tsan	Run scripts/safety/tsan.sh	TSAN ok
+clippy-linux	Run scripts/safety/clippy.sh	CLIPPY os=Linux toolchain=1.100.0 result=ok
+clippy-linux	Run scripts/safety/clippy.sh	UNSAFE files=30 tokens=128 result=ok
+ThreadSanitizer warning lines: 0

@@ -620,7 +620,7 @@ struct TagRange {
 /// runs). The run owns its mapping: it is unmapped when the last `Arc` of
 /// the run drops, so a reader keeps valid bytes after a merge or GC removes
 /// the file.
-#[allow(dead_code)] // The pack range: for GC (17-07).
+#[allow(dead_code, reason = "min_pack and max_pack are read only by pack_range")]
 pub(crate) struct Run {
     file: Arc<dyn PackRead>,
     /// The whole file, mapped; `None`: lookups read pages with `read_at`.
@@ -732,7 +732,7 @@ impl Run {
         }
         let mut tags = Vec::with_capacity(tb.len() / TAG_ROW);
         let mut next = 0u64;
-        for row in tb.chunks_exact(TAG_ROW) {
+        for row in tb.as_chunks::<TAG_ROW>().0 {
             let (tag, first, count) = (row[0], le_u64(row, 1), le_u64(row, 9));
             if tags.last().is_some_and(|t: &TagRange| t.tag >= tag) {
                 return Err(bad("tags out of order"));
@@ -752,7 +752,7 @@ impl Run {
         if crc32c::crc32c(&fb) != f.fences.crc {
             return Err(bad("bad fence table CRC"));
         }
-        let fences: Vec<u64> = fb.chunks_exact(FENCE).map(|c| u64::from_be_bytes(c.try_into().unwrap())).collect();
+        let fences: Vec<u64> = fb.as_chunks::<FENCE>().0.iter().map(|c| u64::from_be_bytes(*c)).collect();
         debug_assert_eq!(fences.len(), pages);
         for t in &tags {
             if fences[t.first..t.first + t.count].windows(2).any(|w| w[0] > w[1]) {
@@ -822,7 +822,7 @@ impl Run {
 
     /// The smallest and largest pack of the put entries; `None` if the run
     /// has only tombstones.
-    #[allow(dead_code)] // Not used: a GC must not skip a run by its pack range.
+    #[allow(dead_code, reason = "not used: a GC must not skip a run by its pack range")]
     pub fn pack_range(&self) -> Option<(u64, u64)> {
         (self.min_pack <= self.max_pack).then_some((self.min_pack, self.max_pack))
     }
@@ -1154,6 +1154,7 @@ mod tests {
     // open_run, on each I/O strategy: FileIo maps the run, and a hit reads
     // its page in place (no `read_at`); the others read one page per hit.
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support a file-backed mmap")]
     fn a_run_round_trips_through_each_io() {
         let dir = tempfile::tempdir().unwrap();
         let files = FileIo::new(dir.path().join("packs"));
@@ -1247,6 +1248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn runs_of_each_size_round_trip() {
         for n in [0u64, 1, 70, 71, 120, 121, 10_000] {
             let entries: Vec<(ObjectId, Entry)> = (0..n).map(|i| (key(0x1e, i), put(i))).collect();
@@ -1281,6 +1283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn keys_with_the_prefix_of_a_page_fence_are_found() {
         // Keys 60..360 share one 8-byte prefix: more than a page, so a page
         // boundary falls inside them, and a page starts with that prefix.
@@ -1600,6 +1603,7 @@ mod tests {
     /// differ only in digest byte 0: each one is found with its own place,
     /// and IDs near them are misses.
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn ids_that_share_most_of_their_bytes_are_kept_apart() {
         let last = ID_LEN - 1; // the last digest byte in `ObjectId.0`
         let mut entries = Vec::new();
@@ -1674,6 +1678,7 @@ mod tests {
     /// Bytes for each entry of a run with real places: about 42 bytes
     /// (58 with the fixed fields of run version 1).
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_run_of_real_places_needs_about_42_bytes_for_each_entry() {
         let n = 200_000u64;
         let mut x = 0x2545_F491_4F6C_DD1Du64;
@@ -1753,6 +1758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_run_with_a_filter_answers_misses_without_a_page_read() {
         let entries = hashed_entries(5000);
         let io = MemIo::new();

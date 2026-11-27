@@ -13,7 +13,9 @@ use metadata::store::DictMetadataStore;
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::content::{self, FORMAT, FORMAT_FILE};
 use slicefs_cli::filesystem::SliceFsFilesystem;
+use slicefs_cli::header::{HASH_SHA256_FLAG, HASH_SHA256_RELEASE};
 use slicefs_cli::seed::run_seed;
+use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::MetadataStore;
 use tempfile::TempDir;
 
@@ -149,6 +151,26 @@ fn a_new_write_hash_keeps_old_files_and_lookups() {
     close_fs(fs);
 }
 
+/// WR-03: the header step of `seed --hash` (`check_write`) on a new store
+/// gives no hash-change line and writes the chosen hash in the first
+/// header; an unknown name makes no header. On an existing store a change
+/// gives the line.
+#[test]
+fn seed_hash_on_a_new_store_prints_no_change_line() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("new");
+    assert_eq!(content::check_write(&store, Some(TEST_HASH)).unwrap(), None, "no line for a new store");
+    assert_eq!(marker(&store), format!("{FORMAT}hash {TEST_HASH}\n"));
+    let line = content::check_write(&store, Some("blake3-256")).unwrap();
+    assert_eq!(
+        line.as_deref(),
+        Some("New objects use hash blake3-256 (was test-keyed-blake3); stored objects stay readable.")
+    );
+    let bad = dir.path().join("bad");
+    assert!(content::check_write(&bad, Some("md5")).is_err());
+    assert!(!bad.exists(), "an unknown hash name makes no store");
+}
+
 /// `seed --hash`: a known name is recorded and used; an unknown one is
 /// refused with the known names; no hash line means blake3-256.
 #[test]
@@ -176,7 +198,7 @@ fn seed_hash_is_recorded_and_unknown_names_are_refused() {
     let plain = TempDir::new().unwrap();
     std::fs::write(plain.path().join(FORMAT_FILE), FORMAT).unwrap();
     assert_eq!(content::write_hasher(plain.path()).unwrap().name(), "blake3-256");
-    content::check_format(plain.path()).unwrap();
+    slicefs_cli::header::check(plain.path(), slicefs_cli::header::Want::Read).unwrap();
 
     // `--hash` on a store of an older format: refused, the marker stays.
     let old = TempDir::new().unwrap();
@@ -190,4 +212,123 @@ fn seed_hash_is_recorded_and_unknown_names_are_refused() {
     std::fs::write(plain.path().join(FORMAT_FILE), format!("{FORMAT}hash sha3-1024\n")).unwrap();
     let err = content::open(plain.path()).err().expect("unknown recorded hash").to_string();
     assert!(err.contains("sha3-1024") && err.contains("does not know"), "{err}");
+}
+
+/// The `hash-sha256` flag line of this build.
+fn sha256_flag() -> String {
+    format!("incompat {HASH_SHA256_FLAG} {HASH_SHA256_RELEASE}\n")
+}
+
+/// Every object of the last root (metadata nodes and file content), with
+/// the "no object" key left out.
+fn all_objects(store: &Path) -> Vec<chunk_store::ObjectId> {
+    let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
+    let root = root.expect("a root");
+    let mut io = content::store_io(store).unwrap();
+    let mut keys = metadata::store::referenced_roots(&mut io, &root).unwrap();
+    keys.extend(metadata::store::content_keys(&mut io, &root).unwrap());
+    let cs = Arc::clone(io.store());
+    let ids = keys
+        .iter()
+        .filter(|k| **k != ObjectKey::ZERO)
+        .flat_map(|k| chunk_store::file::file_objects(&cs, content::to_id(k)).unwrap())
+        .collect();
+    cs.close().unwrap();
+    ids
+}
+
+/// HASH-01 tracer: `seed --hash sha256` makes a store whose first header
+/// has the hash line and the incompat flag, whose objects all have tag
+/// 0x12, whose files read back, and which scrub accepts.
+#[test]
+fn sha256_seed_records_the_flag_and_tags_every_object() {
+    let src = TempDir::new().unwrap();
+    let files: [(&str, Vec<u8>); 3] = [("big.bin", data(1, 300_000)), ("small.txt", b"ten bytes!".to_vec()), ("empty", Vec::new())];
+    for (name, bytes) in &files {
+        std::fs::write(src.path().join(name), bytes).unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let store = dir.path();
+    run_seed(store, src.path(), Some("sha256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash sha256\n{}", sha256_flag()));
+
+    let ids = all_objects(store);
+    assert!(ids.len() > 10, "{}", ids.len());
+    assert!(ids.iter().all(|id| id.tag() == 0x12), "every object has tag 0x12");
+
+    let fs = open_fs(store);
+    for (name, bytes) in &files {
+        assert_eq!(&read_file(&fs, 1, name), bytes, "{name}");
+    }
+    close_fs(fs);
+    slicefs_cli::scrub::run_scrub(store, false).unwrap();
+    let st = slicefs_cli::stats::store_stats(store).unwrap();
+    let names: Vec<_> = st.flags.incompat.iter().map(|f| (f.name.as_str(), f.release.as_str(), f.known)).collect();
+    assert_eq!(names, [(HASH_SHA256_FLAG, HASH_SHA256_RELEASE, true)]);
+}
+
+/// A BLAKE3-256 store from `seed` with one 100 KiB file `old.bin`.
+fn blake3_store() -> TempDir {
+    let src = TempDir::new().unwrap();
+    std::fs::write(src.path().join("old.bin"), data(1, 100_000)).unwrap();
+    let dir = TempDir::new().unwrap();
+    run_seed(dir.path(), src.path(), None).unwrap();
+    assert_eq!(marker(dir.path()), format!("{FORMAT}hash blake3-256\n"));
+    dir
+}
+
+/// D-11, the `mount --hash` path: the hash line and the flag reach disk in
+/// one header write before the first SHA-256 object; new files get tag
+/// 0x12, old files keep 0x1e, both read back, scrub passes. Then a change
+/// back to blake3-256 keeps the flag.
+#[test]
+fn sha256_mount_hash_change_writes_the_flag_with_the_hash_line() {
+    let dir = blake3_store();
+    let store = dir.path();
+    content::select_hash(store, Some("sha256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash sha256\n{}", sha256_flag()));
+
+    let fs = open_fs(store);
+    let new = write_file(&fs, 1, "new.bin", &data(2, 50_000));
+    let (old, _) = fs.test_lookup(1, "old.bin").unwrap();
+    assert_eq!((tag(&fs, new), tag(&fs, old)), (0x12, 0x1e));
+    assert_eq!(read_file(&fs, 1, "new.bin"), data(2, 50_000));
+    assert_eq!(read_file(&fs, 1, "old.bin"), data(1, 100_000));
+    close_fs(fs);
+    slicefs_cli::scrub::run_scrub(store, false).unwrap();
+}
+
+/// D-11: after the write hash goes back to blake3-256 the flag stays (the
+/// store still holds SHA-256 objects), and the store opens to write.
+#[test]
+fn sha256_flag_stays_after_the_hash_goes_back() {
+    let dir = blake3_store();
+    let store = dir.path();
+    content::select_hash(store, Some("sha256")).unwrap();
+    let fs = open_fs(store);
+    write_file(&fs, 1, "new.bin", &data(2, 50_000));
+    close_fs(fs);
+
+    content::select_hash(store, Some("blake3-256")).unwrap();
+    assert_eq!(marker(store), format!("{FORMAT}hash blake3-256\n{}", sha256_flag()));
+    slicefs_cli::header::check(store, slicefs_cli::header::Want::Write).unwrap();
+    let fs = open_fs(store);
+    assert_eq!(read_file(&fs, 1, "new.bin"), data(2, 50_000));
+    close_fs(fs);
+}
+
+/// D-18 step 2: `ensure_hash_flag` writes only the flag line (the hash
+/// line does not change), once; a hash with no flag writes nothing.
+#[test]
+fn sha256_ensure_hash_flag_writes_only_the_flag() {
+    let dir = blake3_store();
+    let store = dir.path();
+    let before = marker(store);
+    assert!(content::ensure_hash_flag(store, &chunk_store::hash::Sha256).unwrap());
+    assert_eq!(marker(store), format!("{before}{}", sha256_flag()));
+    let after = marker(store);
+    assert!(!content::ensure_hash_flag(store, &chunk_store::hash::Sha256).unwrap());
+    assert_eq!(marker(store), after, "a second call writes nothing");
+    assert!(!content::ensure_hash_flag(store, &chunk_store::Blake3_256).unwrap());
+    assert_eq!(marker(store), after);
 }

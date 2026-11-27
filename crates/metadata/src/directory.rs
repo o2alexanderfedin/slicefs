@@ -342,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn dir_list_interns_same_digest_as_per_change_path() {
         let (_dir, mut io) = make_io();
         let mut old = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 5, 1) };
@@ -365,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_entries_has_dot_and_dotdot() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -376,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_create_dir_entries_dot_points_to_self() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 5, 2) };
@@ -387,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_add_dir_entry_appears_in_list() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -397,6 +401,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_add_dir_entry_duplicate_rejected() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -406,6 +411,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_lookup_finds_entry() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -415,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_lookup_not_found() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -423,6 +430,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_remove_dir_entry_gone_from_list() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -433,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_remove_nonexistent_returns_not_found() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -441,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_remove_dot_rejected() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -449,6 +459,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_remove_dotdot_rejected() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -457,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_add_dot_rejected() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -465,6 +477,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_multiple_entries_round_trip() {
         let (_dir, mut io) = make_io();
         let dir_d = { let mut fsa = &mut io; create_dir_entries(&mut fsa, 1, 1) };
@@ -478,6 +491,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn test_original_entry_list_unchanged_after_add() {
         // The original dir_digest still resolves to the old list (CAS immutability).
         let (_dir, mut io) = make_io();

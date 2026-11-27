@@ -31,9 +31,6 @@ echo "generic/484" >> xfs_excludes.txt
 # Writes directly to scratch block dev
 echo "generic/062" >> xfs_excludes.txt
 
-# TODO: looks like it requires character file support
-echo "generic/078" >> xfs_excludes.txt
-
 # TODO: takes > 10min
 echo "generic/069" >> xfs_excludes.txt
 
@@ -45,14 +42,6 @@ echo "generic/127" >> xfs_excludes.txt
 
 # TODO: requires more complete falloc support. Also fills up the entire hard disk...
 echo "generic/103" >> xfs_excludes.txt
-
-# TODO: requires support for mknod on character files
-echo "generic/184" >> xfs_excludes.txt
-echo "generic/401" >> xfs_excludes.txt
-
-# TODO: requires fifo support
-echo "generic/423" >> xfs_excludes.txt
-echo "generic/434" >> xfs_excludes.txt
 
 # TODO: requires ulimit support for limiting file size
 echo "generic/394" >> xfs_excludes.txt
@@ -66,14 +55,26 @@ echo "generic/099" >> xfs_excludes.txt
 echo "generic/105" >> xfs_excludes.txt
 echo "generic/375" >> xfs_excludes.txt
 
-# TODO: requires support for mounting read-only
+# TODO: requires inheriting a directory's default ACL at creation. The xattr itself round-trips,
+# but nothing consults it when a file is created, so the umask applies where the default ACL
+# should have: the test asks for mode 0666 under a 0775 default ACL and wants 0664, not 0644.
+# Nothing to do with the O_TMPFILE this test creates the file with - an ordinary create() in the
+# same directory gets the mode wrong the same way
+echo "generic/389" >> xfs_excludes.txt
+
+# TODO: requires support for remounting read-only. 306 and 452 additionally need a change in
+# fuse-xfstests, whose _scratch_remount answers "fuse.fuser does not support any options"
+# without attempting the remount; 294 goes through _try_scratch_mount and does attempt it
 echo "generic/294" >> xfs_excludes.txt
 echo "generic/306" >> xfs_excludes.txt
 echo "generic/452" >> xfs_excludes.txt
 
-# TODO: requires atime support
+# TODO: exercises the noatime, relatime and strictatime mount options, and a read-only
+# mount. fuse-xfstests cannot ask for any of them: _fuser_mount reads $4 for suid and drops
+# the rest, so "_scratch_mount -o relatime" and "_scratch_cycle_mount noatime" both arrive as
+# a plain mount. The example implements the kernel default, relatime, which is what the first
+# phase wants; the noatime and strictatime phases need the option to reach the filesystem
 echo "generic/003" >> xfs_excludes.txt
-echo "generic/192" >> xfs_excludes.txt
 
 # TODO: Passes, but takes ~10min and writes > 20GB. Needs support for writing files with large holes,
 # for this test to be fast
@@ -113,6 +114,66 @@ echo "generic/391" >> xfs_excludes.txt
 echo "generic/426" >> xfs_excludes.txt
 echo "generic/467" >> xfs_excludes.txt
 echo "generic/477" >> xfs_excludes.txt
+# These two check that a file handle goes stale once the cache is dropped, so the failed
+# drop leaves every handle resolvable and every check reports the opposite of what it wants
+echo "generic/756" >> xfs_excludes.txt
+echo "generic/777" >> xfs_excludes.txt
+
+# Triggering memory compaction is not allowed inside Docker: /proc/sys/vm/compact_memory is
+# read-only. Also very slow, running for > 11min before failing
+echo "generic/750" >> xfs_excludes.txt
+
+# Clearing the kernel ring buffer is not allowed inside Docker. The test itself passes; only
+# dmesg's complaint about it shows up in the output
+echo "generic/310" >> xfs_excludes.txt
+
+# Setting sysctls is not allowed inside Docker: /proc/sys is mounted read-only. 597 and 598
+# toggle fs.protected_symlinks / fs.protected_regular and 460 the vm dirty ratios, and
+# sysctl's refusal to do so lands in the output - 460's body otherwise passes. Making
+# /proc/sys writable would let them through, but those knobs are global, so the container
+# would be reaching out and changing the host's
+echo "generic/460" >> xfs_excludes.txt
+echo "generic/597" >> xfs_excludes.txt
+echo "generic/598" >> xfs_excludes.txt
+
+# Sizes its AIO working set from the filesystem's free space, so now that statfs reports the
+# real figure it queues writes by the gigabyte. Its own guard against that reads `free`, which
+# inside Docker reports the host's memory rather than the container's limit, so it overshoots
+# and the OOM killer takes it
+echo "generic/551" >> xfs_excludes.txt
+
+# TODO: requires reporting inode flags through statx, which FUSE_GETATTR has no field for.
+# The kernel fills stx_attributes from its own inode flags, and it never learns about ours,
+# so every flag the test sets reads back as unset. FUSE_STATX (ABI 7.38) carries
+# stx_attributes and would let this run, but fuser does not implement that opcode yet
+echo "generic/424" >> xfs_excludes.txt
+
+# fsx against hugepage-backed buffers, which cannot be set up here: MADV_COLLAPSE is refused
+# and init_hugepages_buf fails before any filesystem operation runs
+echo "generic/759" >> xfs_excludes.txt
+echo "generic/760" >> xfs_excludes.txt
+
+# Toggling CPUs offline is not allowed inside Docker: /sys/devices/system/cpu/*/online is
+# read-only
+echo "generic/650" >> xfs_excludes.txt
+
+# Mounts overlayfs on top of the filesystem under test, which is refused here
+echo "generic/631" >> xfs_excludes.txt
+
+# Mounts the same device twice and assumes the two mounts share a superblock, as the test's own
+# _exclude_fs list for nfs, overlay and tmpfs concedes. Each fuser mount is a separate process
+# with its own state, so a file created through one mount is not visible through the other
+echo "generic/732" >> xfs_excludes.txt
+
+# TODO: requires support for shutting the filesystem down
+echo "generic/766" >> xfs_excludes.txt
+
+# Requires atomic writes, which xfs_io in this image cannot request (pwrite -A)
+echo "generic/775" >> xfs_excludes.txt
+echo "generic/778" >> xfs_excludes.txt
+
+# Requires fio, which is not installed in the test image
+echo "generic/774" >> xfs_excludes.txt
 
 # TODO: permission failure invoking FIBMAP
 echo "generic/519" >> xfs_excludes.txt
@@ -139,36 +200,7 @@ echo "generic/208" >> xfs_excludes.txt
 echo "generic/323" >> xfs_excludes.txt
 
 
-# Not sure what's wrong with these
-echo "generic/075" >> xfs_excludes.txt
-echo "generic/091" >> xfs_excludes.txt
-echo "generic/112" >> xfs_excludes.txt
-echo "generic/310" >> xfs_excludes.txt
-echo "generic/363" >> xfs_excludes.txt
-echo "generic/610" >> xfs_excludes.txt
-echo "generic/631" >> xfs_excludes.txt
-echo "generic/650" >> xfs_excludes.txt
-echo "generic/683" >> xfs_excludes.txt
-echo "generic/684" >> xfs_excludes.txt
-echo "generic/685" >> xfs_excludes.txt
-echo "generic/732" >> xfs_excludes.txt
-echo "generic/748" >> xfs_excludes.txt
-echo "generic/749" >> xfs_excludes.txt
-echo "generic/750" >> xfs_excludes.txt
-echo "generic/754" >> xfs_excludes.txt
-echo "generic/756" >> xfs_excludes.txt
-echo "generic/758" >> xfs_excludes.txt
-echo "generic/759" >> xfs_excludes.txt
-echo "generic/760" >> xfs_excludes.txt
-echo "generic/761" >> xfs_excludes.txt
-echo "generic/766" >> xfs_excludes.txt
-echo "generic/774" >> xfs_excludes.txt
-echo "generic/775" >> xfs_excludes.txt
-echo "generic/777" >> xfs_excludes.txt
-echo "generic/778" >> xfs_excludes.txt
-
-
-FUSER_EXTRA_MOUNT_OPTIONS="--auto-unmount" TEST_DEV="$TEST_DATA_DIR" TEST_DIR="$TEST_DIR" SCRATCH_DEV="$SCRATCH_DATA_DIR" SCRATCH_MNT="$SCRATCH_DIR" \
+FUSER_EXTRA_MOUNT_OPTIONS="--auto-unmount --dev" TEST_DEV="$TEST_DATA_DIR" TEST_DIR="$TEST_DIR" SCRATCH_DEV="$SCRATCH_DATA_DIR" SCRATCH_MNT="$SCRATCH_DIR" \
 ./check-fuser -E xfs_excludes.txt "$@" \
 | tee /code/logs/xfstests.log
 

@@ -13,6 +13,9 @@ use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use crate::sync::{Condvar, Mutex, Rank};
 
 /// The kinds of file of the store: the two files of one pack, and the
 /// files of the store index.
@@ -74,10 +77,24 @@ pub trait PackFile: PackRead {
     fn sync_handle(&self) -> Option<Arc<dyn PackSync>> {
         None
     }
+    /// A handle that writes to this file from another thread, with no
+    /// `&mut` access to it (a positional write). `None`: no such handle.
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        None
+    }
+    /// The store published a record that it wrote through `writer` at
+    /// `offset` (under its lock, after the write returned).
+    fn note_written(&mut self, _offset: u64, _data: &[u8]) {}
     /// Start a sync of every write so far in the background, if this file
     /// can, and return a wait for its end. It only shortens a later `sync`
     /// (which the caller still calls: only that one reports the outcome).
     fn sync_soon(&mut self) -> Option<SyncWait> {
+        None
+    }
+    /// The wait that a `write_at` of `len` more bytes would do now (the end
+    /// of a background sync, see `retry.rs`), if any. A caller under a lock
+    /// waits for it without the lock first (LOCK-01).
+    fn write_wait(&self, _len: usize) -> Option<SyncWait> {
         None
     }
 }
@@ -87,23 +104,53 @@ pub trait PackSync: Send + Sync {
     fn sync(&self) -> io::Result<()>;
 }
 
+/// Writes to one file from any thread (see [`PackFile::writer`]).
+pub trait PackWrite: Send + Sync {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()>;
+}
+
 /// The end of a background sync (see [`PackFile::sync_soon`]).
-#[derive(Clone, Default)]
-pub struct SyncWait(Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+#[derive(Clone)]
+pub struct SyncWait(Arc<(Mutex<bool>, Condvar)>);
+
+impl Default for SyncWait {
+    fn default() -> Self {
+        SyncWait(Arc::new((Mutex::new(Rank::Store, false), Condvar::new())))
+    }
+}
 
 impl SyncWait {
     /// Mark the sync as ended.
     pub fn done(&self) {
-        *self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self.0 .0.lock() = true;
         self.0 .1.notify_all();
+    }
+
+    /// True if the sync has ended.
+    pub fn is_done(&self) -> bool {
+        *self.0 .0.lock()
     }
 
     /// Wait until the sync has ended.
     pub fn wait(&self) {
-        let mut d = self.0 .0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut d = self.0 .0.lock();
         while !*d {
-            d = self.0 .1.wait(d).unwrap_or_else(|e| e.into_inner());
+            self.0 .1.wait(&mut d);
         }
+    }
+
+    /// Wait until the sync has ended, at most `limit`. True if it ended.
+    pub fn wait_timeout(&self, limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        let mut d = self.0 .0.lock();
+        while !*d {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            self.0 .1.wait_for(&mut d, left);
+        }
+        true
     }
 }
 
@@ -226,6 +273,26 @@ impl RunMap {
     }
 }
 
+#[cfg(test)]
+impl RunMap {
+    /// A private anonymous mapping that holds a copy of `bytes`, so Miri can
+    /// run `bytes` and `Drop` (it has no file mmap and no `madvise`).
+    fn anon_for_test(bytes: &[u8]) -> RunMap {
+        let len = bytes.len();
+        assert!(len > 0, "mmap of 0 bytes fails");
+        // SAFETY: a new private anonymous mapping of `len` bytes; the result
+        // is checked before use.
+        let p = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0)
+        };
+        assert!(p != libc::MAP_FAILED, "anonymous mmap failed: {}", io::Error::last_os_error());
+        // SAFETY: the mapping is new, writable and `len` bytes long, so the
+        // copy fits; nothing else holds the pointer.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, len) };
+        RunMap { ptr: p as *const u8, len }
+    }
+}
+
 impl Drop for RunMap {
     fn drop(&mut self) {
         if self.len != 0 {
@@ -309,6 +376,16 @@ impl PackFile for FilePack {
         // dirty pages of the file, whoever wrote them.
         let f = self.0.try_clone().ok()?;
         Some(Arc::new(FilePack(f, self.1)))
+    }
+    fn writer(&self) -> Option<Arc<dyn PackWrite>> {
+        let f = self.0.try_clone().ok()?;
+        Some(Arc::new(FilePack(f, self.1)))
+    }
+}
+
+impl PackWrite for FilePack {
+    fn write_at(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        self.0.write_all_at(data, offset)
     }
 }
 
@@ -431,7 +508,8 @@ impl PackIo for FileIo {
 
 fn unsupported_if(e: io::Error) -> io::Error {
     match e.raw_os_error() {
-        Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP) => io::Error::new(io::ErrorKind::Unsupported, e),
+        // A guard, not two patterns: on Linux the two values are equal.
+        Some(c) if c == libc::EOPNOTSUPP || c == libc::ENOTSUP => io::Error::new(io::ErrorKind::Unsupported, e),
         _ => e,
     }
 }
@@ -494,4 +572,29 @@ fn write_durable(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
         sync_dir(path.parent().unwrap())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunMap;
+
+    /// The only `RunMap` unsafe Miri can run (D-14): the view
+    /// (`from_raw_parts`), the `Sync` and `Send` impls and the `munmap` of
+    /// `Drop`, on an anonymous mapping (Miri has no file mmap).
+    #[test]
+    fn a_run_map_reads_back_moves_across_threads_and_unmaps() {
+        let map = RunMap::anon_for_test(&[1, 2, 3, 4, 5]);
+        assert_eq!(map.bytes(), &[1, 2, 3, 4, 5]);
+        assert_eq!(map.len(), 5);
+        // Shared by reference with another thread (Sync).
+        std::thread::scope(|s| {
+            s.spawn(|| assert_eq!(map.bytes(), &[1, 2, 3, 4, 5]));
+        });
+        // Moved into another thread, read and dropped there (Send, munmap).
+        let t = std::thread::spawn(move || {
+            assert_eq!(map.bytes()[4], 5);
+            drop(map);
+        });
+        t.join().unwrap();
+    }
 }

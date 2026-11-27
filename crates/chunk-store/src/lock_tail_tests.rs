@@ -1,0 +1,487 @@
+//! The slow tails of the store lock (Phase 19, LOCK-01): while one thread
+//! waits in a slow operation (a seal join, a pack create, the KEEP_CAP wait,
+//! an index run write, a trust-floor write, a pack open), another thread's
+//! `put` and `read` finish. A `MemIo` hold knob parks the slow operation, and
+//! the test sees that the first thread is in it (`MemIo::wait_parked`, or the
+//! store's test counter of waits outside the lock) before it starts the
+//! second one. Every wait has a time limit.
+
+use crate::mem::{Hold, MemIo};
+use crate::pack_io::Kind;
+use crate::{ChunkStore, ObjectId, Options};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// The longest wait of a test for one step.
+const LIMIT: Duration = Duration::from_secs(5);
+
+/// `len` bytes (at least 4) that differ for each `i`: `i` comes first.
+fn data(i: u32, len: usize) -> Vec<u8> {
+    let mut d: Vec<u8> = (0..len as u32).map(|j| (j.wrapping_mul(31) ^ (j >> 7)) as u8).collect();
+    d[..4].copy_from_slice(&i.to_le_bytes());
+    d
+}
+
+/// Small packs (a few records fill one), no compression (fixed record
+/// sizes), no background merge.
+fn store(mem: &MemIo, o: Options) -> Arc<ChunkStore> {
+    Arc::new(ChunkStore::open_with(Arc::new(mem.clone()), o).unwrap())
+}
+
+fn small_packs() -> Options {
+    Options { pack_limit: 4096, zstd_level: 0, index_background_merge: false, locality_cache: false, ..Options::default() }
+}
+
+/// Wait until `cond` is true, at most `LIMIT`.
+fn wait_until(what: &str, cond: impl Fn() -> bool) {
+    let until = Instant::now() + LIMIT;
+    while !cond() {
+        assert!(Instant::now() < until, "timed out: {what}");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Run `f` on a new thread; its result comes on the returned channel.
+fn spawn<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx
+}
+
+/// B: a put of a new small object and a read of `old`, on a new thread.
+fn put_and_read(s: &Arc<ChunkStore>, new: Vec<u8>, old: ObjectId) -> mpsc::Receiver<(ObjectId, Vec<u8>)> {
+    let s = Arc::clone(s);
+    spawn(move || (s.put(&new).unwrap(), s.read(&old).unwrap()))
+}
+
+// A's put fills the second pack, so its seal must first join the seal of
+// the first pack, whose fsync is held. B's put and read must not wait for
+// that join.
+#[test]
+fn put_and_read_pass_a_held_seal_join() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    mem.hold_syncs(true);
+    // Records of about 3 KiB: the second one fills pack 1 and seals it.
+    let x1 = s.put(&data(1, 3000)).unwrap();
+    let x2 = s.put(&data(2, 3000)).unwrap();
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "the seal of pack 1 is in its held sync");
+    let x3 = s.put(&data(3, 3000)).unwrap();
+    assert_eq!(s.stats().packs, 2);
+
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(4, 3000)).unwrap())
+    };
+    wait_until("A waits for the seal of pack 1", || s.test_waits() >= 1);
+    // A small record that does not fill pack 2.
+    let small = data(5, 100);
+    let b = put_and_read(&s, small.clone(), x1).recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (x5, got) = b.expect("B's put and read finished while A waited for the seal join");
+    assert!(a_waited, "A was still in the seal join while B ran");
+    assert_eq!(got, data(1, 3000));
+    let x4 = a.recv_timeout(LIMIT).expect("A ends after the sync is released");
+    for (x, d) in [(x1, data(1, 3000)), (x2, data(2, 3000)), (x3, data(3, 3000)), (x4, data(4, 3000)), (x5, small)] {
+        assert_eq!(s.read(&x).unwrap(), d);
+    }
+    s.sync().unwrap();
+}
+
+// A's put needs a new pack (the last put sealed pack 1), and the create of
+// its file is held. B's read of an older object must not wait for it.
+#[test]
+fn put_and_read_pass_a_held_pack_create() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    let x1 = s.put(&data(1, 3000)).unwrap();
+    s.put(&data(2, 3000)).unwrap();
+    s.sync().unwrap();
+    assert_eq!(s.stats().packs, 1);
+    mem.hold_creates(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(3, 3000)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Creates, 1, LIMIT), "A is in the held pack create");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&x1).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_creates(false);
+    assert_eq!(b.expect("B's read finished while A created a pack"), data(1, 3000));
+    assert!(a_waited, "A was still in the pack create while B ran");
+    let x3 = a.recv_timeout(LIMIT).expect("A ends after the create is released");
+    assert_eq!(s.read(&x3).unwrap(), data(3, 3000));
+    assert_eq!(s.stats().packs, 2);
+    s.sync().unwrap();
+}
+
+// A's puts pass KEEP_LIMIT (a background sync starts and is held), then
+// reach KEEP_CAP: the next put of A waits for that sync. B's small put (it
+// stays below the cap) and B's read must not wait for it.
+#[test]
+#[cfg_attr(miri, ignore = "real-time limit of 5 s: too slow under the interpreter")]
+fn put_and_read_pass_a_held_keep_cap_wait() {
+    use crate::retry::{RetryingIo, KEEP_CAP};
+    const MIB: usize = 1 << 20;
+    let mem = MemIo::new();
+    let io = Arc::new(RetryingIo::with_backoff(Arc::new(mem.clone()), Vec::new()));
+    let o = Options { pack_limit: 1 << 30, ..small_packs() };
+    let s = Arc::new(ChunkStore::open_with(io, o).unwrap());
+    mem.hold_syncs(true);
+    let n = KEEP_CAP / MIB + 2;
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || (0..n as u32).map(|i| s.put(&data(i, MIB)).unwrap()).collect::<Vec<_>>())
+    };
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "the background sync at KEEP_LIMIT is held");
+    wait_until("A waits for the background sync at KEEP_CAP", || s.test_waits() >= 1);
+    let first = s.hasher().id(&data(0, MIB));
+    let small = data(1000, 100);
+    let b = put_and_read(&s, small.clone(), first).recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (x, got) = b.expect("B's put and read finished while A waited at KEEP_CAP");
+    assert!(a_waited, "A was still at KEEP_CAP while B ran");
+    assert!(got == data(0, MIB));
+    let xs = a.recv_timeout(LIMIT).expect("A ends after the sync is released");
+    assert_eq!(xs.len(), n);
+    assert_eq!(s.read(&x).unwrap(), small);
+    assert!(s.read(&xs[n - 1]).unwrap() == data(n as u32 - 1, MIB));
+    s.sync().unwrap();
+}
+
+// A's put fills the memtable (limit 4), so it writes an index run; the run
+// file create is held. B's put and its reads (one of an object that is only
+// in the memtable that A writes out) must not wait for it.
+#[test]
+fn put_and_read_pass_a_held_run_write() {
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 4, ..small_packs() };
+    let s = store(&mem, o);
+    let x1 = s.put(&data(1, 300)).unwrap();
+    s.put(&data(2, 300)).unwrap();
+    s.put(&data(3, 300)).unwrap();
+    assert_eq!(s.index_info().runs, 0);
+    mem.hold_creates(true);
+    let x4 = s.hasher().id(&data(4, 300));
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(4, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Creates, 1, LIMIT), "A is in the held run create");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || (s.put(&data(5, 300)).unwrap(), s.read(&x1).unwrap(), s.read(&x4).unwrap()))
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_creates(false);
+    let (x5, got1, got4) = b.expect("B's put and reads finished while A wrote a run");
+    assert!(a_waited, "A was still in the run write while B ran");
+    assert_eq!((got1, got4), (data(1, 300), data(4, 300)));
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the create is released"), x4);
+    assert_eq!(s.index_info().runs, 1);
+    assert_eq!(s.index_info().memtable_entries, 1, "B's object stays in the memtable");
+    for (x, i) in [(x1, 1), (x4, 4), (x5, 5)] {
+        assert_eq!(s.read(&x).unwrap(), data(i, 300));
+    }
+    s.sync().unwrap();
+}
+
+// A's put of an object that is in a run fails its index lookup (one failed
+// read), so A raises the trust floor before it writes the object again; the
+// durable write of the floor is held. B's read of another object must not
+// wait for it, and A writes nothing before the floor is durable.
+#[test]
+fn put_passes_a_held_trust_floor_write() {
+    let mem = MemIo::new();
+    // Every put goes to a run at once.
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1, ..small_packs() };
+    let s = store(&mem, o);
+    let x1 = s.put(&data(1, 300)).unwrap();
+    let y = s.put(&data(2, 300)).unwrap();
+    assert_eq!(s.index_info().memtable_entries, 0);
+    let pack_len = mem.len(1, Kind::Pack).unwrap();
+    mem.hold_durable(true);
+    mem.fail_read_once_after(0);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(1, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Durable, 1, LIMIT), "A is in the held write of the trust floor");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&y).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    let len_while_held = mem.len(1, Kind::Pack).unwrap();
+    mem.hold_durable(false);
+    assert_eq!(b.expect("B's read finished while A wrote the trust floor"), data(2, 300));
+    assert!(a_waited, "A was still in the floor write while B ran");
+    assert_eq!(len_while_held, pack_len, "A wrote no record before its floor was durable");
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the write is released"), x1);
+    assert_eq!(crate::read_trust_floor(&mem), Some(2), "the floor covers pack 1, durable");
+    assert!(mem.len(1, Kind::Pack).unwrap() > pack_len, "A wrote the object again");
+    assert_eq!(s.read(&x1).unwrap(), data(1, 300));
+}
+
+// A reads an object in a pack that no read has opened yet; the open is
+// held. B's put must not wait for it.
+#[test]
+fn put_passes_a_held_pack_open() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    let x1 = s.put(&data(1, 3000)).unwrap();
+    s.put(&data(2, 3000)).unwrap();
+    s.put(&data(3, 3000)).unwrap();
+    s.sync().unwrap();
+    assert_eq!(s.stats().packs, 2);
+    mem.hold_opens(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&x1).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Opens, 1, LIMIT), "A is in the held open of pack 1");
+    let small = data(5, 100);
+    let b = {
+        let s = Arc::clone(&s);
+        let small = small.clone();
+        spawn(move || s.put(&small).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_opens(false);
+    let x5 = b.expect("B's put finished while A opened a pack");
+    assert!(a_waited, "A was still in the pack open while B ran");
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the open is released"), data(1, 3000));
+    assert_eq!(s.read(&x5).unwrap(), small);
+}
+
+/// The store over `mem`, with the retry layer (zero waits) if `retrying`.
+fn io_of(mem: &MemIo, retrying: bool) -> Arc<dyn crate::pack_io::PackIo> {
+    if retrying {
+        Arc::new(crate::retry::RetryingIo::with_backoff(Arc::new(mem.clone()), Vec::new()))
+    } else {
+        Arc::new(mem.clone())
+    }
+}
+
+/// A's `sync` parks in its held fsync (with the retry layer, maybe first in
+/// the background sync of phase 1). B's put and read must not wait for it;
+/// after a crash every object put before the last sync reads back.
+fn phase_two_sync(retrying: bool) {
+    let mem = MemIo::new();
+    let s = Arc::new(ChunkStore::open_with(io_of(&mem, retrying), small_packs()).unwrap());
+    let x = s.put(&data(1, 300)).unwrap();
+    mem.hold_syncs(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.sync())
+    };
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "A is in a held sync");
+    let b = put_and_read(&s, data(2, 300), x).recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (y, got) = b.expect("B's put and read finished while A synced");
+    assert!(a_waited, "A was still in its sync while B ran");
+    assert_eq!(got, data(1, 300));
+    a.recv_timeout(LIMIT).expect("A ends after the sync is released").unwrap();
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = ChunkStore::open_with(io_of(&mem, retrying), small_packs()).unwrap();
+    assert_eq!(s.read(&x).unwrap(), data(1, 300));
+    assert_eq!(s.read(&y).unwrap(), data(2, 300));
+}
+
+#[test]
+fn put_and_read_pass_a_held_phase_two_sync() {
+    phase_two_sync(false);
+}
+
+#[test]
+fn retrying_put_and_read_pass_a_held_phase_two_sync() {
+    phase_two_sync(true);
+}
+
+// A's put fills the memtable (limit 1), and the flush that it starts parks
+// in the sync of the active pack (the records below its hwm). B's read, a
+// put of bytes that are stored already (a dedup hit starts no flush) and
+// `stats` must not wait for it. After a sync and a crash the open needs no
+// rebuild (the runs stay) and every object reads back.
+#[test]
+fn put_and_read_pass_a_held_index_flush_sync() {
+    use crate::pack_io::PackIo;
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x = s.put(&data(1, 300)).unwrap();
+    assert_eq!(s.index_info().runs, 1, "x's own flush ran");
+    mem.hold_syncs(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::Syncs, 1, LIMIT), "A's flush is in the held sync of the pack");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || (s.read(&x).unwrap(), s.put(&data(1, 300)).unwrap(), s.stats()))
+    }
+    .recv_timeout(LIMIT);
+    let a_waited = a.try_recv().is_err();
+    mem.hold_syncs(false);
+    let (got, again, _) = b.expect("B's read, dedup put and stats finished while A's flush synced");
+    assert!(a_waited, "A was still in its flush while B ran");
+    assert_eq!((got, again), (data(1, 300), x));
+    let y = a.recv_timeout(LIMIT).expect("A ends after the sync is released");
+    s.sync().unwrap();
+    let mut runs = mem.list_runs().unwrap();
+    runs.sort_unstable();
+    assert_eq!(runs.len(), 2);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    let mut after = mem.list_runs().unwrap();
+    after.sort_unstable();
+    assert_eq!(after, runs, "the open kept the runs (no rebuild)");
+    assert_eq!(s.read(&x).unwrap(), data(1, 300));
+    assert_eq!(s.read(&y).unwrap(), data(2, 300));
+}
+
+/// The runs of the index, sorted.
+fn runs_of(mem: &MemIo) -> Vec<u64> {
+    use crate::pack_io::PackIo;
+    let mut r = mem.list_runs().unwrap();
+    r.sort_unstable();
+    r
+}
+
+// A's put parks in its record write (no store lock held). B's read, dedup
+// put, `stats` and `sync` must not wait for it; C's put of a new object
+// waits for it (one write in flight per pack). After a crash every object
+// put before the last sync reads back.
+#[test]
+fn put_and_read_pass_a_held_record_write() {
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || (s.read(&x1).unwrap(), s.put(&data(1, 300)).unwrap(), s.stats(), s.sync().unwrap()))
+    }
+    .recv_timeout(LIMIT);
+    let c = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(3, 300)).unwrap())
+    };
+    let c_waited = c.recv_timeout(Duration::from_millis(300)).is_err();
+    let a_waited = a.try_recv().is_err();
+    mem.hold_pack_writes(false);
+    let (got, again, _, ()) = b.expect("B's read, dedup put, stats and sync finished while A wrote");
+    assert!(a_waited, "A was still in its record write while B ran");
+    assert!(c_waited, "C's put waited for A's record write");
+    assert_eq!((got, again), (data(1, 300), x1));
+    let x2 = a.recv_timeout(LIMIT).expect("A ends after the write is released");
+    let x3 = c.recv_timeout(LIMIT).expect("C ends after A's write");
+    let all = [(x1, 1), (x2, 2), (x3, 3)];
+    for (x, i) in all {
+        assert_eq!(s.read(&x).unwrap(), data(i, 300));
+    }
+    s.sync().unwrap();
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    for (x, i) in all {
+        assert_eq!(s.read(&x).unwrap(), data(i, 300));
+    }
+}
+
+// While A's record write of x2 at offset O is in flight, x2 is not visible,
+// and a flush puts its hwm at or below O (the pack length moves only at the
+// publish). After a crash the open needs no rebuild.
+#[test]
+fn a_record_in_flight_is_invisible_and_below_no_hwm() {
+    let mem = MemIo::new();
+    let o = Options { pack_limit: 1 << 20, index_memtable_limit: 1 << 20, ..small_packs() };
+    let s = store(&mem, o.clone());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    let (pack, offset) = {
+        let inner = s.inner.lock();
+        let a = inner.active.as_ref().unwrap();
+        (a.num, a.len)
+    };
+    let x2 = s.hasher().id(&data(2, 300));
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let seen = s.read(&x2);
+    let flushed = s.flush_frozen();
+    let info = s.index_info();
+    mem.hold_pack_writes(false);
+    assert!(matches!(seen, Err(crate::Error::Missing(_))), "a record in flight is not visible: {seen:?}");
+    flushed.unwrap();
+    assert!((info.hwm_pack, info.hwm_offset) <= (pack, offset), "hwm {:?} is above the write at {offset}", (info.hwm_pack, info.hwm_offset));
+    assert_eq!(a.recv_timeout(LIMIT).expect("A ends after the write is released"), x2);
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+    s.sync().unwrap();
+    let runs = runs_of(&mem);
+    assert_eq!(runs.len(), 1);
+    drop(s);
+    mem.crash();
+    let s = store(&mem, o);
+    assert_eq!(runs_of(&mem), runs, "the open kept the run (no rebuild)");
+    assert_eq!(s.read(&x1).unwrap(), data(1, 300));
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+}
+
+// While A's record write is in flight, `gc_begin` (which seals the active
+// pack) waits for it with no store lock: a read finishes meanwhile.
+#[test]
+fn gc_begin_waits_for_a_record_write_with_no_lock() {
+    let mem = MemIo::new();
+    let s = store(&mem, small_packs());
+    let x1 = s.put(&data(1, 300)).unwrap();
+    mem.hold_pack_writes(true);
+    let a = {
+        let s = Arc::clone(&s);
+        spawn(move || s.put(&data(2, 300)).unwrap())
+    };
+    assert!(mem.wait_parked(Hold::PackWrites, 1, LIMIT), "A is in its held record write");
+    let d = {
+        let s = Arc::clone(&s);
+        spawn(move || s.gc_begin())
+    };
+    let d_waited = d.recv_timeout(Duration::from_millis(300)).is_err();
+    let b = {
+        let s = Arc::clone(&s);
+        spawn(move || s.read(&x1).unwrap())
+    }
+    .recv_timeout(LIMIT);
+    mem.hold_pack_writes(false);
+    assert!(d_waited, "gc_begin waited for the record write");
+    assert_eq!(b.expect("B's read finished while gc_begin waited"), data(1, 300));
+    let x2 = a.recv_timeout(LIMIT).expect("A ends after the write is released");
+    d.recv_timeout(LIMIT).expect("gc_begin ends after the write").unwrap();
+    s.gc_abort();
+    assert_eq!(s.read(&x2).unwrap(), data(2, 300));
+}

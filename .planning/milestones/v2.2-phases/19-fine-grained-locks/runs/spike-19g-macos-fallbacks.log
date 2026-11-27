@@ -1,0 +1,140 @@
+=== run 1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=file_cell n=1935 wait_p50_us=0.0 wait_p99_us=1024.0 wait_max_us=2826.2 hold_p50_us=9.7 hold_p99_us=751.1 hold_max_us=2799.6
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=46.0 wait_max_us=46.0 hold_p50_us=12.6 hold_p99_us=327.7 hold_max_us=327.7
+SPIKE fb name=FB_locked_flush_io us=457
+SPIKE fb name=FB_locked_flush_io us=105
+SPIKE fb name=FB_locked_flush_io us=59
+SPIKE fb name=FB_locked_flush_io us=339
+SPIKE fb name=FB_locked_flush_io us=184
+SPIKE fb name=FB_locked_flush_io us=86
+SPIKE fb name=FB_locked_flush_io us=234
+SPIKE long site=stripe hold_us=37177 wait[store]=14
+SPIKE long site=stripe hold_us=37190 wait[store]=14
+SPIKE fb name=FB_locked_flush_io us=72
+SPIKE fb name=FB_locked_flush_io us=217
+SPIKE fb name=FB_locked_flush_io us=140
+SPIKE fb name=FB_locked_flush_io us=259
+SPIKE fb name=FB_locked_flush_io us=111
+SPIKE fb name=FB_locked_flush_io us=247
+SPIKE fb name=FB_locked_flush_io us=231
+SPIKE fb name=FB_locked_flush_io us=176
+SPIKE long site=stripe hold_us=21015 wait[store]=20853
+SPIKE long site=stripe hold_us=21028 wait[store]=20853
+SPIKE long site=stripe hold_us=20779 wait[store]=20632
+SPIKE long site=stripe hold_us=20791 wait[store]=20632
+SPIKE fb name=FB_locked_flush_io us=169
+SPIKE fb name=FB_locked_flush_io us=230
+SPIKE fb name=FB_locked_flush_io us=101
+SPIKE fb name=FB_locked_flush_io us=135
+SPIKE fb name=FB_locked_flush_io us=123
+SPIKE fb name=FB_locked_flush_io us=580
+SPIKE fb name=FB_locked_flush_io us=264
+SPIKE fb name=FB_locked_flush_io us=217
+SPIKE fb name=FB_locked_flush_io us=177
+SPIKE fb name=FB_locked_flush_io us=75
+SPIKE fb name=FB_locked_flush_io us=216
+SPIKE fb name=FB_locked_flush_io us=133
+SPIKE fb name=FB_locked_flush_io us=75
+SPIKE fb name=FB_locked_flush_io us=86
+SPIKE fb name=FB_locked_flush_io us=168
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=file_cell n=3257 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.1 hold_p99_us=137.7 hold_max_us=627.7
+lock site=stripe n=1388 wait_p50_us=0.0 wait_p99_us=15.0 wait_max_us=128.9 hold_p50_us=28.5 hold_p99_us=214.0 hold_max_us=37191.7
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=file_cell n=1529 wait_p50_us=0.0 wait_p99_us=73.1 wait_max_us=433.9 hold_p50_us=4.1 hold_p99_us=71.7 hold_max_us=1088.5
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=15.9 wait_max_us=15.9 hold_p50_us=6.3 hold_p99_us=183.6 hold_max_us=183.6
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.40s
+=== run 2
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=file_cell n=2352 wait_p50_us=0.0 wait_p99_us=1552.4 wait_max_us=4997.1 hold_p50_us=8.5 hold_p99_us=772.1 hold_max_us=3678.2
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=31.4 wait_max_us=31.4 hold_p50_us=13.4 hold_p99_us=350.5 hold_max_us=350.5
+SPIKE fb name=FB_locked_flush_io us=118
+SPIKE fb name=FB_locked_flush_io us=149
+SPIKE fb name=FB_locked_flush_io us=156
+SPIKE fb name=FB_locked_flush_io us=263
+SPIKE fb name=FB_locked_flush_io us=102
+SPIKE fb name=FB_locked_flush_io us=207
+SPIKE long site=stripe hold_us=20809 wait[store]=20625
+SPIKE long site=stripe hold_us=20821 wait[store]=20625
+SPIKE fb name=FB_locked_flush_io us=208
+SPIKE fb name=FB_locked_flush_io us=182
+SPIKE fb name=FB_locked_flush_io us=59
+SPIKE fb name=FB_locked_flush_io us=200
+SPIKE fb name=FB_locked_flush_io us=146
+SPIKE fb name=FB_locked_flush_io us=270
+SPIKE fb name=FB_locked_flush_io us=417
+SPIKE fb name=FB_locked_flush_io us=261
+SPIKE fb name=FB_locked_flush_io us=168
+SPIKE fb name=FB_locked_flush_io us=124
+SPIKE fb name=FB_locked_flush_io us=354
+SPIKE fb name=FB_locked_flush_io us=180
+SPIKE fb name=FB_locked_flush_io us=123
+SPIKE fb name=FB_locked_flush_io us=61
+SPIKE fb name=FB_locked_flush_io us=166
+SPIKE fb name=FB_locked_flush_io us=486
+SPIKE fb name=FB_locked_flush_io us=232
+SPIKE fb name=FB_locked_flush_io us=385
+SPIKE fb name=FB_locked_flush_io us=120
+SPIKE fb name=FB_locked_flush_io us=115
+SPIKE fb name=FB_locked_flush_io us=267
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=file_cell n=3600 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.2 hold_p99_us=116.0 hold_max_us=513.3
+lock site=stripe n=1589 wait_p50_us=0.0 wait_p99_us=15.0 wait_max_us=130.6 hold_p50_us=29.4 hold_p99_us=169.0 hold_max_us=20824.1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=file_cell n=1658 wait_p50_us=0.0 wait_p99_us=72.7 wait_max_us=137.2 hold_p50_us=4.4 hold_p99_us=66.9 hold_max_us=947.2
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=26.5 wait_max_us=26.5 hold_p50_us=6.4 hold_p99_us=185.1 hold_max_us=185.1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.38s
+=== run 3
+SPIKE long site=file_cell hold_us=7266
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=file_cell n=2468 wait_p50_us=0.0 wait_p99_us=1082.4 wait_max_us=7258.1 hold_p50_us=7.9 hold_p99_us=690.7 hold_max_us=7266.3
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=44.9 wait_max_us=44.9 hold_p50_us=13.2 hold_p99_us=325.9 hold_max_us=325.9
+SPIKE fb name=FB_locked_flush_io us=138
+SPIKE fb name=FB_locked_flush_io us=71
+SPIKE fb name=FB_locked_flush_io us=65
+SPIKE fb name=FB_locked_flush_io us=225
+SPIKE fb name=FB_locked_flush_io us=202
+SPIKE fb name=FB_locked_flush_io us=90
+SPIKE fb name=FB_locked_flush_io us=146
+SPIKE long site=stripe hold_us=20940 wait[store]=20760
+SPIKE long site=stripe hold_us=20950 wait[store]=20760
+SPIKE long site=stripe hold_us=21164 wait[store]=51
+SPIKE fb name=FB_locked_flush_io us=172
+SPIKE fb name=FB_locked_flush_io us=285
+SPIKE fb name=FB_locked_flush_io us=264
+SPIKE fb name=FB_locked_flush_io us=95
+SPIKE fb name=FB_locked_flush_io us=213
+SPIKE fb name=FB_locked_flush_io us=237
+SPIKE fb name=FB_locked_flush_io us=224
+SPIKE fb name=FB_locked_flush_io us=235
+SPIKE long site=stripe hold_us=20556 wait[store]=20402
+SPIKE long site=stripe hold_us=20570 wait[store]=20402
+SPIKE long site=stripe hold_us=20699 wait[store]=20514
+SPIKE long site=stripe hold_us=20712 wait[store]=20514
+SPIKE long site=stripe hold_us=21160 wait[store]=20891 wait[readers]=1
+SPIKE long site=stripe hold_us=21180 wait[store]=20891 wait[readers]=1
+SPIKE fb name=FB_locked_flush_io us=450
+SPIKE fb name=FB_locked_flush_io us=305
+SPIKE fb name=FB_locked_flush_io us=377
+SPIKE fb name=FB_locked_flush_io us=297
+SPIKE fb name=FB_locked_flush_io us=404
+SPIKE fb name=FB_locked_flush_io us=243
+SPIKE fb name=FB_locked_flush_io us=87
+SPIKE fb name=FB_locked_flush_io us=103
+SPIKE fb name=FB_locked_flush_io us=123
+SPIKE fb name=FB_locked_flush_io us=100
+SPIKE fb name=FB_locked_flush_io us=183
+SPIKE fb name=FB_locked_flush_io us=220
+SPIKE fb name=FB_locked_flush_io us=177
+SPIKE long site=stripe hold_us=20957 wait[store]=20795
+SPIKE long site=stripe hold_us=20971 wait[store]=20795
+SPIKE long site=stripe hold_us=22482 wait[store]=22245
+SPIKE long site=stripe hold_us=22501 wait[store]=22245
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=file_cell n=3803 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.3 hold_p99_us=119.2 hold_max_us=499.2
+lock site=stripe n=1618 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20906.0 hold_p50_us=28.5 hold_p99_us=1313.8 hold_max_us=22511.6
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=file_cell n=1515 wait_p50_us=0.0 wait_p99_us=76.1 wait_max_us=164.6 hold_p50_us=4.6 hold_p99_us=75.1 hold_max_us=968.2
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=41.2 wait_max_us=41.2 hold_p50_us=6.2 hold_p99_us=203.3 hold_max_us=203.3
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.33s

@@ -273,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn a_live_filter_has_no_false_negatives() {
         let mut f = LiveFilter::new(10_000);
         f.extend((0..10_000).map(id));
@@ -286,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri (over 300 s in the probe)")]
     fn another_salt_gives_other_false_positives() {
         let make = |seed: Option<u64>| {
             let mut f = match seed {

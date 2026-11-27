@@ -9,11 +9,33 @@ SliceFS splits files into variable-sized content-addressed blocks, stores each u
 - **Crash-safe**: write log with crash replay, scrub, and online and offline GC (it deletes, compacts, or punches holes in pack files).
 - **Snapshots**: point-in-time create / list / switch.
 - **Compression**: zstd per object (dedup works on the original bytes, before compression). `slicefs mount --compression zstd[:LEVEL]|none` sets it for the new data of a mount. 8 Boost releases (1.80 to 1.87, as tars) in one store: 6,222 MiB of data in 891 MiB (6.99x).
-- **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable.
+- **Hash agility**: an object ID names its hash (a tag byte, then a 32-byte digest). The hashes are BLAKE3-256 (the default) and SHA-256 (`--hash sha256`). `slicefs mount --hash NAME` (or `seed --hash`) changes the hash of new objects and records it in the store; objects of the old hash stay readable and verifiable. `slicefs rehash --to <hash> <store>` converts a whole store to one hash: offline, crash-safe, with `--dry-run` (`docs/design/chunk-store.md`).
+- **Chunk profile**: `slicefs seed --chunk-profile 16/64/256 ./my-store DIR` fixes the FastCDC min/avg/max (KiB, powers of two, max at most 1024) of a new store; the default is 4/8/32. A `seed` or `mount` with another profile is refused (`docs/research/chunk-profiles.md`).
+
+## Why SliceFS (compared with dedup in other file systems)
+
+SliceFS is a normal mountable POSIX file system with transparent dedup, not a backup tool or an archive format. It runs on top of any existing file system on Linux and macOS: the store is a directory, with no kernel module, no own disk and no reformat.
+
+| | SliceFS | Other file systems |
+|---|---|---|
+| Block boundaries | Content-defined (FastCDC, 4-32 KiB): after an insert, the boundaries move with the data, so duplicates are still found | ZFS dedup, VDO and similar use fixed-size blocks: one byte inserted near the start shifts all later blocks, so they no longer match |
+| When dedup runs | Inline, at write, always | btrfs and XFS share data only for explicit copies (`cp --reflink`) or after an offline pass (for example `duperemove`); APFS shares only clones |
+| RAM for dedup | The chunk index is on disk (sorted runs and Bloom filters): 2.2-3.3 bytes of RAM per object; a store of 100 million objects opens in 0.49 s | Classic ZFS dedup keeps its dedup table (DDT) in RAM, commonly cited at hundreds of bytes per block, so it is often not recommended (OpenZFS 2.3 "fast dedup" lowers the cost) |
+| Compression | zstd per object, after dedup (dedup works on the original bytes) | Varies |
+| Object IDs | Content addresses (BLAKE3-256 by default): the same block has the same ID in every store, for later sync and distributed use | Block pointers local to one pool or volume |
+
+Example: 8 Boost releases (1.80 to 1.87, as tars), 6,222 MiB of data, take 891 MiB in one store (6.99x).
+
+Best fit: many similar versions of data (source trees, build output, releases, archives), and machines where ZFS dedup costs too much RAM and reflink copies are not practical.
+
+Limits today:
+- SliceFS is a FUSE file system in user space. Each request has a cost, so it is slower than an in-kernel file system. Multithreaded request handling is in progress (#22).
+- Status is preview: the on-disk store format can still change between releases (see the store header and the format policy in [docs/design/store-format.md](docs/design/store-format.md)).
+- It is not yet a good fit for databases or VM images with heavy random I/O.
 
 ## Status
 
-- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. Linux CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) (no macOS CI job yet).
+- **v1.0 shipped** — all POSIX semantics, mount/unmount/seed/gc/snapshot/stats/scrub. CI runs `cargo test` and [pjdfstest](https://github.com/pjd/pjdfstest) on Linux, and `cargo test` on macOS.
 - **v2.0 complete** — streaming writes via the incremental push API, removal of write-path compression (dedup on raw content), refcount-overflow fix, realistic `statfs`, O(1) snapshot lookup.
 - **1287 tests** passing workspace-wide (last full run: 2026-04-03, end of Phase 12).
 
@@ -38,9 +60,9 @@ Windows is deferred because `winfsp-rs` is GPL-3; native Projected FS or Dokan a
 │   ├── cas-local/             # Reference/test impls of the CAS traits (Blake3 hasher, fixed chunker, stores) — not used by the binary
 │   ├── chunk-store/           # FastCDC + BLAKE3 objects in pack files: index, zstd, crash scan, GC
 │   ├── metadata/              # Inodes, directories, manifests, xattrs, WAL, segments, snapshots, GC mark
-│   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, snapshot, stats, scrub
+│   └── slicefs-cli/           # `slicefs` binary — mount, unmount, seed, gc, rehash, snapshot, stats, scrub
 ├── benchmarks/
-├── .github/workflows/ci.yml   # Linux CI: cargo test + pjdfstest
+├── .github/workflows/ci.yml   # CI: cargo test + pjdfstest (Linux), cargo test (macOS)
 └── .planning/                 # Design docs, roadmap, phase artifacts
 ```
 
@@ -65,7 +87,7 @@ brew install macos-fuse-t/cask/fuse-t
 
 The build finds FUSE-T through the bundled `.pkgconfig/fuse.pc` shim (set in `.cargo/config.toml`); no extra environment is needed.
 
-SliceFS builds against a patched copy of `fuser` in `vendor/fuser` (see `vendor/fuser/PATCHES.md`). Stock `fuser` 0.17/0.18 cannot mount on FUSE-T 1.2.x, and with older FUSE-T, `cp` into the mount hangs.
+SliceFS builds against a patched copy of `fuser` in `vendor/fuser` (see `vendor/fuser/PATCHES.md`). Stock `fuser` 0.17 to 0.19 cannot mount on FUSE-T 1.2.x, and with older FUSE-T, `cp` into the mount hangs.
 
 **Linux** — install libfuse:
 
@@ -91,11 +113,43 @@ cp file.bin /tmp/sfs/
 slicefs stats ./my-store
 slicefs snapshot list ./my-store
 
-# Unmount
+# Unmount (returns when the daemon has exited and the store is free)
 slicefs unmount /tmp/sfs
 ```
 
 Run `slicefs --help` (and `slicefs <subcommand> --help`) for the full CLI.
+
+### Dirty data (mount options)
+
+Dirty data is written file data that is not stored yet. It is kept in memory. Four `slicefs mount` options control it:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--dirty-budget <SIZE>` | `64M` | The most dirty data of all open files together. This is memory that the daemon may use for it. |
+| `--dirty-limit <SIZE>` | `32M`, or `--dirty-budget` if that is less | The most dirty data of one file. It must not be above `--dirty-budget`. |
+| `--dirty-idle <SECS>` | `5` | Store the dirty data of a file after this time with no write to it. |
+| `--dirty-expire <SECS>` | `30` | Store dirty data that is this old. |
+
+- SIZE is bytes, or a number with K, M or G. The units are 1024-based, so `64M` is 67108864 bytes. Each SIZE must be at least `4M`. There is no upper bound.
+- SECS must be at least 1.
+- A background flusher stores dirty data when a file is idle, when its data is old, or when the total is at half the budget or more.
+- A writer over the budget waits up to 200 ms for the flusher. Then it writes, and stores part of its own file. The write does not fail. When the flusher cannot store data (for example, after a store error), the writer stops its wait after that flusher pass.
+- A file that is written with no pause of 300 ms or more is kept under its limit by its own writer.
+- `--dirty-limit` applies to a file that is changed in place (an overlay). A file that is written from start to end (a stream) can also hold writes that come out of order. These writes can use up to 64 MiB (a fixed window), whatever the limit is.
+- With a `--dirty-budget` below 64M, a stream with out-of-order writes can become an overlay when the total reaches the budget. The file then does not go back to a stream.
+
+### Request workers (mount option)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--workers <N>` | Linux: half the CPUs, at least 1 and at most 8. macOS: 1. | Request worker threads. With 1, each request runs on the FUSE reader thread. |
+
+- N must be at least 1. An explicit value above 8 is allowed.
+- At start, the daemon prints the count: `Workers: <N> (set)` or `Workers: <N> (default)`.
+- More workers help parallel reads of different files. In a Linux test with 16 clients on different files, reads with 4 workers were 2.7 times as fast as with 1 worker. Writes gain little after 2 workers (1.3 times with 4 workers).
+- Each worker adds some memory. In the same test, the peak memory of the daemon was 124 MiB with 1 worker and 178 MiB with 8 workers. On Linux the daemon sets a fixed glibc mmap threshold (128 KiB) at start, so that freed memory goes back to the system. It prints `Allocator: mmap threshold 131072 bytes (fixed)`.
+- On macOS the default stays 1 until a test shows a gain on FSKit.
+- Request trace: set `SLICEFS_FUSE_TRACE=1` in the environment of `slicefs mount` to print one ENTRY line and one EXIT line on stderr for each request. It is a debug aid and is off by default (no value, or `0`). The lines slow every request, and with more than 1 worker the workers wait for each other at stderr.
 
 ## Test
 

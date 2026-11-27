@@ -1,0 +1,9 @@
+# S1 Linux control, commit 86f9e8c plus the s1 files of this plan, 2026-11-21
+run dir: /tmp/s1 (container)
+round=0 dd_ms=204 fast_stats_during_slow=50 max_stat_ms=1
+round=1 dd_ms=203 fast_stats_during_slow=50 max_stat_ms=1
+round=2 dd_ms=204 fast_stats_during_slow=50 max_stat_ms=1
+round=3 dd_ms=203 fast_stats_during_slow=50 max_stat_ms=0
+round=4 dd_ms=204 fast_stats_during_slow=50 max_stat_ms=0
+uname: Linux 7.2.12-orbstack-00394-gbecdd6130068
+S1 RESULT arrived=510 max_inflight=3 reply_order_inversions=16

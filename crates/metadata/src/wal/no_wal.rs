@@ -1,6 +1,6 @@
 //! No-op WAL strategy — for testing or purely in-memory usage.
 
-use super::{WalEntry, WalError, WalStrategy};
+use super::{Lsn, WalEntry, WalError, WalStrategy};
 
 /// A `WalStrategy` that does nothing. All operations return `Ok(())`.
 ///
@@ -8,7 +8,11 @@ use super::{WalEntry, WalError, WalStrategy};
 pub struct NoWal;
 
 impl WalStrategy for NoWal {
-    fn log_mutation(&self, _entry: &WalEntry) -> Result<(), WalError> {
+    fn append(&self, _entry: &WalEntry) -> Result<Lsn, WalError> {
+        Ok(Lsn(0))
+    }
+
+    fn write_out(&self, _upto: Lsn) -> Result<(), WalError> {
         Ok(())
     }
 

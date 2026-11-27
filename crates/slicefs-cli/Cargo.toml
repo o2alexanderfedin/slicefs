@@ -10,6 +10,12 @@ description = "SliceFS FUSE binary — mounts, seeds, and manages SliceFS volume
 name = "slicefs"
 path = "src/main.rs"
 
+[features]
+# Lock hold and wait times in the stress harness report.
+lock-stats = ["chunk-store/lock-stats", "metadata/lock-stats"]
+# Lock cycle detection and the harness watchdog (stress builds).
+deadlock-detect = ["chunk-store/deadlock-detect", "metadata/deadlock-detect"]
+
 [dependencies]
 slicefs-traits       = { path = "../slicefs-traits" }
 metadata             = { path = "../metadata" }
@@ -22,10 +28,24 @@ thiserror      = { workspace = true }
 tracing        = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
-sha2-compress  = { workspace = true }
+parking_lot    = { workspace = true }
+# The old-to-new map of `rehash --dry-run`, in the system temp dir (not in
+# the store, which a dry-run does not write).
+tempfile       = { workspace = true }
+
+# Models of the lock protocol: built only with `--cfg loom`, never in a normal build.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+# The model (`loom`) and proof (`kani`) cfgs.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
 
 [dev-dependencies]
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
 # of a change of the write hash.
 chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
-tempfile = { workspace = true }
+# Content hashes of the store tree in the read-only mount tracer.
+blake3 = { workspace = true }
+# Latency histograms of the stress harness (`tests/stress_harness.rs`).
+hdrhistogram = { version = "7.6", default-features = false }

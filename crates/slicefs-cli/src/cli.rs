@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use chunk_store::ChunkProfile;
 use clap::{Parser, Subcommand};
 
 /// SliceFS deduplicating filesystem
@@ -38,7 +39,7 @@ pub enum Cmd {
         /// Do not update access times (recommended for dedup workloads).
         #[arg(long, default_value_t = true)]
         noatime: bool,
-        /// In-memory read cache size in bytes (0 = disabled).
+        /// Accepted for compatibility; it has no effect now (there is no read cache).
         #[arg(long, default_value_t = 0)]
         cache_size: usize,
         /// Allow other users to access the mount (passes allow_other to FUSE).
@@ -94,6 +95,45 @@ pub enum Cmd {
         /// recorded; objects of the old hash stay readable.
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
+        /// Refuse the mount when the store has another chunk profile
+        /// (MIN/AVG/MAX in KiB, MAX at most 1024, for example 16/64/256).
+        /// Default: the profile that the store records. A mount does not
+        /// make a store, so it never sets the profile: `slicefs seed` does.
+        #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
+        chunk_profile: Option<ChunkProfile>,
+        /// Most dirty file data (data that is not stored yet) of all open
+        /// files together. This is memory that the daemon may use. SIZE is
+        /// bytes, or a number with K, M or G (1024-based). Default 64M, at
+        /// least 4M, no upper bound. A writer over it waits up to 200 ms for
+        /// the background flusher, then stores part of its own file. Below
+        /// 64M, a file that is written from start to end with out-of-order
+        /// writes (a stream) can become a file changed in place (an
+        /// overlay) when the total reaches the budget.
+        #[arg(long, value_name = "SIZE", default_value = "64M", value_parser = crate::content::parse_dirty_bytes)]
+        dirty_budget: usize,
+        /// Most dirty file data of one file that is changed in place (an
+        /// overlay). SIZE is bytes, or a number with K, M or G (1024-based).
+        /// Default 32M, or --dirty-budget if that is less. At least 4M, not
+        /// above --dirty-budget. A file that is written from start to end
+        /// (a stream) can also hold out-of-order writes up to a fixed
+        /// 64 MiB window, whatever this limit is.
+        #[arg(long, value_name = "SIZE", value_parser = crate::content::parse_dirty_bytes)]
+        dirty_limit: Option<usize>,
+        /// Store the dirty data of a file after SECS seconds with no write
+        /// to it (default 5, at least 1).
+        #[arg(long, value_name = "SECS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
+        dirty_idle: u64,
+        /// Store dirty data that is SECS seconds old (default 30, at least
+        /// 1). A file that is written with no pause of 300 ms or more is
+        /// kept under its limit by its own writer instead.
+        #[arg(long, value_name = "SECS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
+        dirty_expire: u64,
+        /// Request worker threads. Default on Linux: half the CPUs, at least
+        /// 1 and at most 8; default on macOS: 1. With 1, each request runs
+        /// on the FUSE reader thread. At least 1; an explicit value above 8
+        /// is allowed.
+        #[arg(long, value_name = "N", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..))]
+        workers: Option<usize>,
     },
 
     /// Unmount a SliceFS filesystem mounted at the given path.
@@ -116,20 +156,51 @@ pub enum Cmd {
         /// recorded; objects of the old hash stay readable.
         #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
         hash: Option<String>,
+        /// The FastCDC chunk sizes of a new store: MIN/AVG/MAX in KiB,
+        /// powers of two, MAX at most 1024 (for example 16/64/256). Default
+        /// 4/8/32. The profile is fixed when the store is made, so a store
+        /// with another profile is refused.
+        #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
+        chunk_profile: Option<ChunkProfile>,
     },
 
     /// Run offline garbage collection on a SliceFS block store.
     ///
-    /// The store must NOT be mounted when this command is run.
-    /// Use the background GC thread for in-process GC during active mounts.
+    /// On a mounted store, this asks the GC thread of the mount to run the
+    /// GC and waits for the result.
     Gc {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
-        /// Full GC: an exact mark (sorted temp files in the store, bounded
-        /// RAM) and no holes, so every dead object goes. Slower than the
-        /// normal GC, which can keep a few dead objects.
+        /// Full GC: an exact mark (sorted temp files in the store) and no
+        /// holes, so every dead object goes. Slower than the normal GC,
+        /// which can keep a few dead objects. RAM: in both modes the walk
+        /// of the mark is bounded (it sorts its keys in a 4 MiB buffer and
+        /// temp files); the normal GC also holds a Bloom filter of about
+        /// 1.25 bytes per stored object. Disk: no temp file while the keys
+        /// fit in the buffer; else about 33 bytes per key per root (about 3
+        /// keys per file), up to twice that at the last merge, and with
+        /// --full also the exact mark (about 33 bytes per object, up to
+        /// twice that). A GC that has not that much free space (plus a
+        /// reserve of 1 %, at least 64 MiB) does not start, and deletes
+        /// nothing.
         #[arg(long)]
         full: bool,
+    },
+
+    /// Convert an offline store to another hash: rewrite every live
+    /// object, switch the root and every snapshot in one step, record the
+    /// hash, and free the old objects with a full GC. The store must not be
+    /// mounted.
+    Rehash {
+        /// The target hash, for example sha256 or blake3-256.
+        #[arg(long, value_name = "NAME", value_parser = crate::content::parse_hash)]
+        to: String,
+        /// Walk and verify the store and report what a real run would
+        /// rewrite; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Path to the SliceFS block store directory.
+        store: PathBuf,
     },
 
     /// Manage snapshots for a SliceFS block store.
@@ -156,6 +227,24 @@ pub enum Cmd {
         /// Path to the SliceFS block store directory.
         store: PathBuf,
     },
+}
+
+impl Cmd {
+    /// The dirty-data values of `slicefs mount` (not checked; see
+    /// `DirtyConfig::check`). With no `--dirty-limit`, the limit is
+    /// `DIRTY_LIMIT`, or the budget if that is less. `None` for another
+    /// subcommand.
+    pub fn dirty_config(&self) -> Option<crate::filesystem::DirtyConfig> {
+        match self {
+            Cmd::Mount { dirty_budget, dirty_limit, dirty_idle, dirty_expire, .. } => Some(crate::filesystem::DirtyConfig {
+                budget: *dirty_budget,
+                limit: dirty_limit.unwrap_or(crate::filesystem::DIRTY_LIMIT.min(*dirty_budget)),
+                idle_secs: *dirty_idle,
+                expire_secs: *dirty_expire,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Snapshot subcommands.
@@ -230,10 +319,11 @@ mod tests {
     fn test_seed() {
         let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src"]).unwrap();
         match cli.command {
-            Cmd::Seed { store, source_dir, hash } => {
+            Cmd::Seed { store, source_dir, hash, chunk_profile } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(source_dir, PathBuf::from("/src"));
                 assert!(hash.is_none(), "no --hash: keep the store's recorded hash");
+                assert!(chunk_profile.is_none(), "no --chunk-profile: keep the store's recorded profile");
             }
             _ => panic!("expected Seed"),
         }
@@ -257,8 +347,111 @@ mod tests {
             &["slicefs", "mount", "/mnt", "--store", "/data", "--hash", "md5"][..],
             &["slicefs", "seed", "/data", "/src", "--hash", "md5"][..],
         ] {
-            let err = Cli::try_parse_from(args).err().expect("an unknown hash is refused").to_string();
+            let err = Cli::try_parse_from(args).expect_err("an unknown hash is refused").to_string();
             assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
+        }
+    }
+
+    /// `--chunk-profile` takes MIN/AVG/MAX in KiB on seed and mount; a bad
+    /// profile is refused at parse.
+    #[test]
+    fn test_chunk_profile_flag() {
+        let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src", "--chunk-profile", "16/64/256"]).unwrap();
+        match cli.command {
+            Cmd::Seed { chunk_profile, .. } => assert_eq!(chunk_profile, Some(ChunkProfile::new(16384, 65536, 262144).unwrap())),
+            _ => panic!("expected Seed"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data", "--chunk-profile", "4/8/32"]).unwrap();
+        match cli.command {
+            Cmd::Mount { chunk_profile, .. } => assert_eq!(chunk_profile, Some(ChunkProfile::DEFAULT)),
+            _ => panic!("expected Mount"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data"]).unwrap();
+        match cli.command {
+            Cmd::Mount { chunk_profile, .. } => assert!(chunk_profile.is_none()),
+            _ => panic!("expected Mount"),
+        }
+        for value in ["16/64", "12/24/48"] {
+            for args in [
+                &["slicefs", "mount", "/mnt", "--store", "/data", "--chunk-profile", value][..],
+                &["slicefs", "seed", "/data", "/src", "--chunk-profile", value][..],
+            ] {
+                let err = Cli::try_parse_from(args).expect_err("a bad profile is refused").to_string();
+                assert!(err.contains("chunk profile"), "{value}: {err}");
+                if value == "16/64" {
+                    assert!(err.contains("MIN/AVG/MAX"), "{err}");
+                }
+            }
+        }
+    }
+
+    /// The dirty values of `slicefs mount ... extra`, as the mount gets them.
+    fn dirty_config(extra: &[&str]) -> Result<crate::filesystem::DirtyConfig, String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        let cli = Cli::try_parse_from(&args).map_err(|e| e.to_string())?;
+        Ok(cli.command.dirty_config().expect("expected Mount"))
+    }
+
+    /// The budget and the limit of `slicefs mount ... extra`.
+    fn dirty_sizes(extra: &[&str]) -> Result<(usize, usize), String> {
+        dirty_config(extra).map(|c| (c.budget, c.limit))
+    }
+
+    /// With no --dirty-limit, the limit is 32M, or the budget if that is
+    /// less. An explicit limit above the budget is still refused.
+    #[test]
+    fn a_small_budget_alone_gives_a_limit_of_the_budget() {
+        let mib = 1 << 20;
+        let cfg = dirty_config(&["--dirty-budget", "16M"]).unwrap();
+        assert_eq!((cfg.budget, cfg.limit), (16 * mib, 16 * mib), "{cfg:?}");
+        assert_eq!(cfg.check(), Ok(()), "--dirty-budget 16M alone is accepted");
+        assert_eq!(dirty_sizes(&["--dirty-budget", "4M"]), Ok((4 * mib, 4 * mib)));
+        assert_eq!(dirty_sizes(&["--dirty-budget", "128M"]), Ok((128 * mib, 32 * mib)));
+        let cfg = dirty_config(&["--dirty-budget", "16M", "--dirty-limit", "32M"]).unwrap();
+        assert!(cfg.check().is_err(), "an explicit limit above the budget is refused: {cfg:?}");
+    }
+
+    /// With no option, the values are the constants of the file system.
+    #[test]
+    fn dirty_size_defaults_are_the_constants() {
+        use crate::filesystem::{DIRTY_BUDGET, DIRTY_LIMIT};
+        assert_eq!(dirty_sizes(&[]), Ok((DIRTY_BUDGET, DIRTY_LIMIT)));
+        assert_eq!((DIRTY_BUDGET, DIRTY_LIMIT), (67108864, 33554432));
+    }
+
+    #[test]
+    fn dirty_size_options_parse() {
+        for (b, l) in [("8M", "4M"), ("8388608", "4194304")] {
+            let got = dirty_sizes(&["--dirty-budget", b, "--dirty-limit", l]);
+            assert_eq!(got, Ok((8 << 20, 4 << 20)), "--dirty-budget {b} --dirty-limit {l}");
+        }
+        for extra in [&["--dirty-budget", "-5"][..], &["--dirty-budget=-5"], &["--dirty-limit", "0"], &["--dirty-limit", "3M"]] {
+            assert!(dirty_sizes(extra).is_err(), "{extra:?} is refused");
+        }
+    }
+
+    /// The idle and expire times of `slicefs mount ... extra`.
+    fn dirty_times(extra: &[&str]) -> Result<(u64, u64), String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        match Cli::try_parse_from(&args).map_err(|e| e.to_string())?.command {
+            Cmd::Mount { dirty_idle, dirty_expire, .. } => Ok((dirty_idle, dirty_expire)),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn dirty_time_options_parse() {
+        let def = crate::filesystem::DirtyConfig::default();
+        assert_eq!(dirty_times(&[]), Ok((5, 30)));
+        assert_eq!((def.idle_secs, def.expire_secs), (5, 30), "the defaults are the constants");
+        assert_eq!(dirty_times(&["--dirty-idle", "7", "--dirty-expire", "60"]), Ok((7, 60)));
+        let max = (u64::MAX / 1000).to_string();
+        assert_eq!(dirty_times(&["--dirty-expire", &max]), Ok((5, u64::MAX / 1000)));
+        let over = (u64::MAX / 1000 + 1).to_string();
+        for opt in ["--dirty-idle", "--dirty-expire"] {
+            for v in ["0", "-1", over.as_str()] {
+                assert!(dirty_times(&[opt, v]).is_err(), "{opt} {v} is refused");
+            }
         }
     }
 
@@ -437,5 +630,58 @@ mod tests {
     fn test_no_json_flag_default() {
         let cli = Cli::try_parse_from(["slicefs", "stats", "/data"]).unwrap();
         assert!(!cli.json, "expected --json to default to false");
+    }
+
+    /// The `--workers` value of `slicefs mount` with `extra` options.
+    fn workers(extra: &[&str]) -> Result<Option<usize>, clap::Error> {
+        let mut args = vec!["slicefs", "mount", "/mnt", "--store", "/data"];
+        args.extend_from_slice(extra);
+        match Cli::try_parse_from(args)?.command {
+            Cmd::Mount { workers, .. } => Ok(workers),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn workers_flag_parses() {
+        assert_eq!(workers(&["--workers", "4"]).unwrap(), Some(4));
+    }
+
+    #[test]
+    fn workers_zero_is_refused() {
+        let e = workers(&["--workers", "0"]).expect_err("--workers 0 is refused");
+        assert_eq!(e.kind(), clap::error::ErrorKind::ValueValidation, "{e}");
+    }
+
+    #[test]
+    fn workers_absent_is_none() {
+        assert_eq!(workers(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn workers_above_eight_is_accepted() {
+        assert_eq!(workers(&["--workers", "16"]).unwrap(), Some(16));
+    }
+
+    #[test]
+    fn rehash_parses_to_and_dry_run() {
+        let cli = Cli::try_parse_from(["slicefs", "rehash", "--to", "sha256", "./s"]).unwrap();
+        match cli.command {
+            Cmd::Rehash { to, dry_run, store } => assert_eq!((to.as_str(), dry_run, store), ("sha256", false, PathBuf::from("./s"))),
+            _ => panic!("expected Rehash"),
+        }
+        let cli = Cli::try_parse_from(["slicefs", "rehash", "--to", "blake3-256", "--dry-run", "./s"]).unwrap();
+        match cli.command {
+            Cmd::Rehash { to, dry_run, .. } => assert_eq!((to.as_str(), dry_run), ("blake3-256", true)),
+            _ => panic!("expected Rehash"),
+        }
+    }
+
+    /// `--to` is required and takes a known hash name.
+    #[test]
+    fn rehash_refuses_an_unknown_hash() {
+        let err = Cli::try_parse_from(["slicefs", "rehash", "--to", "md5", "./s"]).expect_err("an unknown hash is refused").to_string();
+        assert!(err.contains("unknown hash \"md5\"") && err.contains("sha256"), "{err}");
+        Cli::try_parse_from(["slicefs", "rehash", "./s"]).expect_err("--to is required");
     }
 }

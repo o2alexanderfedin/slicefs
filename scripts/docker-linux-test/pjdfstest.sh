@@ -6,9 +6,12 @@ apt-get install -y -q autoconf automake >/dev/null 2>&1 || { apt-get update -q >
 git clone -q --depth 1 https://github.com/pjd/pjdfstest.git /opt/pjdfstest && cd /opt/pjdfstest \
   && autoreconf -ifs >/dev/null 2>&1 && ./configure -q >/dev/null && make -s pjdfstest >/dev/null 2>&1 || { echo "pjdfstest build failed"; exit 1; }
 echo s > $R/src/s.txt; $B seed $R/store $R/src >/dev/null
-$B mount --store $R/store --allow-other $R/m </dev/null >$R/mount.log 2>&1 & MP=$!
+$B mount --store $R/store ${SLICEFS_WORKERS:+--workers $SLICEFS_WORKERS} --allow-other $R/m </dev/null >$R/mount.log 2>&1 & MP=$!
 for i in $(seq 20); do mountpoint -q $R/m && break; sleep .5; done
 mountpoint -q $R/m || { echo NOT MOUNTED; tail $R/mount.log; exit 1; }
+# SLICEFS_WORKERS=N mounts with --workers N; the line must then be "Workers: N (set)".
+WF=0; WL=$(grep -m1 -o 'Workers: [0-9]* ([a-z]*)' $R/mount.log); echo "workers-line: ${WL:-none}"
+if [ -n "${SLICEFS_WORKERS:-}" ] && [ "$WL" != "Workers: $SLICEFS_WORKERS (set)" ]; then echo "workers-line: FAIL"; WF=1; fi
 # open/25.t writes 1 byte at offset 2 GiB+1; SliceFS still builds such a file
 # in RAM (issues #1-#3), which takes many minutes, so it runs last with a limit.
 cd $R/m && timeout -s KILL 3000 prove ${PROVE_ARGS:--v $(find /opt/pjdfstest/tests -name '*.t' ! -path '*/open/25.t' | sort)} > $R/prove.txt 2>&1
@@ -19,5 +22,5 @@ $B unmount $R/m >/dev/null 2>&1
 grep -E "^Failed [0-9]+/[0-9]+ subtests|^Files=|^Result" $R/prove.txt
 echo "--- failing test files:"; grep -E "^/opt.*\(Wstat|Failed:? " $R/prove.txt | head -60
 awk '/Test Summary Report/,0' $R/prove.txt | grep -E "^/opt" | sed 's#/opt/pjdfstest/tests/##' | head -80
-# Exit status: 0 only if prove reported PASS for the main run.
-grep -q "^Result: PASS" $R/prove.txt
+# Exit status: 0 only if prove reported PASS for the main run and the Workers line is right.
+grep -q "^Result: PASS" $R/prove.txt && [ $WF -eq 0 ]

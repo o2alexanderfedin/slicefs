@@ -1,0 +1,27 @@
+smoke-20-08: Docker Linux mount smoke (mt-linux.sh) on the committed tree
+commit = cbb1182
+porcelain lines = 0
+IMAGE_ID (reference only) = sha256:e46c2bd769aa90e27459e6d4bca75167de66046999f9d57549214985845c9678
+host uptime:  4:32  up 32 days,  8:52, 8 users, load averages: 53.77 52.99 44.28
+expected RUSTC = rustc 1.100.0 (0ef1bc386 2026-11-09)
+RUSTC = rustc 1.100.0 (0ef1bc386 2026-11-09)
+Linux bbe5ccf082fa 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+build: ok
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+CAS bytes        : 2.91 MiB (3046237 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+=== done
+exit = 0
+host uptime (end):  4:32  up 32 days,  8:53, 8 users, load averages: 49.27 51.99 44.37

@@ -1,0 +1,14 @@
+# docker host (OrbStack): Kernel Version: 7.2.12-orbstack-00394-gbecdd6130068;Operating System: OrbStack;CPUs: 32;Total Memory: 15.68GiB;
+# date 2026-11-21, scripts/docker-linux-test/run.sh s4, release build
+# --privileged: not used (fusectl mounted with --cap-add SYS_ADMIN alone)
+# limits: waiting counts the whole connection; one active file; one daemon dispatch thread, so only the kernel-side queue is seen; readahead pass drops the file page cache (fadvise) before each dd
+# S4 queue depth, commit 49f5a21, kernel 7.2.12-orbstack-00394-gbecdd6130068, file 256 MiB, 60 s per pass
+# note: waiting counts the whole FUSE connection; one active file only; one daemon dispatch thread
+  s4-create-file: ok
+S4 connection=77
+S4 sanity waiting_while_stopped=1
+S4 pass=write samples=25523 waiting_max=1 waiting_p50=1 waiting_p99=1 hist=0:5012,1:20511
+S4 pass=readahead samples=26030 waiting_max=2 waiting_p50=2 waiting_p99=2 hist=0:1783,1:6961,2:17286
+S4 pass=both samples=25753 waiting_max=7 waiting_p50=3 waiting_p99=5 hist=0:456,1:1407,2:5617,3:15382,4:2597,5:271,6:22,7:1
+    run time: 196 s
+RESULT s4: PASS

@@ -1,0 +1,393 @@
+# Miri probe of the lib tests, Linux target, Docker (OrbStack VM, harness form, x86_64-unknown-linux-gnu), at a3b6bbe plus the probe script
+# The cross build on the Mac (--target x86_64-unknown-linux-gnu) failed: zstd-sys needs x86_64-linux-gnu-gcc.
+# Run 1: every lib test, one process per test, MIRIFLAGS=-Zmiri-disable-isolation, MIRI_PROBE_SECS=120, MIRI_PROBE_JOBS=4
+# Line form: PROBE <crate> <name> <class> <secs> <detail>
+Linux 8a1d54bb09e6 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+32
+0.00 0.00 0.00 1/829 20
+MemAvailable:   14729176 kB
+info: syncing channel updates for nightly-2026-02-11-x86_64-unknown-linux-gnu
+info: latest update on 2026-02-11 for version 1.95.0-nightly (9e79395f9 2026-02-10)
+info: downloading 5 components
+  nightly-2026-02-11-x86_64-unknown-linux-gnu installed - rustc 1.95.0-nightly (9e79395f9 2026-02-10)
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+Preparing a sysroot for Miri (target: x86_64-unknown-linux-gnu)...
+    Finished `custom_sysroot` profile [optimized] target(s) in 25.34s
+A sysroot for Miri is now available in `<home>/.cache/miri`.
+PROBE chunk-store bloom::tests::the_size_is_ten_bits_per_key_in_whole_blocks pass 3 
+PROBE chunk-store extsort::tests::an_absorbed_sorter_joins_and_a_cursor_seeks pass 6 
+PROBE chunk-store bloom::tests::no_false_negatives timeout 120 
+PROBE chunk-store bloom::tests::the_false_positive_rate_is_about_one_percent timeout 120 
+PROBE chunk-store bloom::tests::bytes_round_trip timeout 120 
+PROBE chunk-store extsort::tests::tiny_chunks_and_fan_in_take_several_merge_passes pass 112 
+PROBE chunk-store file::tests::a_read_of_a_level_255_child_is_an_error_not_a_panic pass 5 
+PROBE chunk-store file::tests::a_malformed_tree_is_an_error_not_a_panic pass 29 
+PROBE chunk-store file::tests::a_long_rechunk_run_reads_big_pieces timeout 120 
+PROBE chunk-store file::tests::a_shift_at_the_start_changes_few_nodes timeout 120 
+PROBE chunk-store file::tests::a_small_splice_reuses_old_nodes timeout 120 
+PROBE chunk-store file::tests::a_splice_of_a_malformed_tree_is_an_error_not_a_panic pass 9 
+PROBE chunk-store file::tests::a_splice_across_many_leaves_gives_the_same_key timeout 120 
+PROBE chunk-store file::tests::a_splice_gives_the_same_key_as_a_full_write timeout 120 
+PROBE chunk-store file::tests::a_splice_over_zeros_and_repeating_data_gives_the_same_key timeout 120 
+PROBE chunk-store file::tests::zero_runs_cut_at_chunk_max pass 5 
+PROBE chunk-store hash::tests::an_older_pack_format_is_refused pass 3 
+PROBE chunk-store file::tests::nodes_stay_within_the_size_limits timeout 120 
+PROBE chunk-store hash::tests::an_unknown_hash_tag_is_an_error pass 7 
+PROBE chunk-store hash::tests::lookup_by_name_and_tag pass 3 
+PROBE chunk-store index::tests::a_failed_flush_keeps_the_memtable_and_the_old_manifest pass 7 
+PROBE chunk-store hash::tests::gc_keeps_live_objects_of_both_hashes unsupported 16 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store hash::tests::a_new_write_hash_keeps_old_objects_readable unsupported 23 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store file::tests::scattered_small_edits_read_little_more_than_they_rechunk timeout 120 
+PROBE chunk-store index::tests::a_manifest_round_trips_and_damage_is_refused pass 6 
+PROBE chunk-store index::tests::the_idle_window_rewrites_a_run_only_for_enough_new_data pass 3 
+PROBE chunk-store index::tests::the_newest_entry_wins_in_get_and_iter_all pass 8 
+PROBE chunk-store index::tests::the_obsolete_runs_of_the_manifest_are_removed_at_open pass 8 
+PROBE chunk-store index::tests::a_read_error_ends_get_and_iter_all_with_the_error pass 16 
+PROBE chunk-store index_tests::an_index_with_an_overflowing_count_is_refused pass 4 
+PROBE chunk-store index_tests::the_resync_scan_treats_an_unknown_tag_by_position pass 3 
+PROBE chunk-store locality::tests::a_fill_with_entries_of_another_pack_is_dropped pass 4 
+PROBE chunk-store locality::tests::a_floor_during_a_fill_drops_it_and_empties_the_cache pass 3 
+PROBE chunk-store locality::tests::a_gc_during_a_fill_drops_it_and_the_cached_pack pass 4 
+PROBE chunk-store locality::tests::a_streak_of_hits_fills_the_pack pass 4 
+PROBE chunk-store index::tests::a_stopped_merge_leaves_no_output pass 35 
+PROBE chunk-store locality::tests::a_refused_untrusted_or_low_pack_is_never_filled pass 44 
+PROBE chunk-store locality::tests::the_ram_stays_within_the_bounds timeout 120 
+PROBE chunk-store locality_tests::a_cache_hit_during_a_gc_keeps_the_object timeout 120 
+PROBE chunk-store locality_tests::a_cache_hit_that_gc_removed_before_the_lock_writes_again timeout 120 
+PROBE chunk-store locality_tests::a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx timeout 120 
+PROBE chunk-store locality_tests::a_failed_clear_ends_the_gc_before_any_change timeout 120 
+PROBE chunk-store locality_tests::a_failed_install_after_the_copies_leaves_the_source_pack_untrusted timeout 120 
+PROBE chunk-store locality_tests::a_failed_lookup_ends_the_trust_in_the_packs_so_far timeout 120 
+PROBE chunk-store locality_tests::a_gc_drops_the_cached_pack_of_a_removed_object timeout 120 
+PROBE chunk-store locality_tests::a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them timeout 120 
+PROBE chunk-store locality_tests::a_pack_that_a_gc_changed_is_never_filled_from_its_stale_idx timeout 120 
+PROBE chunk-store locality_tests::a_put_whose_trust_floor_fails_writes_nothing timeout 120 
+PROBE chunk-store locality_tests::a_rewrite_in_pack_order_hits_the_cache_with_the_places_of_the_index timeout 120 
+PROBE chunk-store locality_tests::a_rewrite_in_the_active_pack_tries_no_fill pass 71 
+PROBE chunk-store locality_tests::an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup timeout 120 
+PROBE chunk-store lock_stats::tests::all_lists_every_site_in_discriminant_order pass 4 
+PROBE chunk-store lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_hwm pass 8 
+PROBE chunk-store locality_tests::hits_in_random_order_never_fill timeout 120 
+PROBE chunk-store lock_tail_tests::gc_begin_waits_for_a_record_write_with_no_lock pass 6 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_index_flush_sync pass 11 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait fail 10 thread 'lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait' (3645) panicked at crates/chunk-store/src/lock_tail_tests.rs:144:5: the background sync at KEEP_LIMIT is held 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_phase_two_sync pass 7 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_pack_create pass 15 
+PROBE chunk-store locality_tests::packs_of_an_earlier_process_are_cached_from_their_exact_idx timeout 120 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_record_write pass 8 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_run_write pass 10 
+PROBE chunk-store lock_tail_tests::put_passes_a_held_pack_open pass 14 
+PROBE chunk-store lock_tail_tests::put_passes_a_held_trust_floor_write pass 11 
+PROBE chunk-store lock_tail_tests::put_and_read_pass_a_held_seal_join pass 23 
+PROBE chunk-store lock_tail_tests::retrying_put_and_read_pass_a_held_phase_two_sync pass 6 
+PROBE chunk-store locality_tests::the_trust_floor_of_a_failed_lookup_outlives_a_crash timeout 120 
+PROBE chunk-store mark::tests::an_exact_touched_set_never_spills pass 40 
+PROBE chunk-store race_tests::a_flush_during_a_merge_keeps_the_new_runs unsupported 3 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_gc_during_a_merge_stays_newer_than_the_merged_run unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_listed_but_missing_run_requests_a_rebuild unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_put_hit_that_gc_removed_before_the_lock_writes_again unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store mark::tests::a_spilled_touched_set_has_no_false_negatives pass 55 
+PROBE chunk-store race_tests::a_put_hit_without_a_gc_writes_nothing unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_read_error_after_pending_runs_changes_nothing unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_read_error_in_a_later_group_leaves_the_earlier_groups_done unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_read_error_in_the_per_pack_pass_changes_nothing unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_read_error_in_the_totals_pass_changes_nothing unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_read_whose_loc_gc_moved_returns_the_bytes_from_the_new_pack unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::an_object_put_in_a_later_group_keeps_its_pack unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::a_transient_read_error_in_a_gc_pass_changes_nothing unsupported 5 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::an_object_put_in_an_early_group_keeps_its_pack_in_a_later_group unsupported 3 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store race_tests::the_store_lock_is_free_during_the_gc_passes unsupported 4 can't call foreign function `ZSTD_createCCtx` on OS `linux`
+PROBE chunk-store retry::tests::a_handle_sync_repairs_a_short_error pass 4 
+PROBE chunk-store retry::tests::a_handle_sync_drops_the_copies_made_before_it pass 5 
+PROBE chunk-store retry::tests::a_write_that_overlaps_a_failed_sync_is_written_again pass 4 
+PROBE chunk-store run::tests::a_damaged_footer_or_table_is_refused pass 10 
+PROBE chunk-store run::tests::a_damaged_tombstone_never_reads_as_a_miss_or_a_put pass 9 
+PROBE chunk-store mark::tests::a_live_filter_has_no_false_negatives timeout 120 
+PROBE chunk-store mark::tests::another_salt_gives_other_false_positives timeout 120 
+PROBE chunk-store run::tests::a_run_round_trips_through_each_io unsupported 67 Miri does not support file-backed memory mappings
+PROBE chunk-store run::tests::a_damaged_page_gives_no_false_miss_and_the_verified_reads_are_corrupt timeout 120 
+PROBE chunk-store run::tests::a_run_of_real_places_needs_about_42_bytes_for_each_entry timeout 120 
+PROBE chunk-store run::tests::each_tag_starts_a_new_page pass 14 
+PROBE chunk-store run::tests::a_run_without_a_filter_round_trips pass 55 
+PROBE chunk-store run::tests::a_run_with_a_filter_answers_misses_without_a_page_read timeout 120 
+PROBE chunk-store run::tests::an_id_that_differs_only_in_the_shared_bytes_is_a_miss pass 81 
+PROBE chunk-store run::tests::place_fields_of_each_width_round_trip pass 51 
+PROBE chunk-store run::tests::ids_that_share_most_of_their_bytes_are_kept_apart timeout 120 
+PROBE chunk-store run::tests::the_writer_refuses_keys_out_of_order pass 4 
+PROBE chunk-store run::tests::keys_with_the_prefix_of_a_page_fence_are_found timeout 120 
+PROBE chunk-store run::tests::tombstones_are_in_the_filter pass 22 
+PROBE chunk-store run::tests::tombstones_round_trip_and_are_counted pass 21 
+PROBE chunk-store sync::tests::cell_then_stripe_panics pass 4 
+PROBE chunk-store sync::tests::condvar_notify_wakes_waiter pass 3 
+PROBE chunk-store sync::tests::condvar_wait_takes_entry_off_the_stack pass 3 
+PROBE chunk-store sync::tests::exclusive_gate_holder_locks_cells_one_at_a_time pass 3 
+PROBE chunk-store sync::tests::gate_after_a_lock_panics pass 3 
+PROBE chunk-store sync::tests::gate_marker_then_cell_passes pass 4 
+PROBE chunk-store sync::tests::guards_drop_out_of_order pass 4 
+PROBE chunk-store sync::tests::rank_names_in_message_are_checked pass 3 
+PROBE chunk-store sync::tests::mutex_counts_across_threads pass 7 
+PROBE chunk-store sync::tests::rename_then_rename_panics pass 3 
+PROBE chunk-store sync::tests::rwlock_read_write pass 3 
+PROBE chunk-store sync::tests::same_rank_short_and_store_nest pass 4 
+PROBE chunk-store sync::tests::same_stripe_twice_panics pass 4 
+PROBE chunk-store run::tests::runs_of_each_size_round_trip timeout 120 
+PROBE chunk-store sync::tests::short_then_store_passes pass 3 
+PROBE chunk-store sync::tests::store_then_short_panics pass 3 
+PROBE chunk-store sync::tests::strict_gate_cell_without_gate_panics pass 3 
+PROBE chunk-store sync::tests::strict_gate_stripe_without_gate_panics pass 3 
+PROBE chunk-store sync::tests::strict_gate_with_gate_passes_and_short_needs_none pass 3 
+PROBE chunk-store sync::tests::stripe_ascending_passes pass 4 
+PROBE chunk-store sync::tests::stripe_descending_panics pass 4 
+PROBE chunk-store sync::tests::try_lock_busy_leaves_no_entry pass 4 
+PROBE chunk-store sync::tests::two_cells_panic_even_in_key_order pass 3 
+PROBE chunk-store run::tests::the_interpolation_search_finds_what_a_binary_search_finds timeout 120 
+PROBE chunk-store total=127 pass=73 unsupported=17 ub=0 fail=1 timeout=36
+probe-secs chunk-store 1448
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+A sysroot for Miri is already available in `<home>/.cache/miri`.
+PROBE metadata directory::tests::test_add_dir_entry_appears_in_list unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_add_dir_entry_duplicate_rejected unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::dir_list_interns_same_digest_as_per_change_path unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_add_dot_rejected unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_create_dir_entries_has_dot_and_dotdot unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_create_dir_entries_dot_points_to_self unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_lookup_finds_entry unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_lookup_not_found unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_original_entry_list_unchanged_after_add unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_remove_dir_entry_gone_from_list unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_multiple_entries_round_trip unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_remove_dot_rejected unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata inode::tests::test_deserialize_rejects_wrong_length pass 3 
+PROBE metadata directory::tests::test_remove_dotdot_rejected unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata directory::tests::test_remove_nonexistent_returns_not_found unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata inode::tests::test_extension_round_trip_72_bytes pass 2 
+PROBE metadata inode::tests::test_new_directory_nlinks pass 2 
+PROBE metadata inode::tests::test_intern_and_load_roundtrip unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata inode::tests::test_new_file_nlinks pass 2 
+PROBE metadata inode::tests::test_rdev_zero_keeps_56_byte_format pass 3 
+PROBE metadata inode::tests::test_round_trip pass 3 
+PROBE metadata inode::tests::test_round_trip_max_values pass 3 
+PROBE metadata inode::tests::test_round_trip_zero_ino pass 2 
+PROBE metadata inode::tests::test_serialize_size_is_56 pass 2 
+PROBE metadata inode_map::tests::test_deserialize_rejects_bad_length pass 2 
+PROBE metadata inode_map::tests::test_insert_and_get pass 3 
+PROBE metadata inode_map::tests::test_new_starts_at_two pass 2 
+PROBE metadata inode_map::tests::test_intern_and_load_round_trip unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata inode_map::tests::test_remove pass 3 
+PROBE metadata inode_map::tests::test_next_ino_after_deserialize_is_max_plus_one pass 3 
+PROBE metadata inode_map::tests::test_serialize_empty_round_trip pass 2 
+PROBE metadata inode_map::tests::test_serialize_multiple_entries pass 3 
+PROBE metadata inode_map::tests::test_serialize_single_entry pass 3 
+PROBE metadata manifest::tests::test_empty_and_nonempty_keys_differ unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata manifest::tests::test_empty_manifest_round_trip unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata manifest::tests::test_multiple_blocks_round_trip unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata manifest::tests::test_ordering_preserved unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata manifest::tests::test_single_block_round_trip unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata manifest::tests::test_two_different_manifests_produce_different_keys unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata segment::order_tests::segments_sort_by_id_past_six_digits pass 3 
+PROBE metadata segment::writer::sync_tests::sync_skips_disk_flush_when_nothing_was_written pass 3 
+PROBE metadata snapshot::tests::test_snapshot_entry_fields pass 2 
+PROBE metadata snapshot::tests::test_snapshot_entry_no_name pass 2 
+PROBE metadata snapshot::tests::test_snapshot_record_name_len_zero_for_none pass 2 
+PROBE metadata snapshot::tests::test_snapshot_record_round_trip_no_name pass 3 
+PROBE metadata snapshot::tests::test_snapshot_record_parse_returns_none_on_short_payload pass 3 
+PROBE metadata snapshot::tests::test_snapshot_record_round_trip_with_name pass 2 
+PROBE metadata store::map_decode_tests::a_map_with_an_overflowing_count_is_corrupt unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::atomic_modify_inode_loses_no_change unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::cached_dirs_and_inodes_survive_eviction_commit_and_reload unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::cold_dir_load_does_not_block_other_inodes unsupported 2 can't call foreign function `getgid` on OS `linux`
+PROBE metadata store::tests::create_directory_at_adds_the_entry_or_nothing unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::create_inode_at_takes_the_number_and_raises_the_allocator unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::flush_install_does_not_resurrect_a_deleted_inode unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::hot_path_put_error_fails_the_next_commit_and_puts_are_synced unsupported 3 can't call foreign function `getgid` on OS `linux`
+PROBE metadata store::tests::late_older_install_does_not_overwrite_a_newer_change unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::manifest_read_does_not_block_inode_changes unsupported 2 can't call foreign function `getgid` on OS `linux`
+PROBE metadata store::tests::missing_inode_modify_inode_is_not_found_and_creates_nothing unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::new_store_root_dir_has_current_times unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::size_change_in_modify_inode_moves_logical_bytes unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_commit_and_reload unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_commit_returns_nonzero_digest unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_dir_under_file_returns_not_a_directory unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_dir_under_nonexistent_parent_returns_not_found unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_directory_shows_in_parent unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_snapshot_adds_to_both_indexes unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_snapshot_auto_increments_version unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_create_snapshot_returns_entry unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_delete_inode_drops_manifest_xattrs_and_dir_entries unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_delete_nonexistent_returns_not_found unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_directory_stable_across_reload unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_empty_store_commit_reload unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_filestorage_persistence_round_trip unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_find_snapshot_by_name unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_find_snapshot_by_version_string unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_find_snapshot_returns_none_for_unknown unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_hashmap_find_by_name_o1 unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_hashmap_find_by_version_o1 unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata inode::tests::prop_round_trip pass 84 
+PROBE metadata store::tests::test_hashmap_10k_snapshots_under_1ms unsupported 8 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_hashmap_list_snapshots_sorted unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_count_after_reload unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_count_empty unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_count_tracks_lifecycle unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_crud unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_numbers_are_monotonic unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_inode_stability_across_reload unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_io_accessor_content_survives_reload unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_link_duplicate_name_rejected unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_list_directory_non_dir_returns_error unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_list_snapshots_sorted_by_version unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_lookup_and_link unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_manifest_round_trip unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_manifest_stable_across_reload unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_names_longer_than_name_max_are_rejected unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_new_has_root_dir unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_refcount_decrement_saturated unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_refcount_saturates unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_root_ino_is_one unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_saturated_refcount_count unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_set_snapshots_loads_snapshot_list unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_set_snapshots_populates_both_indexes unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_snapshot_roots_includes_all_roots unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_snapshot_roots_no_snapshots_returns_current_root unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_snapshots_survive_segment_replay unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_unlink_removes_entry unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_update_nonexistent_returns_not_found unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_get_not_found unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_large_value unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_list unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_list_empty unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_on_directory unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_overwrite unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_remove unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_remove_not_found unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_set_get unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store::tests::test_xattr_stable_across_reload unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store_io::tests::a_missing_node_says_missing unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store_io::tests::a_node_reads_back_and_equal_bytes_share_a_key unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata store_io::tests::sync_written_syncs_only_after_puts unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata wal::buffered::tests::buffered_cut_opens_the_new_segment_before_the_writer pass 3 
+PROBE metadata wal::flush_on_fsync::tests::a_buffered_commit_after_a_failed_write_with_queued_records_succeeds unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata wal::flush_on_fsync::tests::a_failed_write_out_fails_fsync_until_a_commit_and_the_commit_works unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata wal::flush_on_fsync::tests::failed_cap_write_out_fails_fsync_until_rotate pass 3 
+PROBE metadata inode_map::tests::prop_serialize_round_trip timeout 120 
+PROBE metadata wal::per_op::tests::a_commit_after_a_failed_write_with_queued_records_succeeds unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata wal::per_op::tests::a_failed_cut_record_write_fails_until_the_next_cut pass 3 
+PROBE metadata wal::per_op::tests::a_failed_record_write_fails_until_a_cut pass 3 
+PROBE metadata wal::per_op::tests::append_and_write_out_pass_a_parked_fsync pass 3 
+PROBE metadata wal::per_op::tests::append_returns_while_the_writer_is_held pass 3 
+PROBE metadata wal::per_op::tests::cut_opens_the_new_segment_before_the_writer pass 3 
+PROBE metadata wal::per_op::tests::flush_and_sync_waits_for_a_parked_record_write pass 3 
+PROBE metadata wal::per_op::tests::op_record_reaches_the_file_without_a_sync pass 3 
+PROBE metadata wal::per_op::tests::records_reach_the_segment_in_lsn_order pass 34 
+PROBE metadata wal::per_op::tests::settle_syncs_the_old_segments_with_the_behind_lock_released pass 3 
+PROBE metadata wal::per_op::tests::store_log_op_writes_one_record_and_a_failed_write_out_fails_fsync unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata wal::per_op::tests::the_writer_lock_is_free_during_a_record_write pass 3 
+PROBE metadata wal::per_op::tests::write_out_twice_writes_each_record_once pass 3 
+PROBE metadata wal::periodic::tests::failed_timer_sync_fails_fsync_until_rotate pass 3 
+PROBE metadata wal::buffered::tests::buffered_write_out_passes_a_parked_record_write timeout 120 
+PROBE metadata wal::periodic::tests::timer_syncs_and_drop_stops_it pass 3 
+PROBE metadata wal::flush_on_fsync::tests::append_holds_records_until_a_write_out_past_the_cap timeout 120 
+PROBE metadata wal::tests::cut_keeps_unwritten_appends_in_lsn_order pass 4 
+PROBE metadata wal::flush_on_fsync::tests::ram_stays_at_most_the_cap_with_no_fsync timeout 120 
+PROBE metadata wal::tests::rotate_after_unwritten_appends_starts_with_the_seed_only pass 3 
+PROBE metadata xattr::tests::test_binary_value_round_trip pass 3 
+PROBE metadata xattr::tests::test_empty_round_trip pass 3 
+PROBE metadata wal::tests::no_deadlock_between_append_cut_and_sync fail 10 thread 'wal::tests::no_deadlock_between_append_cut_and_sync' (12521) panicked at crates/metadata/src/wal/mod.rs:558:21: flush_on_fsync: a WAL thread did not finish within 5 s (deadlock) 
+PROBE metadata xattr::tests::test_empty_value pass 2 
+PROBE metadata xattr::tests::test_get_xattr_entry_found pass 2 
+PROBE metadata xattr::tests::test_get_xattr_entry_not_found pass 2 
+PROBE metadata xattr::tests::test_intern_load_empty unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata xattr::tests::test_intern_load_large_value unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata xattr::tests::test_intern_load_multiple_attrs unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata xattr::tests::test_intern_load_single_attr unsupported 3 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata xattr::tests::test_large_value_round_trip pass 3 
+PROBE metadata xattr::tests::test_list_xattr_names pass 3 
+PROBE metadata xattr::tests::test_list_xattr_names_empty pass 2 
+PROBE metadata xattr::tests::test_multiple_attrs_coexist_independently unsupported 2 can't call foreign function `fallocate` on OS `linux`
+PROBE metadata xattr::tests::test_multiple_attrs_round_trip pass 2 
+PROBE metadata xattr::tests::test_remove_xattr_entry_not_found_returns_false pass 3 
+PROBE metadata xattr::tests::test_remove_xattr_entry_removes pass 3 
+PROBE metadata xattr::tests::test_set_xattr_entry_insert pass 3 
+PROBE metadata xattr::tests::test_set_xattr_entry_replace pass 2 
+PROBE metadata xattr::tests::test_single_attr_round_trip pass 3 
+PROBE metadata wal::periodic::tests::ram_stays_at_most_the_cap_with_no_fsync timeout 120 
+PROBE metadata total=166 pass=57 unsupported=103 ub=0 fail=1 timeout=5
+probe-secs metadata 346
+6.07 5.59 4.10 5/880 13351
+build-exit=0
+docker-exit=0
+
+# Run 2: the timeout tests of run 1 again, MIRI_PROBE_SECS=300, MIRI_PROBE_JOBS=4 (two containers, separate target dirs)
+Linux d9caf590871c 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 x86_64 GNU/Linux
+32
+3.76 3.86 3.16 5/865 10
+MemAvailable:   14232264 kB
+36
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+Preparing a sysroot for Miri (target: x86_64-unknown-linux-gnu)...
+    Finished `custom_sysroot` profile [optimized] target(s) in 27.38s
+A sysroot for Miri is now available in `<home>/.cache/miri`.
+PROBE chunk-store bloom::tests::no_false_negatives timeout 300 
+PROBE chunk-store bloom::tests::the_false_positive_rate_is_about_one_percent timeout 300 
+PROBE chunk-store bloom::tests::bytes_round_trip timeout 300 
+PROBE chunk-store file::tests::a_long_rechunk_run_reads_big_pieces timeout 300 
+PROBE chunk-store file::tests::a_splice_gives_the_same_key_as_a_full_write timeout 300 
+PROBE chunk-store file::tests::a_small_splice_reuses_old_nodes timeout 300 
+PROBE chunk-store file::tests::a_shift_at_the_start_changes_few_nodes timeout 300 
+PROBE chunk-store file::tests::a_splice_across_many_leaves_gives_the_same_key timeout 300 
+PROBE chunk-store locality::tests::the_ram_stays_within_the_bounds timeout 300 
+PROBE chunk-store file::tests::scattered_small_edits_read_little_more_than_they_rechunk timeout 300 
+PROBE chunk-store file::tests::nodes_stay_within_the_size_limits timeout 300 
+PROBE chunk-store file::tests::a_splice_over_zeros_and_repeating_data_gives_the_same_key timeout 300 
+PROBE chunk-store locality_tests::a_failed_clear_ends_the_gc_before_any_change timeout 300 
+PROBE chunk-store locality_tests::a_cache_hit_during_a_gc_keeps_the_object timeout 300 
+PROBE chunk-store locality_tests::a_crash_at_each_step_of_a_gc_never_leaves_a_stale_exact_idx timeout 300 
+PROBE chunk-store locality_tests::a_cache_hit_that_gc_removed_before_the_lock_writes_again timeout 300 
+PROBE chunk-store locality_tests::a_failed_install_after_the_copies_leaves_the_source_pack_untrusted timeout 300 
+PROBE chunk-store locality_tests::a_failed_lookup_ends_the_trust_in_the_packs_so_far timeout 300 
+PROBE chunk-store locality_tests::a_gc_drops_the_cached_pack_of_a_removed_object timeout 300 
+PROBE chunk-store locality_tests::a_gc_that_cannot_change_its_packs_leaves_no_exact_idx_of_them timeout 300 
+PROBE chunk-store locality_tests::a_put_whose_trust_floor_fails_writes_nothing timeout 300 
+PROBE chunk-store locality_tests::an_unreadable_trust_floor_is_written_again_at_the_next_failed_lookup timeout 300 
+PROBE chunk-store locality_tests::a_pack_that_a_gc_changed_is_never_filled_from_its_stale_idx timeout 300 
+PROBE chunk-store locality_tests::a_rewrite_in_pack_order_hits_the_cache_with_the_places_of_the_index timeout 300 
+PROBE chunk-store locality_tests::packs_of_an_earlier_process_are_cached_from_their_exact_idx timeout 300 
+PROBE chunk-store mark::tests::a_live_filter_has_no_false_negatives timeout 300 
+PROBE chunk-store locality_tests::hits_in_random_order_never_fill timeout 300 
+PROBE chunk-store locality_tests::the_trust_floor_of_a_failed_lookup_outlives_a_crash timeout 300 
+PROBE chunk-store run::tests::a_damaged_page_gives_no_false_miss_and_the_verified_reads_are_corrupt pass 195 
+PROBE chunk-store run::tests::a_run_of_real_places_needs_about_42_bytes_for_each_entry timeout 300 
+PROBE chunk-store mark::tests::another_salt_gives_other_false_positives timeout 300 
+PROBE chunk-store run::tests::a_run_with_a_filter_answers_misses_without_a_page_read timeout 300 
+PROBE chunk-store run::tests::ids_that_share_most_of_their_bytes_are_kept_apart timeout 300 
+PROBE chunk-store run::tests::the_interpolation_search_finds_what_a_binary_search_finds pass 234 
+PROBE chunk-store run::tests::keys_with_the_prefix_of_a_page_fence_are_found timeout 300 
+PROBE chunk-store run::tests::runs_of_each_size_round_trip timeout 300 
+PROBE chunk-store total=36 pass=2 unsupported=0 ub=0 fail=0 timeout=34
+probe-secs slow chunk-store 2727
+7.40 8.53 6.84 3/904 2704
+build-exit=0
+docker-exit=0
+32
+5.26 5.43 4.09 5/885 9
+MemAvailable:   13518388 kB
+5
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+Preparing a sysroot for Miri (target: x86_64-unknown-linux-gnu)...
+    Finished `custom_sysroot` profile [optimized] target(s) in 29.18s
+A sysroot for Miri is now available in `<home>/.cache/miri`.
+PROBE metadata wal::buffered::tests::buffered_write_out_passes_a_parked_record_write timeout 300 
+PROBE metadata inode_map::tests::prop_serialize_round_trip timeout 300 
+PROBE metadata wal::flush_on_fsync::tests::append_holds_records_until_a_write_out_past_the_cap timeout 300 
+PROBE metadata wal::flush_on_fsync::tests::ram_stays_at_most_the_cap_with_no_fsync timeout 300 
+PROBE metadata wal::periodic::tests::ram_stays_at_most_the_cap_with_no_fsync timeout 300 
+PROBE metadata total=5 pass=0 unsupported=0 ub=0 fail=0 timeout=5
+probe-secs slow metadata 630
+5.35 5.82 5.11 6/914 1759
+build-exit=0
+docker-exit=0
+
+# Final class per crate: a run-1 timeout that passes in run 2 is pass; one that times out again is slow
+FINAL chunk-store total=127 pass=75 unsupported=17 ub=0 fail=1 slow=34
+FINAL metadata total=166 pass=57 unsupported=103 ub=0 fail=1 slow=5

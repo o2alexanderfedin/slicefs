@@ -1,5 +1,7 @@
-//! External sort of fixed-size records in bounded RAM: the exact mark of a
-//! full GC (see `ChunkStore::gc_finish_full`).
+//! External sort of fixed-size records in bounded RAM: the keys of the GC
+//! mark walk (`ChunkStore::gc_sorter`, #207), the exact mark of a full GC
+//! (see `ChunkStore::gc_finish_full`), and the refcount rows of
+//! `slicefs rehash` (sorted by their new keys).
 //!
 //! Records go into a buffer of at most `SortCfg::chunk_records`; a full
 //! buffer is sorted, deduplicated and written to a run file. `finish` merges
@@ -8,6 +10,10 @@
 //! duplicates is left. RAM: one buffer, or `fan_in` read buffers, never the
 //! record count. The files live in a [`TmpDir`], removed on drop (and at a
 //! writable open of the store after a crash).
+//!
+//! No file is made before the first spill: if every record fits in the
+//! buffer, `finish` sorts it in RAM and gives a [`SortedFile`] in RAM, and
+//! the temp directory is never made (#207).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -16,7 +22,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Default bytes of records in the sort buffer (4 MiB).
 pub const SORT_CHUNK_BYTES: usize = 4 << 20;
@@ -36,31 +42,55 @@ pub struct SortCfg {
     pub fan_in: usize,
 }
 
-/// A directory for temp files, removed with its files on drop.
-pub(crate) struct TmpDir {
+/// Checks, before a sorter writes `bytes` more bytes of temp files, that
+/// the file system has space for them; an error stops the sort.
+pub type SpaceCheck = Arc<dyn Fn(u64) -> io::Result<()> + Send + Sync>;
+
+/// How many records a merge writes between two asks of its stop.
+const STOP_EVERY: u64 = 1 << 14;
+
+/// A directory for temp files, removed with its files on drop. It is made
+/// at the first [`TmpDir::path`], not at [`TmpDir::new`]: a sort that fits
+/// in RAM makes no directory.
+pub struct TmpDir {
     path: PathBuf,
+    made: Mutex<bool>,
 }
 
 impl TmpDir {
-    /// A new, empty directory below `parent` (made if missing).
+    /// A new directory below `parent`; `parent` and the directory are made
+    /// (empty) at the first [`TmpDir::path`].
     pub fn new(parent: &Path) -> io::Result<TmpDir> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        std::fs::create_dir_all(parent)?;
         let path = parent.join(format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir(&path)?;
-        Ok(TmpDir { path })
+        Ok(TmpDir { path, made: Mutex::new(false) })
+    }
+
+    /// The directory, made (empty) at the first call.
+    pub fn path(&self) -> io::Result<&Path> {
+        let mut made = self.made.lock().unwrap_or_else(|p| p.into_inner());
+        if !*made {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+            std::fs::create_dir(&self.path)?;
+            *made = true;
+        }
+        Ok(&self.path)
     }
 }
 
 impl Drop for TmpDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if *self.made.get_mut().unwrap_or_else(|p| p.into_inner()) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 
 /// An external sorter of `N`-byte records (ordered as bytes).
-pub(crate) struct Sorter<const N: usize> {
+pub struct Sorter<const N: usize> {
     dir: Arc<TmpDir>,
     /// Temp dirs of absorbed sorters (their runs live there).
     keep: Vec<Arc<TmpDir>>,
@@ -69,17 +99,32 @@ pub(crate) struct Sorter<const N: usize> {
     buf: Vec<[u8; N]>,
     runs: Vec<PathBuf>,
     next: u64,
+    space: Option<SpaceCheck>,
 }
 
 impl<const N: usize> Sorter<N> {
     pub fn new(dir: Arc<TmpDir>, name: &'static str, cfg: SortCfg) -> Self {
         let cfg = SortCfg { chunk_records: cfg.chunk_records.max(1), fan_in: cfg.fan_in.max(2) };
-        Sorter { dir, keep: Vec::new(), name, cfg, buf: Vec::new(), runs: Vec::new(), next: 0 }
+        Sorter { dir, keep: Vec::new(), name, cfg, buf: Vec::new(), runs: Vec::new(), next: 0, space: None }
     }
 
-    fn new_path(&mut self) -> PathBuf {
+    /// Call `check` before each write of a run or of a merge output, with
+    /// the most bytes that the write adds.
+    pub fn with_space_check(mut self, check: SpaceCheck) -> Self {
+        self.space = Some(check);
+        self
+    }
+
+    fn new_path(&mut self) -> io::Result<PathBuf> {
         self.next += 1;
-        self.dir.path.join(format!("{}-{:06}", self.name, self.next))
+        Ok(self.dir.path()?.join(format!("{}-{:06}", self.name, self.next)))
+    }
+
+    fn check_space(&self, bytes: u64) -> io::Result<()> {
+        match &self.space {
+            Some(check) => check(bytes),
+            None => Ok(()),
+        }
     }
 
     pub fn push(&mut self, r: [u8; N]) -> io::Result<()> {
@@ -97,7 +142,8 @@ impl<const N: usize> Sorter<N> {
         }
         self.buf.sort_unstable();
         self.buf.dedup();
-        let path = self.new_path();
+        self.check_space((self.buf.len() * N) as u64)?;
+        let path = self.new_path()?;
         let mut w = BufWriter::with_capacity(READ_BUF, File::create(&path)?);
         for r in &self.buf {
             w.write_all(r)?;
@@ -108,17 +154,39 @@ impl<const N: usize> Sorter<N> {
         Ok(())
     }
 
-    /// Take the records of `other` (its runs stay where they are).
+    /// Take the records of `other` (its runs stay where they are; the
+    /// records of its buffer go to the buffer of this sorter).
     pub fn absorb(&mut self, mut other: Sorter<N>) -> io::Result<()> {
-        other.spill()?;
+        for r in std::mem::take(&mut other.buf) {
+            self.push(r)?;
+        }
         self.runs.append(&mut other.runs);
         self.keep.push(Arc::clone(&other.dir));
         self.keep.append(&mut other.keep);
         Ok(())
     }
 
-    /// One sorted file of every record pushed, without duplicates.
-    pub fn finish(mut self) -> io::Result<SortedFile<N>> {
+    /// One sorted file of every record pushed, without duplicates (in RAM
+    /// if nothing was spilled).
+    pub fn finish(self) -> io::Result<SortedFile<N>> {
+        self.finish_or_stop(&|| false)?.ok_or_else(|| io::Error::other("the sort stopped"))
+    }
+
+    /// [`Sorter::finish`], but `Ok(None)` (the temp files removed) as soon
+    /// as `stop` gives true. It is asked before each merge and every
+    /// [`STOP_EVERY`] records of a merge, so a stop does not wait for the
+    /// merge passes.
+    pub fn finish_or_stop(mut self, stop: &dyn Fn() -> bool) -> io::Result<Option<SortedFile<N>>> {
+        let mut keep = std::mem::take(&mut self.keep);
+        keep.push(Arc::clone(&self.dir));
+        if self.runs.is_empty() {
+            // Everything fits in the buffer: sorted in RAM, no file.
+            let mut buf = std::mem::take(&mut self.buf);
+            buf.sort_unstable();
+            buf.dedup();
+            let len = buf.len() as u64;
+            return Ok(Some(SortedFile { src: Backing::Mem(buf.into()), len, passes: 0, _dirs: keep }));
+        }
         self.spill()?;
         let mut passes = 0;
         while self.runs.len() > 1 {
@@ -128,8 +196,18 @@ impl<const N: usize> Sorter<N> {
                     self.runs.push(group[0].clone());
                     continue;
                 }
-                let out = self.new_path();
-                merge::<N>(group, &out)?;
+                if stop() {
+                    return Ok(None);
+                }
+                let mut bytes = 0u64;
+                for p in group {
+                    bytes += std::fs::metadata(p)?.len();
+                }
+                self.check_space(bytes)?;
+                let out = self.new_path()?;
+                if !merge::<N>(group, &out, stop)? {
+                    return Ok(None);
+                }
                 for p in group {
                     let _ = std::fs::remove_file(p);
                 }
@@ -137,28 +215,22 @@ impl<const N: usize> Sorter<N> {
             }
             passes += 1;
         }
-        let path = match self.runs.pop() {
-            Some(p) => p,
-            None => {
-                let p = self.new_path();
-                File::create(&p)?;
-                p
-            }
+        let Some(path) = self.runs.pop() else {
+            return Err(io::Error::other("the sort has no run"));
         };
         let len = std::fs::metadata(&path)?.len() / N as u64;
-        let mut keep = std::mem::take(&mut self.keep);
-        keep.push(Arc::clone(&self.dir));
-        Ok(SortedFile { file: File::open(&path)?, path, len, passes, _dirs: keep })
+        Ok(Some(SortedFile { src: Backing::Disk { file: File::open(&path)?, path }, len, passes, _dirs: keep }))
     }
 }
 
-/// Merge the sorted runs `inputs` into `out`, without duplicates.
-fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
+/// Merge the sorted runs `inputs` into `out`, without duplicates. False if
+/// `stop` gave true first (asked every [`STOP_EVERY`] records).
+fn merge<const N: usize>(inputs: &[PathBuf], out: &Path, stop: &dyn Fn() -> bool) -> io::Result<bool> {
     let mut readers = Vec::with_capacity(inputs.len());
     for p in inputs {
         let f = File::open(p)?;
         let n = f.metadata()?.len() / N as u64;
-        readers.push(RecReader::<N> { r: BufReader::with_capacity(READ_BUF, f), left: n });
+        readers.push(RecReader::<N> { src: Src::File(BufReader::with_capacity(READ_BUF, f)), left: n });
     }
     let mut heap = BinaryHeap::with_capacity(readers.len());
     for (i, r) in readers.iter_mut().enumerate() {
@@ -168,7 +240,12 @@ fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
     }
     let mut w = BufWriter::with_capacity(READ_BUF, File::create(out)?);
     let mut last: Option<[u8; N]> = None;
+    let mut n = 0u64;
     while let Some(Reverse((rec, i))) = heap.pop() {
+        n += 1;
+        if n.is_multiple_of(STOP_EVERY) && stop() {
+            return Ok(false);
+        }
         if last != Some(rec) {
             w.write_all(&rec)?;
             last = Some(rec);
@@ -178,13 +255,20 @@ fn merge<const N: usize>(inputs: &[PathBuf], out: &Path) -> io::Result<()> {
         }
     }
     w.into_inner().map_err(|e| e.into_error())?;
-    Ok(())
+    Ok(true)
 }
 
-/// A sorted file of distinct `N`-byte records (removed with its temp dir).
-pub(crate) struct SortedFile<const N: usize> {
-    path: PathBuf,
-    file: File,
+/// Where the records of a [`SortedFile`] are.
+enum Backing<const N: usize> {
+    Disk { path: PathBuf, file: File },
+    /// The sort fit in its buffer.
+    Mem(Arc<[[u8; N]]>),
+}
+
+/// A sorted file of distinct `N`-byte records (removed with its temp dir),
+/// or the same records in RAM when the sort never spilled.
+pub struct SortedFile<const N: usize> {
+    src: Backing<N>,
     len: u64,
     passes: u32,
     _dirs: Vec<Arc<TmpDir>>,
@@ -193,7 +277,7 @@ pub(crate) struct SortedFile<const N: usize> {
 impl<const N: usize> SortedFile<N> {
     /// The records.
     #[cfg(test)]
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.len
     }
 
@@ -204,16 +288,24 @@ impl<const N: usize> SortedFile<N> {
 
     /// A stream of the records in order.
     pub fn reader(&self) -> io::Result<RecReader<N>> {
-        Ok(RecReader { r: BufReader::with_capacity(READ_BUF, File::open(&self.path)?), left: self.len })
+        let src = match &self.src {
+            Backing::Disk { path, .. } => Src::File(BufReader::with_capacity(READ_BUF, File::open(path)?)),
+            Backing::Mem(recs) => Src::Mem(Arc::clone(recs), 0),
+        };
+        Ok(RecReader { src, left: self.len })
     }
 
     /// Is `r` in the file? A binary search with one read per step.
     pub fn contains(&self, r: &[u8; N]) -> io::Result<bool> {
+        let file = match &self.src {
+            Backing::Disk { file, .. } => file,
+            Backing::Mem(recs) => return Ok(recs.binary_search(r).is_ok()),
+        };
         let (mut lo, mut hi) = (0u64, self.len);
         let mut rec = [0u8; N];
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            self.file.read_exact_at(&mut rec, mid * N as u64)?;
+            file.read_exact_at(&mut rec, mid * N as u64)?;
             match rec.cmp(r) {
                 std::cmp::Ordering::Equal => return Ok(true),
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -225,9 +317,16 @@ impl<const N: usize> SortedFile<N> {
 }
 
 /// Reads the records of a run in order.
-pub(crate) struct RecReader<const N: usize> {
-    r: BufReader<File>,
+pub struct RecReader<const N: usize> {
+    src: Src<N>,
     left: u64,
+}
+
+/// The source of a [`RecReader`].
+enum Src<const N: usize> {
+    File(BufReader<File>),
+    /// The records and the index of the next one.
+    Mem(Arc<[[u8; N]]>, usize),
 }
 
 impl<const N: usize> RecReader<N> {
@@ -235,8 +334,18 @@ impl<const N: usize> RecReader<N> {
         if self.left == 0 {
             return Ok(None);
         }
-        let mut rec = [0u8; N];
-        self.r.read_exact(&mut rec)?;
+        let rec = match &mut self.src {
+            Src::File(r) => {
+                let mut rec = [0u8; N];
+                r.read_exact(&mut rec)?;
+                rec
+            }
+            Src::Mem(recs, i) => {
+                let Some(rec) = recs.get(*i) else { return Ok(None) };
+                *i += 1;
+                *rec
+            }
+        };
         self.left -= 1;
         Ok(Some(rec))
     }
@@ -311,6 +420,88 @@ mod tests {
         assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 1);
         drop(f);
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "the temp dir is removed");
+    }
+
+    #[test]
+    fn a_sort_that_fits_in_the_buffer_makes_no_file() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let tmp = parent.path().join("gc-tmp");
+        let dir = Arc::new(TmpDir::new(&tmp).unwrap());
+        let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 1000, fan_in: 2 });
+        for i in 0..900 {
+            s.push(rec(i)).unwrap();
+        }
+        let f = s.finish().unwrap();
+        assert!(!tmp.exists(), "no temp directory");
+        assert_eq!(f.passes(), 0);
+        let mut want: Vec<_> = (0..900).map(rec).collect();
+        want.sort_unstable();
+        want.dedup();
+        assert_eq!(f.len(), want.len() as u64);
+        let mut c = Cursor::new(f.reader().unwrap()).unwrap();
+        for w in &want {
+            assert!(c.seek(w).unwrap() && f.contains(w).unwrap());
+        }
+        c.advance().unwrap();
+        assert!(c.peek().is_none());
+        assert!(!f.contains(&600u64.to_be_bytes()).unwrap());
+    }
+
+    #[test]
+    fn a_space_check_error_stops_the_sort_and_leaves_no_file() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let asked = Arc::new(AtomicU64::new(0));
+        let a = Arc::clone(&asked);
+        let full: SpaceCheck = Arc::new(move |bytes| {
+            a.fetch_add(bytes, Ordering::Relaxed);
+            Err(io::Error::new(io::ErrorKind::StorageFull, "no space"))
+        });
+        let dir = Arc::new(TmpDir::new(parent.path()).unwrap());
+        let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 4, fan_in: 2 }).with_space_check(full);
+        let mut err = None;
+        for i in 0..100 {
+            if let Err(e) = s.push(rec(i)) {
+                err = Some(e);
+                break;
+            }
+        }
+        assert_eq!(err.map(|e| e.kind()), Some(io::ErrorKind::StorageFull));
+        assert_eq!(asked.load(Ordering::Relaxed), 32, "asked for the first run (4 records of 8 bytes)");
+        drop(s);
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "no file was written");
+    }
+
+    #[test]
+    fn a_stop_in_the_merge_passes_ends_the_sort_and_removes_its_files() {
+        let parent = tempfile::TempDir::new().unwrap();
+        for at in [1, 3, 10] {
+            let dir = Arc::new(TmpDir::new(parent.path()).unwrap());
+            let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 4, fan_in: 2 });
+            for i in 0..2000 {
+                s.push(rec(i)).unwrap();
+            }
+            let asked = std::cell::Cell::new(0);
+            let stop = || {
+                asked.set(asked.get() + 1);
+                asked.get() >= at
+            };
+            assert!(s.finish_or_stop(&stop).unwrap().is_none(), "stop at ask {at}");
+            assert_eq!(asked.get(), at);
+            assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "files left after a stop at {at}");
+        }
+        // A merge long enough to ask inside it.
+        let dir = Arc::new(TmpDir::new(parent.path()).unwrap());
+        let mut s = Sorter::<8>::new(dir, "t", SortCfg { chunk_records: 1 << 14, fan_in: 2 });
+        for i in 0..(3u64 << 14) {
+            s.push(i.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_be_bytes()).unwrap();
+        }
+        let asked = std::cell::Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= 2
+        };
+        assert!(s.finish_or_stop(&stop).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
     #[test]

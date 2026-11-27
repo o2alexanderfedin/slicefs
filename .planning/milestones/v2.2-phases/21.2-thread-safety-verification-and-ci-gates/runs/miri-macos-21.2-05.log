@@ -1,0 +1,225 @@
+# Miri gate, macOS target (x86_64-apple-darwin), scripts/safety/miri.sh with the module list, timeout 5400
+# Run on a scratch copy whose crates/chunk-store, crates/metadata and scripts/safety equal batches B and C (diff -r empty) plus this miri.sh
+Darwin <host> 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:34 PST 2025; root:xnu-12377.61.12~1/RELEASE_X86_64 x86_64
+12:51  up 34 days, 17:11, 9 users, load averages: 8.28 7.91 9.30
+TOOLCHAINS stable=1.100.0 nightly=nightly-2026-02-11 kani=0.68.0
+info: component miri is up to date
+info: component rust-src is up to date
+A sysroot for Miri is already available in `<home>/Library/Caches/org.rust-lang.miri`.
+MIRI crate=chunk-store modules=pack_io::tests:: sync::tests:: lock_tail_tests:: run::tests:: index::tests::
+
+running 59 tests
+test index::tests::a_failed_flush_keeps_the_memtable_and_the_old_manifest ... ok
+test index::tests::a_manifest_round_trips_and_damage_is_refused ... ok
+test index::tests::a_read_error_ends_get_and_iter_all_with_the_error ... ok
+test index::tests::a_stopped_merge_leaves_no_output ... ok
+test index::tests::the_idle_window_rewrites_a_run_only_for_enough_new_data ... ok
+test index::tests::the_newest_entry_wins_in_get_and_iter_all ... ok
+test index::tests::the_obsolete_runs_of_the_manifest_are_removed_at_open ... ok
+test lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_hwm ... ok
+test lock_tail_tests::gc_begin_waits_for_a_record_write_with_no_lock ... ok
+test lock_tail_tests::put_and_read_pass_a_held_index_flush_sync ... ok
+test lock_tail_tests::put_and_read_pass_a_held_keep_cap_wait ... ignored, real-time limit of 5 s: too slow under the interpreter
+test lock_tail_tests::put_and_read_pass_a_held_pack_create ... ok
+test lock_tail_tests::put_and_read_pass_a_held_phase_two_sync ... ok
+test lock_tail_tests::put_and_read_pass_a_held_record_write ... ok
+test lock_tail_tests::put_and_read_pass_a_held_run_write ... ok
+test lock_tail_tests::put_and_read_pass_a_held_seal_join ... ok
+test lock_tail_tests::put_passes_a_held_pack_open ... ok
+test lock_tail_tests::put_passes_a_held_trust_floor_write ... ok
+test lock_tail_tests::retrying_put_and_read_pass_a_held_phase_two_sync ... ok
+test pack_io::tests::a_run_map_reads_back_moves_across_threads_and_unmaps ... ok
+test run::tests::a_damaged_footer_or_table_is_refused ... ok
+test run::tests::a_damaged_page_gives_no_false_miss_and_the_verified_reads_are_corrupt ... ok
+test run::tests::a_damaged_tombstone_never_reads_as_a_miss_or_a_put ... ok
+test run::tests::a_run_of_real_places_needs_about_42_bytes_for_each_entry ... ignored, too slow under Miri (over 300 s in the probe)
+test run::tests::a_run_round_trips_through_each_io ... ignored, Miri does not support a file-backed mmap
+test run::tests::a_run_with_a_filter_answers_misses_without_a_page_read ... ignored, too slow under Miri (over 300 s in the probe)
+test run::tests::a_run_without_a_filter_round_trips ... ok
+test run::tests::an_id_that_differs_only_in_the_shared_bytes_is_a_miss ... ok
+test run::tests::each_tag_starts_a_new_page ... ok
+test run::tests::ids_that_share_most_of_their_bytes_are_kept_apart ... ignored, too slow under Miri (over 300 s in the probe)
+test run::tests::keys_with_the_prefix_of_a_page_fence_are_found ... ignored, too slow under Miri (over 300 s in the probe)
+test run::tests::place_fields_of_each_width_round_trip ... ok
+test run::tests::runs_of_each_size_round_trip ... ignored, too slow under Miri (over 300 s in the probe)
+test run::tests::the_interpolation_search_finds_what_a_binary_search_finds ... ok
+test run::tests::the_writer_refuses_keys_out_of_order ... ok
+test run::tests::tombstones_are_in_the_filter ... ok
+test run::tests::tombstones_round_trip_and_are_counted ... ok
+test sync::tests::cell_then_stripe_panics - should panic ... ok
+test sync::tests::condvar_notify_wakes_waiter ... ok
+test sync::tests::condvar_wait_takes_entry_off_the_stack ... ok
+test sync::tests::exclusive_gate_holder_locks_cells_one_at_a_time ... ok
+test sync::tests::gate_after_a_lock_panics - should panic ... ok
+test sync::tests::gate_marker_then_cell_passes ... ok
+test sync::tests::guards_drop_out_of_order ... ok
+test sync::tests::mutex_counts_across_threads ... ok
+test sync::tests::rank_names_in_message_are_checked ... ok
+test sync::tests::rename_then_rename_panics - should panic ... ok
+test sync::tests::rwlock_read_write ... ok
+test sync::tests::same_rank_short_and_store_nest ... ok
+test sync::tests::same_stripe_twice_panics - should panic ... ok
+test sync::tests::short_then_store_passes ... ok
+test sync::tests::store_then_short_panics - should panic ... ok
+test sync::tests::strict_gate_cell_without_gate_panics - should panic ... ok
+test sync::tests::strict_gate_stripe_without_gate_panics - should panic ... ok
+test sync::tests::strict_gate_with_gate_passes_and_short_needs_none ... ok
+test sync::tests::stripe_ascending_passes ... ok
+test sync::tests::stripe_descending_panics - should panic ... ok
+test sync::tests::try_lock_busy_leaves_no_entry ... ok
+test sync::tests::two_cells_panic_even_in_key_order - should panic ... ok
+
+test result: ok. 52 passed; 0 failed; 7 ignored; 0 measured; 69 filtered out; finished in 934.64s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 15s
+     Running unittests src/lib.rs (target/miri/x86_64-apple-darwin/debug/deps/chunk_store-6e2e4f7e72fe9040)
+warning: integer-to-pointer cast
+   --> <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:320:9
+    |
+320 |         (self & QUEUE_MASK) as *const ThreadData
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ integer-to-pointer cast
+    |
+    = help: this program is using integer-to-pointer casts or (equivalently) `ptr::with_exposed_provenance`, which means that Miri might miss pointer bugs in this program
+    = help: see https://doc.rust-lang.org/nightly/std/ptr/fn.with_exposed_provenance.html for more details on that operation
+    = help: to ensure that Miri does not miss bugs in your program, use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = help: you can then set `MIRIFLAGS=-Zmiri-strict-provenance` to ensure you are not relying on `with_exposed_provenance` semantics
+    = help: alternatively, `MIRIFLAGS=-Zmiri-permissive-provenance` disables this warning
+    = note: this is on thread `lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_h`
+    = note: stack backtrace:
+            0: <usize as parking_lot_core::word_lock::LockState>::queue_head
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:320:9: 320:49
+            1: parking_lot_core::word_lock::WordLock::unlock
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:104:39: 104:57
+            2: parking_lot_core::parking_lot::park::<{closure@parking_lot::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#2}}>::{closure#0}
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:624:9: 624:30
+            3: parking_lot_core::parking_lot::with_thread_data::<parking_lot_core::parking_lot::ParkResult, {closure@parking_lot_core::parking_lot::park<{closure@parking_lot::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#2}}>::{closure#0}}>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:207:5: 207:36
+            4: parking_lot_core::parking_lot::park::<{closure@parking_lot::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::Condvar::wait_until_internal::{closure#2}}>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:600:5: 705:7
+            5: parking_lot::Condvar::wait_until_internal
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot-0.12.5/src/condvar.rs:334:17: 341:18
+            6: parking_lot::Condvar::wait_for::<mem::HoldState>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot-0.12.5/src/condvar.rs:387:9: 387:92
+            7: sync::Condvar::wait_for::<mem::HoldState>
+                at crates/chunk-store/src/sync.rs:644:17: 644:55
+            8: mem::MemIo::wait_parked
+                at crates/chunk-store/src/mem.rs:330:13: 330:48
+            9: lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_hwm
+                at crates/chunk-store/src/lock_tail_tests.rs:436:13: 436:56
+            10: lock_tail_tests::a_record_in_flight_is_invisible_and_below_no_hwm::{closure#0}
+                at crates/chunk-store/src/lock_tail_tests.rs:420:54: 420:54
+
+MIRI crate=chunk-store passed=52 ignored=7 secs=1079
+MIRI crate=metadata modules=wal:: inode::tests:: xattr::tests::
+
+running 56 tests
+test inode::tests::prop_round_trip ... ok
+test inode::tests::test_deserialize_rejects_wrong_length ... ok
+test inode::tests::test_extension_round_trip_72_bytes ... ok
+test inode::tests::test_intern_and_load_roundtrip ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test inode::tests::test_new_directory_nlinks ... ok
+test inode::tests::test_new_file_nlinks ... ok
+test inode::tests::test_rdev_zero_keeps_56_byte_format ... ok
+test inode::tests::test_round_trip ... ok
+test inode::tests::test_round_trip_max_values ... ok
+test inode::tests::test_round_trip_zero_ino ... ok
+test inode::tests::test_serialize_size_is_56 ... ok
+test wal::buffered::tests::buffered_cut_opens_the_new_segment_before_the_writer ... ok
+test wal::buffered::tests::buffered_write_out_passes_a_parked_record_write ... ignored, too slow under Miri (over 300 s in the probe)
+test wal::flush_on_fsync::tests::a_buffered_commit_after_a_failed_write_with_queued_records_succeeds ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test wal::flush_on_fsync::tests::a_failed_write_out_fails_fsync_until_a_commit_and_the_commit_works ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test wal::flush_on_fsync::tests::append_holds_records_until_a_write_out_past_the_cap ... ignored, too slow under Miri (over 300 s in the probe)
+test wal::flush_on_fsync::tests::failed_cap_write_out_fails_fsync_until_rotate ... ok
+test wal::flush_on_fsync::tests::ram_stays_at_most_the_cap_with_no_fsync ... ignored, too slow under Miri (over 300 s in the probe)
+test wal::per_op::tests::a_commit_after_a_failed_write_with_queued_records_succeeds ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test wal::per_op::tests::a_failed_cut_record_write_fails_until_the_next_cut ... ok
+test wal::per_op::tests::a_failed_record_write_fails_until_a_cut ... ok
+test wal::per_op::tests::append_and_write_out_pass_a_parked_fsync ... ok
+test wal::per_op::tests::append_returns_while_the_writer_is_held ... ok
+test wal::per_op::tests::cut_opens_the_new_segment_before_the_writer ... ok
+test wal::per_op::tests::flush_and_sync_waits_for_a_parked_record_write ... ok
+test wal::per_op::tests::op_record_reaches_the_file_without_a_sync ... ok
+test wal::per_op::tests::records_reach_the_segment_in_lsn_order ... ok
+test wal::per_op::tests::settle_syncs_the_old_segments_with_the_behind_lock_released ... ok
+test wal::per_op::tests::store_log_op_writes_one_record_and_a_failed_write_out_fails_fsync ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test wal::per_op::tests::the_writer_lock_is_free_during_a_record_write ... ok
+test wal::per_op::tests::write_out_twice_writes_each_record_once ... ok
+test wal::periodic::tests::failed_timer_sync_fails_fsync_until_rotate ... ok
+test wal::periodic::tests::ram_stays_at_most_the_cap_with_no_fsync ... ignored, too slow under Miri (over 300 s in the probe)
+test wal::periodic::tests::timer_syncs_and_drop_stops_it ... ok
+test wal::tests::cut_keeps_unwritten_appends_in_lsn_order ... ok
+test wal::tests::no_deadlock_between_append_cut_and_sync ... ignored, real-time watchdog of 5 s: too slow under the interpreter
+test wal::tests::rotate_after_unwritten_appends_starts_with_the_seed_only ... ok
+test xattr::tests::test_binary_value_round_trip ... ok
+test xattr::tests::test_empty_round_trip ... ok
+test xattr::tests::test_empty_value ... ok
+test xattr::tests::test_get_xattr_entry_found ... ok
+test xattr::tests::test_get_xattr_entry_not_found ... ok
+test xattr::tests::test_intern_load_empty ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test xattr::tests::test_intern_load_large_value ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test xattr::tests::test_intern_load_multiple_attrs ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test xattr::tests::test_intern_load_single_attr ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test xattr::tests::test_large_value_round_trip ... ok
+test xattr::tests::test_list_xattr_names ... ok
+test xattr::tests::test_list_xattr_names_empty ... ok
+test xattr::tests::test_multiple_attrs_coexist_independently ... ignored, Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)
+test xattr::tests::test_multiple_attrs_round_trip ... ok
+test xattr::tests::test_remove_xattr_entry_not_found_returns_false ... ok
+test xattr::tests::test_remove_xattr_entry_removes ... ok
+test xattr::tests::test_set_xattr_entry_insert ... ok
+test xattr::tests::test_set_xattr_entry_replace ... ok
+test xattr::tests::test_single_attr_round_trip ... ok
+
+test result: ok. 41 passed; 0 failed; 15 ignored; 0 measured; 110 filtered out; finished in 152.39s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.17s
+     Running unittests src/lib.rs (target/miri/x86_64-apple-darwin/debug/deps/metadata-a304f5830962b488)
+warning: integer-to-pointer cast
+   --> <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:320:9
+    |
+320 |         (self & QUEUE_MASK) as *const ThreadData
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ integer-to-pointer cast
+    |
+    = help: this program is using integer-to-pointer casts or (equivalently) `ptr::with_exposed_provenance`, which means that Miri might miss pointer bugs in this program
+    = help: see https://doc.rust-lang.org/nightly/std/ptr/fn.with_exposed_provenance.html for more details on that operation
+    = help: to ensure that Miri does not miss bugs in your program, use Strict Provenance APIs (https://doc.rust-lang.org/nightly/std/ptr/index.html#strict-provenance, https://crates.io/crates/sptr) instead
+    = help: you can then set `MIRIFLAGS=-Zmiri-strict-provenance` to ensure you are not relying on `with_exposed_provenance` semantics
+    = help: alternatively, `MIRIFLAGS=-Zmiri-permissive-provenance` disables this warning
+    = note: this is on thread `unnamed-28`
+    = note: stack backtrace:
+            0: <usize as parking_lot_core::word_lock::LockState>::queue_head
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:320:9: 320:49
+            1: parking_lot_core::word_lock::WordLock::unlock
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/word_lock.rs:104:39: 104:57
+            2: parking_lot_core::parking_lot::park::<{closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#2}}>::{closure#0}
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:624:9: 624:30
+            3: parking_lot_core::parking_lot::with_thread_data::<parking_lot_core::parking_lot::ParkResult, {closure@parking_lot_core::parking_lot::park<{closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#2}}>::{closure#0}}>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:207:5: 207:36
+            4: parking_lot_core::parking_lot::park::<{closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#0}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#1}}, {closure@parking_lot::condvar::Condvar::wait_until_internal::{closure#2}}>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot_core-0.9.12/src/parking_lot.rs:600:5: 705:7
+            5: parking_lot::condvar::Condvar::wait_until_internal
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot-0.12.5/src/condvar.rs:334:17: 341:18
+            6: parking_lot::condvar::Condvar::wait_for::<bool>
+                at <home>/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parking_lot-0.12.5/src/condvar.rs:387:9: 387:92
+            7: chunk_store::sync::Condvar::wait_for::<bool>
+                at crates/chunk-store/src/sync.rs:644:17: 644:55
+            8: chunk_store::pack_io::SyncWait::wait_timeout
+                at crates/chunk-store/src/pack_io.rs:151:13: 151:45
+            9: wal::wait_for
+                at crates/metadata/src/wal/mod.rs:177:8: 177:31
+            10: wal::per_op::PerOpWal::write_upto
+                at crates/metadata/src/wal/per_op.rs:102:21: 102:53
+            11: <wal::per_op::PerOpWal as wal::WalStrategy>::flush_and_sync
+                at crates/metadata/src/wal/per_op.rs:275:9: 275:68
+            12: wal::per_op::tests::flush_and_sync_waits_for_a_parked_record_write::{closure#1}
+                at crates/metadata/src/wal/per_op.rs:440:48: 440:68
+note: the last function in that backtrace got called indirectly due to this code
+   --> crates/metadata/src/wal/per_op.rs:440:13
+    |
+440 |             std::thread::spawn(move || tx.send(wal.flush_and_sync().is_ok()).unwrap())
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+MIRI crate=metadata passed=41 ignored=15 secs=199
+MIRI ok
+miri-exit=0 secs=1317
+13:13  up 34 days, 17:33, 9 users, load averages: 11.64 11.04 10.58

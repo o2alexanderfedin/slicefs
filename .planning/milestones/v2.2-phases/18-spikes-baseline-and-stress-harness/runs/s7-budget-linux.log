@@ -1,0 +1,9 @@
+# S7 linux, commit d24da49, 2026-11-21, CPUs 32
+# docker host (OrbStack): Kernel 7.2.12-orbstack-00394-gbecdd6130068; rustc 1.100.0 (0ef1bc386 2026-11-09); store on overlayfs inside the container
+# in process (no mount), release build, no lock-stats, serialize on; 4 threads, own 1 GiB file each, written in 1 MiB writes, then 128 MiB per thread of the bigwrite mix (1 MiB and 4 KiB random writes, half the bytes each), fsync every 64 MiB, commit every 30 s
+# limits: the cap is not asserted (baseline); peak_rss_mib is the whole test process (getrusage), so it includes the model and the check buffers; the data check (every block against its version) passed
+# cmd: scripts/docker-linux-test/run.sh harness s7_budget_baseline
+S7 threads=4 file_mib=1024 write_mib=128 peak_rss_mib=234 cap_mib=256 within_cap=true slowest_write_ms=347.1 rebase_steps=449 max_dirty_mib=64 rss_start_mib=42 rss_after_writes_mib=214 commit_every_s=30 commits=3 commit_hold_max_ms=171.8 commit_total_max_ms=299.9
+S7 peak_rss_mib is the whole test process (getrusage), also the model and the check buffers
+baseline only: flusher lag and pause curve need Phase 20
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 72.30s

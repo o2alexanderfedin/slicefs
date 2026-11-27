@@ -1,0 +1,22 @@
+run=0 seed secs=18.429 inode_count=84104
+run=1 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=112398336
+run=1 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=1 final entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75
+run=1 check mode=flat entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=1 hash boundary_hash_ns_per_key=99.5
+run=1 check mode=prolly entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=1 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111
+run=2 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=105091072
+run=2 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=2 final entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75
+run=2 hash boundary_hash_ns_per_key=100.0
+run=2 check mode=prolly entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=2 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111
+run=2 check mode=flat entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=3 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=109092864
+run=3 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=3 final entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75
+run=3 check mode=flat entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=3 hash boundary_hash_ns_per_key=99.0
+run=3 check mode=prolly entries=84173 digest=79cf74b843905c506c95161eec6f6ea85cb0d5654d76cd5df47144a294c87f75 ok=1
+run=3 tree depth=3 nodes=1035 leaves=1018 leaf_bytes_min=684 leaf_bytes_mean=3729 leaf_bytes_max=6804 internal_nodes=17 internal_bytes_mean=3111

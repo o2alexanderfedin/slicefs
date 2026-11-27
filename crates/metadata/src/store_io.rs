@@ -22,6 +22,9 @@ use slicefs_traits::metadata::MetaError;
 pub trait NodeRead {
     /// The bytes of the node `key`, or `None` if it is missing or damaged.
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>>;
+
+    /// The chunk store of the nodes (for reads of a node in windows).
+    fn chunk_store(&self) -> &ChunkStore;
 }
 
 /// Store nodes.
@@ -34,6 +37,10 @@ pub trait NodeWrite: NodeRead {
 impl<T: NodeRead + ?Sized> NodeRead for &mut T {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         (**self).get_node(key)
+    }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        (**self).chunk_store()
     }
 }
 
@@ -91,6 +98,10 @@ impl NodeRead for NodeReader {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.0, key)
     }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.0
+    }
 }
 
 /// Node writes on a shared chunk store, without the `StoreIo` lock (for a
@@ -98,11 +109,17 @@ impl NodeRead for NodeReader {
 pub struct NodeWriter {
     cs: Arc<ChunkStore>,
     failed: Option<io::Error>,
+    puts: u64,
 }
 
 impl NodeWriter {
     pub fn new(cs: Arc<ChunkStore>) -> Self {
-        Self { cs, failed: None }
+        Self { cs, failed: None, puts: 0 }
+    }
+
+    /// Number of nodes put so far.
+    pub fn puts(&self) -> u64 {
+        self.puts
     }
 
     /// The first put error, if any.
@@ -115,10 +132,15 @@ impl NodeRead for NodeWriter {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.cs, key)
     }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.cs
+    }
 }
 
 impl NodeWrite for NodeWriter {
     fn put_node(&mut self, bytes: &[u8]) -> ObjectKey {
+        self.puts += 1;
         match put_value(&self.cs, bytes) {
             Ok(k) => k,
             Err(e) => {
@@ -213,6 +235,10 @@ impl NodeRead for StoreIo {
     fn get_node(&mut self, key: &ObjectKey) -> chunk_store::Result<Vec<u8>> {
         get_value(&self.cs, key)
     }
+
+    fn chunk_store(&self) -> &ChunkStore {
+        &self.cs
+    }
 }
 
 impl NodeWrite for StoreIo {
@@ -236,6 +262,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_node_reads_back_and_equal_bytes_share_a_key() {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();
@@ -248,6 +275,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn a_missing_node_says_missing() {
         use chunk_store::ObjectHasher;
         let dir = TempDir::new().unwrap();
@@ -259,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn sync_written_syncs_only_after_puts() {
         let dir = TempDir::new().unwrap();
         let mut io = StoreIo::open(dir.path()).unwrap();

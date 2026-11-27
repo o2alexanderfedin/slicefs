@@ -6,6 +6,7 @@
 //! for filesystem operations under its mount point.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsFd;
@@ -13,6 +14,8 @@ use std::os::fd::BorrowedFd;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::thread::{self};
 
@@ -53,6 +56,21 @@ use crate::request::RequestWithSender;
 /// FUSE recommends at least 128k, max 16M. The FUSE default is 16M on macOS
 /// and 128k on other systems.
 pub(crate) const MAX_WRITE_SIZE: usize = 16 * 1024 * 1024;
+
+/// Identifies a spawned session, so that a `BackgroundSession` can tell whether it is
+/// being dropped or joined from one of that session's own threads. 0 is no session
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// The spawned session this thread runs, or 0. Set on the session's background
+    /// thread and inherited by its worker threads, which run the filesystem callbacks
+    static CURRENT_SESSION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The minimum write size the kernel will honor: process_init_reply() in the
+/// kernel's fs/fuse/inode.c clamps a smaller negotiated max_write up to 4096,
+/// so advertising less would not stop larger write requests from arriving.
+pub(crate) const MIN_WRITE_SIZE: usize = 4096;
 
 #[derive(Default, Debug, Eq, PartialEq, Clone, Copy)]
 /// How requests should be filtered based on the calling UID.
@@ -138,6 +156,13 @@ pub struct Session<FS: Filesystem> {
     /// FUSE protocol version, as reported by the kernel.
     /// The field is set to `Some` when the init message is received.
     pub(crate) proto_version: Option<Version>,
+    /// Capabilities agreed with the kernel during init. Some request layouts depend on
+    /// them, so the event loops need them to parse correctly
+    pub(crate) negotiated: InitFlags,
+    /// Everything the kernel advertised during init, whether or not it was requested.
+    /// Some operations are honoured by the kernel without being negotiated, so this,
+    /// not `negotiated`, says whether the kernel can perform them
+    pub(crate) kernel_capabilities: InitFlags,
     pub(crate) config: Config,
 }
 
@@ -185,6 +210,8 @@ impl<FS: Filesystem> Session<FS> {
             allowed: options.acl,
             session_owner: geteuid(),
             proto_version: None,
+            negotiated: InitFlags::empty(),
+            kernel_capabilities: InitFlags::empty(),
             config: options.clone(),
         };
 
@@ -201,7 +228,7 @@ impl<FS: Filesystem> Session<FS> {
         acl: SessionACL,
         config: Config,
     ) -> io::Result<Self> {
-        let ch = Channel::new(Arc::new(DevFuse(File::from(fd))));
+        let ch = Channel::new(Arc::new(DevFuse::new(File::from(fd))));
         let mut session = Session {
             filesystem: FilesystemHolder {
                 fs: Some(filesystem),
@@ -213,6 +240,8 @@ impl<FS: Filesystem> Session<FS> {
             allowed: acl,
             session_owner: geteuid(),
             proto_version: None,
+            negotiated: InitFlags::empty(),
+            kernel_capabilities: InitFlags::empty(),
             config,
         };
 
@@ -222,18 +251,31 @@ impl<FS: Filesystem> Session<FS> {
     }
 
     /// Run the session loop in a background thread. If the returned handle is dropped,
-    /// the filesystem is unmounted and the given session ends.
+    /// the filesystem is unmounted and the session is waited for, so that
+    /// `Filesystem::destroy` has run when drop returns - except in the cases documented
+    /// on [`BackgroundSession`], where the session thread is detached instead.
     pub fn spawn(self) -> io::Result<BackgroundSession> {
         let sender = self.ch.sender();
+        let fuse_device = self.ch.device();
+        let kernel_capabilities = self.kernel_capabilities;
+        let kernel_abi = self.proto_version;
         // Take the fuse_session, so that we can unmount it
         let mount = std::mem::take(&mut *self.mount.mount.lock());
+        let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
         let guard = thread::Builder::new()
             .name("fuser-bg".to_string())
-            .spawn(move || self.run())?;
+            .spawn(move || {
+                CURRENT_SESSION.set(id);
+                self.run()
+            })?;
         Ok(BackgroundSession {
-            guard,
+            id,
+            guard: Some(guard),
             sender,
+            fuse_device,
             mount,
+            kernel_capabilities,
+            kernel_abi,
         })
     }
 
@@ -250,7 +292,9 @@ impl<FS: Filesystem> Session<FS> {
             mount: _do_not_umount_yet,
             allowed,
             session_owner,
-            proto_version: _,
+            proto_version,
+            negotiated,
+            kernel_capabilities,
             config,
         } = self;
 
@@ -289,6 +333,7 @@ impl<FS: Filesystem> Session<FS> {
         channels.push(ch);
 
         let mut threads = Vec::with_capacity(n_threads);
+        let session_id = CURRENT_SESSION.get();
 
         for (i, ch) in channels.into_iter().enumerate() {
             let thread_name = format!("fuser-{i}");
@@ -298,12 +343,14 @@ impl<FS: Filesystem> Session<FS> {
                 ch,
                 allowed,
                 session_owner,
+                negotiated,
+                kernel_capabilities,
+                kernel_abi: proto_version,
             };
-            threads.push(
-                thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || event_loop.event_loop())?,
-            );
+            threads.push(thread::Builder::new().name(thread_name).spawn(move || {
+                CURRENT_SESSION.set(session_id);
+                event_loop.event_loop()
+            })?);
         }
 
         let mut reply: io::Result<()> = Ok(());
@@ -340,7 +387,7 @@ impl<FS: Filesystem> Session<FS> {
             // Read the init request from the kernel
             let size = match self.ch.receive_retrying(buf) {
                 Ok(size) => size,
-                Err(nix::errno::Errno::ENODEV) => {
+                Err(nix::errno::Errno::ENODEV | nix::errno::Errno::ECONNABORTED) => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotConnected,
                         "FUSE device disconnected during handshake",
@@ -412,7 +459,15 @@ impl<FS: Filesystem> Session<FS> {
                 ));
             }
 
-            let mut config = KernelConfig::new(init.capabilities(), init.max_readahead(), v);
+            let mut config = KernelConfig::new(
+                init.capabilities(),
+                init.max_readahead(),
+                v,
+                self.config
+                    .mount_options
+                    .contains(&MountOption::DefaultPermissions),
+                self.allowed,
+            );
 
             // Call filesystem init method and give it a chance to return an error
             let Some(filesystem) = &mut self.filesystem.fs else {
@@ -431,6 +486,8 @@ impl<FS: Filesystem> Session<FS> {
 
             // Remember the ABI version supported by kernel and mark the session initialized.
             self.proto_version = Some(v);
+            self.negotiated = init.capabilities() & config.requested;
+            self.kernel_capabilities = init.capabilities();
 
             // Log capability status for debugging
             for bit in 0..64 {
@@ -491,7 +548,11 @@ impl<FS: Filesystem> Session<FS> {
 
     /// Returns an object that can be used to send notifications to the kernel
     pub fn notifier(&self) -> Notifier {
-        Notifier::new(self.ch.sender())
+        Notifier::new(
+            self.ch.sender(),
+            self.kernel_capabilities,
+            self.proto_version,
+        )
     }
 }
 
@@ -518,6 +579,9 @@ pub(crate) struct SessionEventLoop<FS: Filesystem> {
     pub(crate) filesystem: Arc<FilesystemHolder<FS>>,
     pub(crate) allowed: SessionACL,
     pub(crate) session_owner: Uid,
+    pub(crate) negotiated: InitFlags,
+    pub(crate) kernel_capabilities: InitFlags,
+    pub(crate) kernel_abi: Option<Version>,
 }
 
 impl<FS: Filesystem> SessionEventLoop<FS> {
@@ -530,25 +594,31 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
             // Read the next request from the given channel to kernel driver
             // The kernel driver makes sure that we get exactly one request per read
             match self.ch.receive_retrying(buf) {
-                Ok(size) => match RequestWithSender::new(self.ch.sender(), &buf[..size]) {
-                    // Dispatch request
-                    Some(req) => {
-                        if let Ok(Operation::Destroy(_)) = req.request.operation() {
-                            req.reply::<ReplyEmpty>().ok();
-                            return Ok(());
-                        } else {
-                            req.dispatch(self)
+                Ok(size) => {
+                    match RequestWithSender::new(self.ch.sender(), &buf[..size], self.negotiated) {
+                        // Dispatch request
+                        Some(req) => {
+                            if let Ok(Operation::Destroy(_)) = req.request.operation() {
+                                req.reply::<ReplyEmpty>().ok();
+                                return Ok(());
+                            } else {
+                                req.dispatch(self)
+                            }
+                        }
+                        // Quit loop on illegal request
+                        None => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Invalid request",
+                            ));
                         }
                     }
-                    // Quit loop on illegal request
-                    None => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Invalid request",
-                        ));
-                    }
-                },
-                Err(nix::errno::Errno::ENODEV) => return Ok(()),
+                }
+                // The kernel returns ENODEV when the filesystem was unmounted, or
+                // ECONNABORTED when the connection was aborted with FUSE_ABORT_ERROR
+                // negotiated. Either way the connection is gone: a normal end of the
+                // session, not an operation failure (issue #212)
+                Err(nix::errno::Errno::ENODEV | nix::errno::Errno::ECONNABORTED) => return Ok(()),
                 Err(err) => return Err(err.into()),
             }
         }
@@ -556,33 +626,124 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
 }
 
 /// The background session data structure
+///
+/// Dropping this unmounts the filesystem and blocks until the session has ended,
+/// which guarantees that `Filesystem::destroy` has run when drop returns. The
+/// session's own threads, which run the filesystem callbacks and `destroy`, cannot
+/// wait for it to end: dropped there, it unmounts and leaves the session to end on
+/// its own, and `join` and `umount_and_join` return an error. Waiting can still
+/// deadlock if the dropping thread holds something `destroy` or a callback in
+/// progress needs, such as a lock. For a session created via
+/// `Session::from_fd` there is no mount to remove, so dropping cannot end the
+/// session and leaves its thread detached; end the session externally and use
+/// `join` to wait for it instead. The thread is likewise left detached, with a
+/// warning, rather than waiting for a session that may never end when the
+/// unmount fails, or when the kernel connection is still alive a few seconds
+/// after a successful unmount request (e.g. a lazily unmounted filesystem that
+/// is still in use, or an unmount helper that failed without reporting it).
 #[derive(Debug)]
 pub struct BackgroundSession {
-    /// Thread guard of the background session
-    pub guard: JoinHandle<io::Result<()>>,
+    /// Which spawned session this is, as recorded in `CURRENT_SESSION`
+    id: u64,
+    /// Thread guard of the background session. None once joined.
+    guard: Option<JoinHandle<io::Result<()>>>,
     /// Object for creating Notifiers for client use
     sender: ChannelSender,
+    /// The FUSE device fd of the session's kernel connection
+    fuse_device: Arc<DevFuse>,
     /// Ensures the filesystem is unmounted when the session ends
     mount: Option<Mount>,
+    /// Everything the kernel advertised during init, for notifications whose support
+    /// depends on it
+    kernel_capabilities: InitFlags,
+    /// The ABI version agreed during init, for notifications with no capability bit
+    kernel_abi: Option<Version>,
 }
 
+/// How long teardown waits for the kernel connection to end after a successful
+/// unmount request, before giving up on joining the session thread. The
+/// connection can end asynchronously (auto_unmount, kernel teardown), but a few
+/// seconds only pass without it ending when the session cannot be waited for,
+/// e.g. a lazily unmounted filesystem still in use
+const UNMOUNT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl BackgroundSession {
-    /// Unmount the filesystem and join the background thread.
+    /// Unmount the filesystem and join the background thread, returning the
+    /// session result. `Filesystem::destroy` has run when this returns `Ok`.
+    ///
+    /// # Errors
+    /// Besides the session's own result: the unmount's error if it failed, and
+    /// `EBUSY` if the filesystem is still in use a few seconds after a lazy unmount
+    /// detached it. Either way the session thread is left detached, as waiting for
+    /// it could block indefinitely; a detached filesystem's session ends once it is
+    /// no longer in use.
     pub fn umount_and_join(mut self) -> io::Result<()> {
         if let Some(mount) = self.mount.take() {
-            mount.umount()?;
+            if let Err(err) = mount.umount() {
+                // The filesystem is still mounted and the session still running,
+                // so joining would block indefinitely; leave the thread detached,
+                // as before
+                self.guard.take();
+                return Err(err);
+            }
+            // On one of the session's own threads the connection cannot end before this
+            // returns, which is reported below rather than waited out
+            if !self.on_session_thread()
+                && !crate::mnt::connection_ended(&self.fuse_device, UNMOUNT_WAIT)
+            {
+                // Lazily detached but still in use, which can last indefinitely (a
+                // shell's working directory, say). An eager unmount would have failed
+                // with EBUSY here, so report the same
+                warn!("FUSE connection still alive after unmount; detaching session thread");
+                self.guard.take();
+                return Err(io::Error::from_raw_os_error(libc::EBUSY));
+            }
         }
-        self.join()
+        if self.on_session_thread() {
+            // Unmounted, so the session ends once this callback returns
+            self.guard.take();
+            return Err(Self::own_thread_error());
+        }
+        self.join_impl()
     }
 
     /// Returns an object that can be used to send notifications to the kernel
     pub fn notifier(&self) -> Notifier {
-        Notifier::new(self.sender.clone())
+        Notifier::new(
+            self.sender.clone(),
+            self.kernel_capabilities,
+            self.kernel_abi,
+        )
     }
 
-    /// Join the filesystem thread.
-    pub fn join(self) -> io::Result<()> {
-        self.guard
+    /// Join the filesystem thread without unmounting first: blocks until
+    /// something else ends the session, e.g. an external unmount.
+    pub fn join(mut self) -> io::Result<()> {
+        if self.on_session_thread() {
+            self.guard.take();
+            return Err(Self::own_thread_error());
+        }
+        self.join_impl()
+    }
+
+    /// Whether the current thread is one of this session's own, which the session
+    /// cannot end without: joining it from here would wait on itself
+    fn on_session_thread(&self) -> bool {
+        CURRENT_SESSION.get() == self.id
+    }
+
+    fn own_thread_error() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Deadlock,
+            "cannot wait for a FUSE session from one of its own threads",
+        )
+    }
+
+    fn join_impl(&mut self) -> io::Result<()> {
+        let Some(guard) = self.guard.take() else {
+            return Ok(());
+        };
+        guard
             .join()
             .map_err(|_panic: Box<dyn std::any::Any + Send>| {
                 io::Error::new(
@@ -590,5 +751,1277 @@ impl BackgroundSession {
                     "filesystem background thread panicked",
                 )
             })?
+    }
+}
+
+impl Drop for BackgroundSession {
+    fn drop(&mut self) {
+        // Unmount and wait for the session to end, so that Filesystem::destroy
+        // has run by the time drop returns (issues #239 and #411). Without the
+        // join, the process could exit before the detached session thread got
+        // around to calling destroy
+        let Some(mount) = self.mount.take() else {
+            // No mount to remove (Session::from_fd): nothing here can end the
+            // session, so joining could block forever; leave the thread detached
+            return;
+        };
+        if let Err(err) = mount.umount() {
+            // Still mounted, so the session is still running and joining would
+            // block indefinitely
+            warn!("Failed to unmount filesystem during drop: {err}");
+            return;
+        }
+        if self.on_session_thread() {
+            // Waiting here would wait on this very thread, so the session is left to
+            // end once the callback returns
+            warn!("BackgroundSession dropped on one of its own threads; not waiting for it");
+            return;
+        }
+        // The connection can end asynchronously (e.g. auto_unmount), and some
+        // unmount helpers cannot report failures. Wait boundedly, and if the
+        // session lives on, detach rather than block indefinitely
+        if !crate::mnt::connection_ended(&self.fuse_device, UNMOUNT_WAIT) {
+            warn!("FUSE connection still alive after unmount; detaching session thread");
+            return;
+        }
+        if let Err(err) = self.join_impl() {
+            warn!("Session ended with an error during drop: {err}");
+        }
+    }
+}
+
+// The abort test uses fusectl, which only exists on Linux; on other targets the
+// whole module would be dead code
+#[cfg(all(test, target_os = "linux"))]
+mod test {
+    use std::io::Write;
+    use std::mem::ManuallyDrop;
+
+    use super::*;
+    use crate::Config;
+    use crate::InitFlags;
+    use crate::KernelConfig;
+    use crate::Request;
+
+    /// A filesystem that requests FUSE_ABORT_ERROR during init, so that after an
+    /// abort the FUSE device fails reads with ECONNABORTED instead of ENODEV.
+    struct AbortErrorFs;
+
+    impl Filesystem for AbortErrorFs {
+        fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+            // Ignore the error: on kernels without FUSE_ABORT_ERROR an abort
+            // yields ENODEV, which ends the session cleanly anyway
+            let _ = config.add_capabilities(InitFlags::FUSE_ABORT_ERROR);
+            Ok(())
+        }
+    }
+
+    /// Aborting the connection (via fusectl) with FUSE_ABORT_ERROR negotiated makes
+    /// the FUSE device return ECONNABORTED. The session loop must treat that as a
+    /// normal end of the session, so that umount_and_join() reports success rather
+    /// than an error for an administratively aborted filesystem (issue #212).
+    #[test]
+    fn session_ends_cleanly_after_abort() {
+        // Leak the directory on failure: it may still be a (dead) mountpoint
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        // The mount table lists the canonical path; resolve while it is a plain dir
+        let mountpoint = tmp.path().canonicalize().unwrap();
+
+        let session = Session::new(AbortErrorFs, &mountpoint, &Config::default()).unwrap();
+        let bg = session.spawn().unwrap();
+
+        // Wait until the handshake completed: the kernel forwards filesystem
+        // requests only after the init reply was processed, so a completed
+        // operation (the errno does not matter) proves the loop is past it
+        let _ = std::fs::metadata(&mountpoint);
+
+        let Some(abort_path) = fusectl_abort_path(&mountpoint) else {
+            eprintln!("skipping session_ends_cleanly_after_abort: fusectl not available");
+            bg.umount_and_join().unwrap();
+            ManuallyDrop::into_inner(tmp);
+            return;
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(abort_path)
+            .unwrap()
+            .write_all(b"1")
+            .unwrap();
+
+        bg.umount_and_join()
+            .expect("session must end cleanly after the connection was aborted");
+
+        // Teardown intentionally leaves the dead mount in the mount table (the
+        // same as libfuse); detach it so the tempdir can be removed
+        let _ = nix::mount::umount2(&mountpoint, nix::mount::MntFlags::MNT_DETACH);
+        for fusermount in ["fusermount3", "fusermount"] {
+            let _ = std::process::Command::new(fusermount)
+                .args(["-u", "-q", "-z", "--"])
+                .arg(&mountpoint)
+                .status();
+        }
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// A panic in init() must reach the caller with the filesystem unmounted. The
+    /// handshake used to run inside the session loop, so with spawn() the caller was
+    /// handed a live BackgroundSession while the kernel waited forever for an init
+    /// reply that would never come, hanging every process that touched the mountpoint
+    /// (issue #271). Running the handshake in Session::new() makes the panic unwind
+    /// through it, unmounting on the way out.
+    #[test]
+    fn panic_in_init_leaves_nothing_mounted() {
+        struct PanicInInit;
+        impl Filesystem for PanicInInit {
+            fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> io::Result<()> {
+                panic!("deliberate panic from a test filesystem's init()");
+            }
+        }
+
+        // Leak the directory on failure: it may still be a mountpoint nothing serves
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        // The mount table lists the canonical path
+        let mountpoint = tmp.path().canonicalize().unwrap();
+
+        let session = std::panic::catch_unwind(|| {
+            Session::new(PanicInInit, &mountpoint, &Config::default()).and_then(Session::spawn)
+        });
+        assert!(
+            session.is_err(),
+            "the panic must reach the caller, rather than a session thread it cannot see"
+        );
+
+        // Anything left mounted here has nothing serving it, so every access to the
+        // mountpoint would block indefinitely
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+        assert!(
+            !mounts
+                .lines()
+                .any(|line| line.split(' ').nth(1) == mountpoint.to_str()),
+            "the filesystem must not be left mounted with nothing serving it:\n{mounts}"
+        );
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// A rename is given an owner only when it creates an inode to own, which is a rename with
+    /// `RENAME_WHITEOUT` and no other. Off an idmapped mount every request carries ids, so the
+    /// flags have to decide this rather than the ids do.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn rename_names_an_owner_only_for_a_whiteout() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileType;
+        use crate::INodeNo;
+        use crate::RenameFlags;
+
+        /// Each rename's flags, and whether it was given an owner
+        static SEEN: StdMutex<Vec<(RenameFlags, bool)>> = StdMutex::new(Vec::new());
+
+        struct RenameFs;
+        impl Filesystem for RenameFs {
+            fn lookup(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                name: &std::ffi::OsStr,
+                reply: crate::ReplyEntry,
+            ) {
+                if name == "src" {
+                    reply.entry(
+                        &Duration::from_secs(0),
+                        &FileAttr {
+                            ino: INodeNo(2),
+                            size: 0,
+                            blocks: 0,
+                            atime: SystemTime::UNIX_EPOCH,
+                            mtime: SystemTime::UNIX_EPOCH,
+                            ctime: SystemTime::UNIX_EPOCH,
+                            crtime: SystemTime::UNIX_EPOCH,
+                            kind: FileType::RegularFile,
+                            perm: 0o644,
+                            nlink: 1,
+                            uid: 0,
+                            gid: 0,
+                            rdev: 0,
+                            blksize: 512,
+                            flags: 0,
+                        },
+                        crate::Generation(0),
+                    );
+                } else {
+                    reply.error(Errno::ENOENT);
+                }
+            }
+            fn getattr(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<crate::FileHandle>,
+                reply: crate::ReplyAttr,
+            ) {
+                reply.attr(
+                    &Duration::from_secs(0),
+                    &FileAttr {
+                        ino,
+                        size: 0,
+                        blocks: 0,
+                        atime: SystemTime::UNIX_EPOCH,
+                        mtime: SystemTime::UNIX_EPOCH,
+                        ctime: SystemTime::UNIX_EPOCH,
+                        crtime: SystemTime::UNIX_EPOCH,
+                        kind: FileType::Directory,
+                        perm: 0o777,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        blksize: 512,
+                        flags: 0,
+                    },
+                );
+            }
+            fn rename(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                _name: &std::ffi::OsStr,
+                _newparent: INodeNo,
+                _newname: &std::ffi::OsStr,
+                flags: RenameFlags,
+                owner: Option<crate::Owner>,
+                reply: crate::ReplyEmpty,
+            ) {
+                SEEN.lock().unwrap().push((flags, owner.is_some()));
+                reply.ok();
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let bg = Session::new(RenameFs, &mountpoint, &Config::default())
+            .unwrap()
+            .spawn()
+            .unwrap();
+
+        use std::os::unix::ffi::OsStringExt;
+        let src =
+            std::ffi::CString::new(mountpoint.join("src").into_os_string().into_vec()).unwrap();
+        let dst =
+            std::ffi::CString::new(mountpoint.join("dst").into_os_string().into_vec()).unwrap();
+        for flags in [0, libc::RENAME_WHITEOUT] {
+            unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    src.as_ptr(),
+                    libc::AT_FDCWD,
+                    dst.as_ptr(),
+                    flags,
+                )
+            };
+        }
+
+        let seen = std::mem::take(&mut *SEEN.lock().unwrap());
+        drop(bg);
+        ManuallyDrop::into_inner(tmp);
+
+        // This mount is not idmapped, so the header carries ids for both of these
+        assert_eq!(
+            seen,
+            vec![
+                (RenameFlags::empty(), false),
+                (RenameFlags::RENAME_WHITEOUT, true),
+            ],
+            "an owner belongs to the rename that creates an inode, and to no other"
+        );
+    }
+
+    /// An idmapped mount has no caller ids to report. Pinned against a real kernel, since
+    /// what it sends is its rule rather than fuser's: nothing reports a caller, and the
+    /// requests that create an inode name its owner instead - the caller's ids mapped through
+    /// the mount, which are not the caller's.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn idmap_withholds_caller_ids_and_names_the_owner() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileType;
+        use crate::INodeNo;
+        use crate::MountOption;
+
+        struct IdmapFs {
+            negotiated: Arc<AtomicBool>,
+            /// Whether `getattr` was given the caller's uid at all
+            getattr_had_uid: Arc<Mutex<Option<bool>>>,
+            mkdir_owner: Arc<Mutex<Option<crate::Owner>>>,
+            /// Whether the request that names an owner also reported a caller
+            mkdir_had_uid: Arc<Mutex<Option<bool>>>,
+        }
+
+        impl Filesystem for IdmapFs {
+            fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+                let accepted = config
+                    .add_capabilities(crate::InitFlags::FUSE_ALLOW_IDMAP)
+                    .is_ok();
+                self.negotiated.store(accepted, Ordering::SeqCst);
+                Ok(())
+            }
+            /// Answered so that creating a name gets as far as mkdir: the kernel looks it up
+            /// first, and a default ENOSYS there would end the operation before it
+            fn lookup(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                _name: &std::ffi::OsStr,
+                reply: crate::ReplyEntry,
+            ) {
+                reply.error(crate::Errno::ENOENT);
+            }
+            fn getattr(
+                &self,
+                req: &Request,
+                ino: INodeNo,
+                _fh: Option<crate::FileHandle>,
+                reply: crate::ReplyAttr,
+            ) {
+                *self.getattr_had_uid.lock() = Some(req.uid().is_some());
+                reply.attr(
+                    &Duration::from_secs(0),
+                    &FileAttr {
+                        ino,
+                        size: 0,
+                        blocks: 0,
+                        atime: SystemTime::UNIX_EPOCH,
+                        mtime: SystemTime::UNIX_EPOCH,
+                        ctime: SystemTime::UNIX_EPOCH,
+                        crtime: SystemTime::UNIX_EPOCH,
+                        kind: FileType::Directory,
+                        perm: 0o777,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        blksize: 512,
+                        flags: 0,
+                    },
+                );
+            }
+            fn mkdir(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                _name: &std::ffi::OsStr,
+                _mode: u32,
+                _umask: u32,
+                owner: crate::Owner,
+                reply: crate::ReplyEntry,
+            ) {
+                *self.mkdir_had_uid.lock() = Some(_req.uid().is_some());
+                *self.mkdir_owner.lock() = Some(owner);
+                // Nothing is created; the owner is the whole point here
+                reply.error(crate::Errno::ENOSPC);
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let negotiated = Arc::new(AtomicBool::new(false));
+        let getattr_had_uid = Arc::new(Mutex::new(None));
+        let mkdir_owner = Arc::new(Mutex::new(None));
+        let mkdir_had_uid = Arc::new(Mutex::new(None));
+
+        // Both are what the capability requires: without default_permissions the kernel
+        // refuses the connection, and without allow_other fuser refuses the capability
+        let mut config = Config::default();
+        config.mount_options.push(MountOption::DefaultPermissions);
+        config.acl = crate::SessionACL::All;
+
+        let session = match Session::new(
+            IdmapFs {
+                negotiated: negotiated.clone(),
+                getattr_had_uid: getattr_had_uid.clone(),
+                mkdir_owner: mkdir_owner.clone(),
+                mkdir_had_uid: mkdir_had_uid.clone(),
+            },
+            &mountpoint,
+            &config,
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                // allow_other needs either root or user_allow_other in /etc/fuse.conf
+                eprintln!("skipping idmap: cannot mount with allow_other: {error}");
+                ManuallyDrop::into_inner(tmp);
+                return;
+            }
+        };
+        // FUSE_ALLOW_IDMAP arrived in ABI 7.41; an older kernel never offers it
+        let supported = session.proto_version.is_some_and(|v| v >= Version(7, 41));
+        let bg = session.spawn().unwrap();
+
+        let _ = std::fs::metadata(&mountpoint);
+        let _ = std::fs::create_dir(mountpoint.join("newdir"));
+
+        let getattr_had_uid = getattr_had_uid.lock().take();
+        let mkdir_owner = mkdir_owner.lock().take();
+        let mkdir_had_uid = mkdir_had_uid.lock().take();
+        let negotiated = negotiated.load(Ordering::SeqCst);
+        drop(bg);
+        ManuallyDrop::into_inner(tmp);
+
+        if !supported {
+            eprintln!("skipping idmap: the kernel's FUSE protocol predates 7.41");
+            return;
+        }
+        assert!(
+            negotiated,
+            "a mount with default_permissions and allow_other must be allowed the capability"
+        );
+        assert_eq!(
+            getattr_had_uid,
+            Some(false),
+            "a request that creates nothing must arrive with the caller's ids withheld"
+        );
+        assert_eq!(
+            mkdir_owner,
+            Some(crate::Owner {
+                uid: nix::unistd::geteuid().as_raw(),
+                gid: nix::unistd::getegid().as_raw(),
+            }),
+            "a request that creates an inode must name the owner it should get"
+        );
+        // The header carries ids on this request, but they are the owner mapped through the
+        // mount rather than the caller's. Reporting them as the caller would let an idmapping
+        // that lands on uid 0 pass for root
+        assert_eq!(
+            mkdir_had_uid,
+            Some(false),
+            "the mapped owner must not be reported as the caller's id"
+        );
+    }
+
+    /// statx(2) must reach Filesystem::statx(), and the creation time it carries - which no
+    /// other request can express on Linux - must arrive intact. Also pins the one field the
+    /// wire format carries but the kernel drops, so that a kernel change shows up here.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn statx_reports_btime() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::time::Duration;
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileType;
+        use crate::INodeNo;
+        use crate::ReplyStatx;
+        use crate::StatxAttr;
+        use crate::StatxAttributes;
+        use crate::StatxMask;
+
+        const FILE_INO: INodeNo = INodeNo(2);
+        /// Distinctive enough that reading it out of the wrong field would show
+        const BTIME_SECS: u64 = 1_000_000_000;
+
+        struct StatxFs {
+            asked: Arc<Mutex<Option<StatxMask>>>,
+        }
+
+        impl StatxFs {
+            fn attr(ino: INodeNo, kind: FileType) -> FileAttr {
+                FileAttr {
+                    ino,
+                    size: 4096,
+                    blocks: 8,
+                    atime: SystemTime::UNIX_EPOCH,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    ctime: SystemTime::UNIX_EPOCH,
+                    crtime: SystemTime::UNIX_EPOCH,
+                    kind,
+                    perm: if kind == FileType::Directory {
+                        0o755
+                    } else {
+                        0o644
+                    },
+                    nlink: 1,
+                    uid: 0,
+                    gid: 0,
+                    rdev: 0,
+                    blksize: 512,
+                    flags: 0,
+                }
+            }
+        }
+
+        impl Filesystem for StatxFs {
+            fn lookup(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                _name: &std::ffi::OsStr,
+                reply: crate::ReplyEntry,
+            ) {
+                reply.entry(
+                    &Duration::from_secs(0),
+                    &Self::attr(FILE_INO, FileType::RegularFile),
+                    crate::Generation(0),
+                );
+            }
+            fn getattr(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<crate::FileHandle>,
+                reply: crate::ReplyAttr,
+            ) {
+                let kind = if ino == FILE_INO {
+                    FileType::RegularFile
+                } else {
+                    FileType::Directory
+                };
+                reply.attr(&Duration::from_secs(0), &Self::attr(ino, kind));
+            }
+            fn statx(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<crate::FileHandle>,
+                _flags: u32,
+                mask: StatxMask,
+                reply: ReplyStatx,
+            ) {
+                *self.asked.lock() = Some(mask);
+                let kind = if ino == FILE_INO {
+                    FileType::RegularFile
+                } else {
+                    FileType::Directory
+                };
+                reply.statx(
+                    &Duration::from_secs(0),
+                    &StatxAttr {
+                        btime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(BTIME_SECS)),
+                        attributes: StatxAttributes::IMMUTABLE | StatxAttributes::APPEND,
+                        attributes_mask: StatxAttributes::IMMUTABLE
+                            | StatxAttributes::APPEND
+                            | StatxAttributes::NODUMP,
+                        ..Self::attr(ino, kind).into()
+                    },
+                );
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let asked = Arc::new(Mutex::new(None));
+        let session = Session::new(
+            StatxFs {
+                asked: asked.clone(),
+            },
+            &mountpoint,
+            &Config::default(),
+        )
+        .unwrap();
+        // FUSE_STATX arrived in ABI 7.39. An older kernel answers statx(2) out of
+        // FUSE_GETATTR without ever asking, so there is nothing to assert against
+        let supported = session
+            .proto_version
+            .is_some_and(|v| v >= crate::ll::fuse_abi::FUSE_STATX_VERSION);
+        let bg = session.spawn().unwrap();
+        if !supported {
+            eprintln!("skipping statx: the kernel's FUSE protocol predates 7.39");
+            bg.umount_and_join().unwrap();
+            ManuallyDrop::into_inner(tmp);
+            return;
+        }
+
+        let mut buf: libc::statx = unsafe { std::mem::zeroed() };
+        let path =
+            std::ffi::CString::new(mountpoint.join("file").into_os_string().into_vec()).unwrap();
+        let rc = unsafe {
+            libc::statx(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+                libc::STATX_BASIC_STATS | libc::STATX_BTIME,
+                &mut buf,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+
+        let asked = asked.lock().take();
+        drop(bg);
+        ManuallyDrop::into_inner(tmp);
+
+        assert_eq!(rc, 0, "statx(2) must be answered: {err}");
+        assert!(
+            asked.is_some(),
+            "statx(2) must reach Filesystem::statx rather than falling back to getattr"
+        );
+        assert_eq!(
+            buf.stx_btime.tv_sec as u64, BTIME_SECS,
+            "the creation time must survive the round trip"
+        );
+        assert_ne!(
+            buf.stx_mask & libc::STATX_BTIME,
+            0,
+            "the reply must mark the creation time as filled in"
+        );
+        assert_eq!(
+            buf.stx_size, 4096,
+            "the fields stat(2) also carries must still be right"
+        );
+        eprintln!(
+            "DIAG stx_attributes={:#x} stx_attributes_mask={:#x} stx_mask={:#x} btime={}",
+            buf.stx_attributes, buf.stx_attributes_mask, buf.stx_mask, buf.stx_btime.tv_sec
+        ); // The kernel does not pass `attributes` on to the caller: fuse_do_statx() copies the
+        // mask, btime and basic stats out of the reply and ignores this field, so the
+        // immutable and append-only bits set above go nowhere. Asserted so that this stops
+        // being true loudly rather than silently, since the wire format has carried the field
+        // since 7.39 and only the kernel's use of it is missing
+        assert_eq!(
+            buf.stx_attributes, 0,
+            "STATX_ATTR_* from a FUSE filesystem is dropped by the kernel; if this now \
+             arrives, StatxAttr::attributes and the CHANGELOG need their caveats removed"
+        );
+    }
+
+    /// An O_TMPFILE open must reach Filesystem::tmpfile() with the mode and flags it was
+    /// made with, and hand back a working descriptor. The kernel takes ENOSYS from this as
+    /// permanent, so a filesystem that does implement it has one chance to say so.
+    ///
+    /// Naming the file afterwards is the other half of what it is for, and reaches
+    /// Filesystem::link() with the inode tmpfile() replied with.
+    #[test]
+    fn tmpfile_open_and_link() {
+        use std::os::fd::AsRawFd;
+        use std::time::Duration;
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileType;
+        use crate::FopenFlags;
+        use crate::Generation;
+        use crate::INodeNo;
+        use crate::ReplyCreate;
+
+        const TMPFILE_INO: INodeNo = INodeNo(2);
+
+        struct TmpFileFs {
+            seen: Arc<Mutex<Option<(u32, i32)>>>,
+            linked: Arc<Mutex<Option<INodeNo>>>,
+        }
+        impl TmpFileFs {
+            fn attr(ino: INodeNo, kind: FileType, perm: u16) -> FileAttr {
+                let now = SystemTime::now();
+                FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    crtime: now,
+                    kind,
+                    perm,
+                    nlink: if kind == FileType::Directory { 2 } else { 0 },
+                    uid: geteuid().as_raw(),
+                    gid: 0,
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                }
+            }
+        }
+        impl Filesystem for TmpFileFs {
+            fn lookup(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                _name: &std::ffi::OsStr,
+                reply: crate::ReplyEntry,
+            ) {
+                // The name the link below creates must not exist yet
+                reply.error(Errno::ENOENT);
+            }
+            fn link(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _newparent: INodeNo,
+                _newname: &std::ffi::OsStr,
+                reply: crate::ReplyEntry,
+            ) {
+                *self.linked.lock() = Some(ino);
+                reply.entry(
+                    &Duration::from_secs(0),
+                    &Self::attr(ino, FileType::RegularFile, 0o600),
+                    Generation(0),
+                );
+            }
+            fn getattr(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<crate::FileHandle>,
+                reply: crate::ReplyAttr,
+            ) {
+                let attr = if ino == TMPFILE_INO {
+                    Self::attr(ino, FileType::RegularFile, 0o600)
+                } else {
+                    Self::attr(ino, FileType::Directory, 0o755)
+                };
+                reply.attr(&Duration::from_secs(0), &attr);
+            }
+            fn tmpfile(
+                &self,
+                _req: &Request,
+                _parent: INodeNo,
+                mode: u32,
+                _umask: u32,
+                flags: i32,
+                _kill_suid_gid: bool,
+                _owner: crate::Owner,
+                reply: ReplyCreate,
+            ) {
+                *self.seen.lock() = Some((mode, flags));
+                reply.created(
+                    &Duration::from_secs(0),
+                    &Self::attr(TMPFILE_INO, FileType::RegularFile, 0o600),
+                    Generation(0),
+                    crate::FileHandle(1),
+                    FopenFlags::empty(),
+                );
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let linked = Arc::new(Mutex::new(None));
+        let session = Session::new(
+            TmpFileFs {
+                seen: seen.clone(),
+                linked: linked.clone(),
+            },
+            &mountpoint,
+            &Config::default(),
+        )
+        .unwrap();
+        // FUSE_TMPFILE arrived in ABI 7.37, and a kernel without it has no tmpfile inode
+        // operation at all, so it answers O_TMPFILE itself without asking the filesystem
+        // anything. fuser supports back to 7.6, so that is not a failure of this change
+        let supported = session.proto_version.is_some_and(|v| v >= Version(7, 37));
+        let bg = session.spawn().unwrap();
+        if !supported {
+            eprintln!("skipping tmpfile_open: the kernel's FUSE protocol predates 7.37");
+            bg.umount_and_join().unwrap();
+            ManuallyDrop::into_inner(tmp);
+            return;
+        }
+
+        let opened = nix::fcntl::open(
+            &mountpoint,
+            nix::fcntl::OFlag::O_TMPFILE | nix::fcntl::OFlag::O_RDWR,
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        );
+        // Give the anonymous file a name, which is what it exists to allow. Going through
+        // /proc/self/fd rather than AT_EMPTY_PATH, which would need CAP_DAC_READ_SEARCH
+        let named = opened.as_ref().map_err(|err| *err).and_then(|fd| {
+            let by_fd = format!("/proc/self/fd/{}", fd.as_raw_fd());
+            nix::unistd::linkat(
+                nix::fcntl::AT_FDCWD,
+                by_fd.as_str(),
+                nix::fcntl::AT_FDCWD,
+                mountpoint.join("named.txt").as_path(),
+                nix::fcntl::AtFlags::AT_SYMLINK_FOLLOW,
+            )
+        });
+
+        let seen = seen.lock().take();
+        let linked = linked.lock().take();
+        let opened = opened.map(drop);
+        drop(bg);
+        ManuallyDrop::into_inner(tmp);
+
+        opened.expect("the descriptor the filesystem replied with must reach the caller");
+        named.expect("linking the anonymous file must reach the filesystem");
+        assert_eq!(
+            linked,
+            Some(TMPFILE_INO),
+            "the link must name the inode tmpfile() replied with"
+        );
+        let (mode, flags) = seen.expect("O_TMPFILE must reach Filesystem::tmpfile");
+        // The kernel insists on S_IFREG for these, and applies the umask itself
+        assert_eq!(mode & libc::S_IFMT, libc::S_IFREG);
+        assert_eq!(
+            flags & libc::O_TMPFILE,
+            libc::O_TMPFILE,
+            "flags {flags:#x} must carry O_TMPFILE"
+        );
+    }
+
+    /// The kernel fills a request's uid, gid and pid from the task that caused it, for
+    /// every operation that goes through fuse_simple_request(). Every access decision
+    /// fuser makes rests on that - SessionACL, and which operations are exempt from it
+    /// because the kernel issues them with no caller - so it is worth pinning down rather
+    /// than assuming. `FUSE_ARGS()` zero-initializes, so a header fuser had merely copied
+    /// from there would carry uid 0 and pid 0.
+    #[test]
+    fn requests_carry_the_calling_task() {
+        /// The caller's uid, absent on an idmapped mount, and the calling thread's id
+        type Caller = (Option<u32>, u32);
+
+        struct CallerFs {
+            seen: Arc<Mutex<Option<Caller>>>,
+        }
+        impl Filesystem for CallerFs {
+            fn getattr(
+                &self,
+                req: &Request,
+                _ino: crate::INodeNo,
+                _fh: Option<crate::FileHandle>,
+                reply: crate::ReplyAttr,
+            ) {
+                *self.seen.lock() = Some((req.uid(), req.pid()));
+                reply.error(Errno::ENOSYS);
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let bg = Session::new(
+            CallerFs { seen: seen.clone() },
+            &mountpoint,
+            &Config::default(),
+        )
+        .unwrap()
+        .spawn()
+        .unwrap();
+
+        // Any operation will do; this one is answered from the mountpoint's root inode
+        let _ = std::fs::metadata(&mountpoint);
+        let seen = seen.lock().take();
+        drop(bg);
+        ManuallyDrop::into_inner(tmp);
+
+        let (uid, pid) = seen.expect("the filesystem must have been asked for the root inode");
+        assert_eq!(
+            uid,
+            Some(geteuid().as_raw()),
+            "the request must carry the caller's uid, this mount not being idmapped"
+        );
+        // Discriminating even when the test runs as root, where the uid above is 0 either
+        // way. The kernel takes this from task_pid(current), so it is the id of the thread
+        // that made the call rather than of the process
+        assert_eq!(
+            pid,
+            nix::unistd::gettid().as_raw() as u32,
+            "the request must carry the calling thread's id"
+        );
+    }
+
+    /// Dropping a BackgroundSession must unmount the filesystem and wait for the
+    /// session to end, so that Filesystem::destroy has run when drop returns.
+    #[test]
+    fn drop_waits_for_destroy() {
+        struct DestroyFs {
+            destroyed: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Filesystem for DestroyFs {
+            fn destroy(&mut self) {
+                // Give drop a chance to return early: without the join, drop
+                // consistently wins this race and the assertion below fails
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                self.destroyed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let destroyed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fs = DestroyFs {
+            destroyed: destroyed.clone(),
+        };
+        let bg = Session::new(fs, tmp.path(), &Config::default())
+            .unwrap()
+            .spawn()
+            .unwrap();
+        drop(bg);
+        assert!(
+            destroyed.load(std::sync::atomic::Ordering::SeqCst),
+            "destroy() must have been called by the time drop returns"
+        );
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// An unmount must not fail merely because the filesystem is still in use. The
+    /// Mount is consumed by the unmount attempt, so a caller that gets EBUSY has
+    /// nothing left to retry with and the filesystem is left mounted (issue #686).
+    #[test]
+    fn umount_succeeds_while_filesystem_is_busy() {
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileHandle;
+        use crate::FileType;
+        use crate::INodeNo;
+        use crate::ReplyAttr;
+
+        /// Serves getattr, which is all that opening the mount root needs
+        struct RootDirFs;
+        impl Filesystem for RootDirFs {
+            fn getattr(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<FileHandle>,
+                reply: ReplyAttr,
+            ) {
+                let now = SystemTime::now();
+                reply.attr(
+                    &std::time::Duration::from_secs(1),
+                    &FileAttr {
+                        ino,
+                        size: 0,
+                        blocks: 0,
+                        atime: now,
+                        mtime: now,
+                        ctime: now,
+                        crtime: now,
+                        kind: FileType::Directory,
+                        perm: 0o755,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        blksize: 4096,
+                        flags: 0,
+                    },
+                );
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let mut session = Session::new(RootDirFs, &mountpoint, &Config::default()).unwrap();
+        let mut unmounter = session.unmount_callable();
+        let runner = std::thread::spawn(move || session.run());
+        // The kernel forwards requests only after the init reply was processed, so a
+        // completed operation proves the session loop is past the handshake
+        let _ = std::fs::metadata(&mountpoint);
+
+        // An open handle on the mount root makes an eager unmount fail with EBUSY
+        let busy = std::fs::File::open(&mountpoint).unwrap();
+        unmounter
+            .unmount()
+            .expect("unmount must not fail while the filesystem is in use");
+
+        // Releasing the handle lets the lazily detached filesystem go away, ending
+        // the session
+        drop(busy);
+        runner.join().unwrap().unwrap();
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// A filesystem holding its own BackgroundSession, which `getattr` ends as
+    /// `in_getattr` says, and `destroy` drops if still held - both on the session's own
+    /// threads
+    struct SelfEndingFs {
+        session: Arc<Mutex<Option<BackgroundSession>>>,
+        in_getattr: Option<fn(BackgroundSession) -> io::Result<()>>,
+        results: std::sync::mpsc::Sender<io::Result<()>>,
+    }
+
+    impl Filesystem for SelfEndingFs {
+        fn getattr(
+            &self,
+            _req: &Request,
+            ino: crate::INodeNo,
+            _fh: Option<crate::FileHandle>,
+            reply: crate::ReplyAttr,
+        ) {
+            if let Some(end) = self.in_getattr {
+                if let Some(session) = self.session.lock().take() {
+                    self.results.send(end(session)).unwrap();
+                }
+            }
+            let now = std::time::SystemTime::now();
+            reply.attr(
+                &std::time::Duration::ZERO,
+                &crate::FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: now,
+                    mtime: now,
+                    ctime: now,
+                    crtime: now,
+                    kind: crate::FileType::Directory,
+                    perm: 0o755,
+                    nlink: 2,
+                    uid: 0,
+                    gid: 0,
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                },
+            );
+        }
+
+        fn destroy(&mut self) {
+            // Whatever is still held is dropped here, on the session's own thread
+            drop(self.session.lock().take());
+            self.results.send(Ok(())).unwrap();
+        }
+    }
+
+    /// What a SelfEndingFs reports: the result of ending itself in `getattr`, if it
+    /// does, then that `destroy` ran
+    struct SelfEnding {
+        received: std::sync::mpsc::Receiver<io::Result<()>>,
+        abort_path: Option<std::path::PathBuf>,
+    }
+
+    impl SelfEnding {
+        /// The next report. A session that waits on itself never sends one, and leaves
+        /// any request it is serving - possibly from this very process, which could then
+        /// never exit - waiting with it, so the connection is aborted before failing
+        fn next(&self, what: &str) -> io::Result<()> {
+            match self.received.recv_timeout(SELF_ENDING_WAIT) {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(abort_path) = &self.abort_path {
+                        let _ = std::fs::write(abort_path, "1");
+                    }
+                    panic!("{what}");
+                }
+            }
+        }
+    }
+
+    /// Spawn a SelfEndingFs, handing it its own BackgroundSession
+    fn spawn_self_ending(
+        mountpoint: &Path,
+        in_getattr: Option<fn(BackgroundSession) -> io::Result<()>>,
+    ) -> SelfEnding {
+        let (results, received) = std::sync::mpsc::channel();
+        let session = Arc::new(Mutex::new(None));
+        let fs = SelfEndingFs {
+            session: session.clone(),
+            in_getattr,
+            results,
+        };
+        let bg = Session::new(fs, mountpoint, &Config::default())
+            .unwrap()
+            .spawn()
+            .unwrap();
+        *session.lock() = Some(bg);
+        SelfEnding {
+            received,
+            // Found while mounted: a lazily detached mount leaves the mount table
+            abort_path: fusectl_abort_path(mountpoint),
+        }
+    }
+
+    const SELF_ENDING_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn stat_in_background(path: &Path) {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || std::fs::metadata(path));
+    }
+
+    /// Dropping a BackgroundSession in `destroy`, which runs on the thread the drop
+    /// would join, must neither panic on joining itself nor block
+    #[test]
+    fn drop_on_the_session_thread_does_not_join_itself() {
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let session = spawn_self_ending(&mountpoint, None);
+        let _ = std::fs::metadata(&mountpoint);
+
+        // Ending the session from outside runs destroy, which drops the session
+        let unmounted = ["fusermount3", "fusermount"].iter().any(|bin| {
+            std::process::Command::new(bin)
+                .arg("-u")
+                .arg(&mountpoint)
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !unmounted {
+            // No fusermount binary available; umount(2) requires root
+            let path = std::ffi::CString::new(mountpoint.as_os_str().as_encoded_bytes()).unwrap();
+            nix::mount::umount(path.as_c_str()).unwrap();
+        }
+        session
+            .next("destroy must return after dropping its own session")
+            .unwrap();
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// Unmounting and joining from a filesystem callback cannot wait for the session,
+    /// which ends only once the callback returns, so it must report that rather than
+    /// block or panic - and the unmount must still take effect
+    #[test]
+    fn umount_and_join_on_the_session_thread_reports_deadlock() {
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let session = spawn_self_ending(&mountpoint, Some(BackgroundSession::umount_and_join));
+        // Off this thread, so that a callback that never returns fails the test rather
+        // than hanging it
+        stat_in_background(&mountpoint);
+
+        let err = session
+            .next("umount_and_join must return promptly on the session's own thread")
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Deadlock);
+        // The unmount went ahead, so the session ends and destroy runs
+        session
+            .next("the session must end after unmounting itself")
+            .unwrap();
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// Dropping a BackgroundSession in a callback must not wait for the session either
+    #[test]
+    fn drop_in_a_callback_does_not_wait() {
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let session = spawn_self_ending(
+            &mountpoint,
+            Some(|session| {
+                drop(session);
+                Ok(())
+            }),
+        );
+        let started = std::time::Instant::now();
+        stat_in_background(&mountpoint);
+        session.next("the callback must return").unwrap();
+        // Waiting for the connection to end would take the full UNMOUNT_WAIT, since the
+        // request the callback is serving keeps the filesystem in use
+        assert!(
+            started.elapsed() < UNMOUNT_WAIT,
+            "drop in a callback waited {:?}",
+            started.elapsed()
+        );
+        session
+            .next("the session must end after the callback dropped it")
+            .unwrap();
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// A lazy unmount succeeds while the filesystem is in use, but the session goes
+    /// on until it no longer is, which may be never. umount_and_join must report
+    /// that rather than wait for it
+    #[test]
+    fn umount_and_join_reports_a_filesystem_still_in_use() {
+        use std::time::SystemTime;
+
+        use crate::FileAttr;
+        use crate::FileHandle;
+        use crate::FileType;
+        use crate::INodeNo;
+        use crate::ReplyAttr;
+
+        /// Serves getattr, which is all that opening the mount root needs
+        struct RootDirFs {
+            destroyed: std::sync::mpsc::Sender<()>,
+        }
+        impl Filesystem for RootDirFs {
+            fn getattr(
+                &self,
+                _req: &Request,
+                ino: INodeNo,
+                _fh: Option<FileHandle>,
+                reply: ReplyAttr,
+            ) {
+                let now = SystemTime::now();
+                reply.attr(
+                    &std::time::Duration::from_secs(1),
+                    &FileAttr {
+                        ino,
+                        size: 0,
+                        blocks: 0,
+                        atime: now,
+                        mtime: now,
+                        ctime: now,
+                        crtime: now,
+                        kind: FileType::Directory,
+                        perm: 0o755,
+                        nlink: 2,
+                        uid: 0,
+                        gid: 0,
+                        rdev: 0,
+                        blksize: 4096,
+                        flags: 0,
+                    },
+                );
+            }
+
+            fn destroy(&mut self) {
+                let _ = self.destroyed.send(());
+            }
+        }
+
+        let tmp = ManuallyDrop::new(tempfile::tempdir().unwrap());
+        let mountpoint = tmp.path().canonicalize().unwrap();
+        let (destroyed, destroy_seen) = std::sync::mpsc::channel();
+        let bg = Session::new(RootDirFs { destroyed }, &mountpoint, &Config::default())
+            .unwrap()
+            .spawn()
+            .unwrap();
+        // The kernel forwards requests only after the init reply was processed, so a
+        // completed operation proves the session loop is past the handshake
+        let _ = std::fs::metadata(&mountpoint);
+
+        let busy = std::fs::File::open(&mountpoint).unwrap();
+        // On another thread, so that waiting for the session fails the test rather
+        // than hanging it
+        let (result, returned) = std::sync::mpsc::channel();
+        std::thread::spawn(move || result.send(bg.umount_and_join()));
+        let Ok(result) = returned.recv_timeout(UNMOUNT_WAIT * 2) else {
+            drop(busy);
+            panic!("umount_and_join waited for a filesystem still in use");
+        };
+        let err = result.expect_err("a filesystem still in use must be reported");
+        assert_eq!(err.raw_os_error(), Some(libc::EBUSY));
+
+        // It was detached all the same, so releasing it ends the session
+        drop(busy);
+        destroy_seen
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the session must end once the filesystem is no longer in use");
+        ManuallyDrop::into_inner(tmp);
+    }
+
+    /// The fusectl abort file for the FUSE mount at `mountpoint`: the connection
+    /// directory is named after the mount's anonymous device number.
+    fn fusectl_abort_path(mountpoint: &Path) -> Option<std::path::PathBuf> {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+        let mut device = None;
+        for line in mountinfo.lines() {
+            let mut fields = line.split(' ');
+            let (Some(dev), Some(path)) = (fields.nth(2), fields.nth(1)) else {
+                continue;
+            };
+            // mountinfo octal-escapes special characters; the tempdir path has none.
+            // Later entries are mounted on top of earlier ones, so the last match wins
+            if Path::new(path) == mountpoint {
+                let (major, minor) = dev.split_once(':')?;
+                let (major, minor): (u64, u64) = (major.parse().ok()?, minor.parse().ok()?);
+                // fusectl names the directory with the raw kernel-internal
+                // device number, (major << 20) | minor: fuse_ctl_add_conn()
+                // prints fc->dev (= sb->s_dev) without re-encoding it
+                device = Some((major << 20) | minor);
+            }
+        }
+        let path = std::path::PathBuf::from(format!("/sys/fs/fuse/connections/{}/abort", device?));
+        path.exists().then_some(path)
     }
 }

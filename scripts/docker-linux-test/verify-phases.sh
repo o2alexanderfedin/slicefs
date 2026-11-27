@@ -6,10 +6,18 @@ ok(){ echo "  $1: ok"; }; bad(){ echo "  $1: FAIL ${2:-}"; F=1; }
 step(){ local n=$1 t=$2; shift 2
   if timeout -s KILL $t "$@" >$R/step.out 2>&1; then ok "$n"; else bad "$n" "($(head -c 200 $R/step.out))"; fi; }
 mnt(){ # mnt <store> <mountpoint> [extra args...]
-  local s=$1 m=$2; shift 2; mkdir -p $m
-  "${PRE[@]}" $B mount --store $s "$@" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
-  for i in $(seq 1 20); do mountpoint -q $m && return 0; sleep 0.5; done
+  # SLICEFS_WORKERS=N adds --workers N when the caller gives no --workers; the
+  # Workers line of that mount must then be "Workers: N (set)".
+  local s=$1 m=$2 n=0 w=(); shift 2; mkdir -p $m
+  case " $* " in *" --workers "*|*" --workers="*) ;; *) [ -n "${SLICEFS_WORKERS:-}" ] && w=(--workers "$SLICEFS_WORKERS") ;; esac
+  [ -f $R/mount.log ] && n=$(wc -l < $R/mount.log)
+  "${PRE[@]}" $B mount --store $s "$@" "${w[@]}" $m </dev/null >>$R/mount.log 2>&1 & MP=$!
+  for i in $(seq 1 20); do mountpoint -q $m && { wline $n ${#w[@]} $m; return 0; }; sleep 0.5; done
   echo "  NOT MOUNTED: $m"; tail -5 $R/mount.log; F=1; return 1; }
+wline(){ # wline <log lines before the mount> <count of added args> <mountpoint>
+  local L; L=$(tail -n +$(($1 + 1)) $R/mount.log | grep -m1 -o 'Workers: [0-9]* ([a-z]*)')
+  echo "    workers-line: ${L:-none}"
+  if [ "$2" -gt 0 ] && [ "$L" != "Workers: $SLICEFS_WORKERS (set)" ]; then bad "workers-line $3" "(${L:-none})"; fi; }
 umnt(){ # umnt <mountpoint>: unmount and require the daemon to exit
   timeout -s KILL 15 $B unmount $1 >/dev/null 2>&1 || fusermount -u $1 2>/dev/null
   for i in $(seq 20); do kill -0 $MP 2>/dev/null || return 0; sleep 0.5; done
@@ -31,6 +39,37 @@ if mnt $R/s3 $R/m3 --snapshot base; then
   elif grep -q "Read-only file system" $R/err; then ok touch-erofs; else bad touch-erofs "($(cat $R/err))"; fi
   umnt $R/m3; ok unmount
 fi
+
+echo "== FMT-02 (Phase 21.1): an unknown ro_compat flag mounts read-only; an unknown incompat flag is refused"
+snap(){ # snap <dir>: every path, then the sha256 of every file, in sorted order
+  (cd "$1" && find . -print0 | LC_ALL=C sort -z | tr '\0' '\n' && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum); }
+$B seed $R/sf $R/src >/dev/null 2>&1 && echo "ro_compat test-ro-feature r-test" >> $R/sf/FORMAT
+snap $R/sf > $R/sf.before
+rm -rf $R/sfc; cp -a $R/sf $R/sfc
+if ! snap $R/sfc | cmp -s - $R/sf.before; then bad tree-check-sees-a-change "(a plain copy differs)"
+else : > $R/sfc/control; if snap $R/sfc | cmp -s - $R/sf.before; then bad tree-check-sees-a-change "(an added file is not seen)"; else ok tree-check-sees-a-change; fi; fi
+rm -rf $R/sfc
+if timeout -s KILL 20 $B stats $R/sf >$R/fst.out 2>&1 && grep -q 'ro_compat test-ro-feature' $R/fst.out && grep -qE '^Access +: read-only$' $R/fst.out
+then ok ro-stats; else bad ro-stats "($(head -c 300 $R/fst.out))"; fi
+if timeout -s KILL 20 $B gc $R/sf >$R/fgc.out 2>&1; then bad ro-gc-refused "(gc ran)"
+elif grep -q test-ro-feature $R/fgc.out; then ok ro-gc-refused; else bad ro-gc-refused "($(head -c 300 $R/fgc.out))"; fi
+if mnt $R/sf $R/mf; then
+  if [ -e $R/sf/mount.lock ]; then bad ro-no-lock "(mount.lock exists)"; else ok ro-no-lock; fi
+  step ro-cat 10 bash -c "[ \"\$(cat $R/mf/hello.txt)\" = 'Hello SliceFS' ] && diff -r $R/src $R/mf"
+  if timeout 10 touch $R/mf/test 2>$R/err; then bad ro-touch-erofs "(write succeeded)";
+  elif grep -q "Read-only file system" $R/err; then ok ro-touch-erofs; else bad ro-touch-erofs "($(cat $R/err))"; fi
+  if grep -qE 'Mounting read-only: .*test-ro-feature.*r-test' $R/mount.log; then ok ro-line; else bad ro-line "($(tail -3 $R/mount.log | tr '\n' ' '))"; fi
+  umnt $R/mf
+fi
+snap $R/sf > $R/sf.after
+if cmp -s $R/sf.before $R/sf.after; then ok ro-store-unchanged
+else bad ro-store-unchanged "($(diff $R/sf.before $R/sf.after | grep '^[<>]' | head -5 | tr '\n' ' '))"; fi
+$B seed $R/si $R/src >/dev/null 2>&1 && echo "incompat test-new-feature r-test" >> $R/si/FORMAT
+mkdir -p $R/mi
+timeout -s KILL 20 $B mount --store $R/si $R/mi </dev/null >$R/fmi.out 2>&1; e=$?
+if mountpoint -q $R/mi; then fusermount -u $R/mi 2>/dev/null; bad incompat-refused "(it mounted)"
+elif [ $e -ne 0 ] && grep -q test-new-feature $R/fmi.out && grep -q r-test $R/fmi.out; then ok incompat-refused
+else bad incompat-refused "(exit $e: $(head -c 300 $R/fmi.out))"; fi
 
 echo "== Phase 04: end-to-end write session, survives remount"
 $B seed $R/s4 $R/src >/dev/null 2>&1
@@ -197,6 +236,9 @@ for SIG in TERM INT HUP; do
   fi
 done
 PRE=()
+
+# POOL-03 (Phase 21): a request panic aborts the daemon; the remount replays the write log.
+bash "$(dirname "$0")/panic-replay.sh" "$B" || F=1
 
 echo "== Phase 06: two snapshots of the same state do not double-count storage"
 $B seed $R/s6 $R/src >/dev/null 2>&1

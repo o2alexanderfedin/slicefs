@@ -5,6 +5,7 @@
 - ✅ **v1.0 Foundation** - Phases 1-7 (shipped 2026-03-29)
 - ✅ **v2.0 Streaming Writes & Hardening** - Phases 7.1-12 (shipped 2026-11-17, tag `milestone-v2.0`)
 - ✅ **v2.1 Store Index & Measurements** - Phases 13-17 (shipped 2026-11-20, release `v2.2.0`)
+- ✅ **v2.2 Concurrency & Store Evolution** - Phases 18-24 (shipped 2026-11-26, release `v2.3.0`)
 
 ## Phases
 
@@ -162,6 +163,23 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 
 </details>
 
+<details>
+<summary>✅ v2.2 Concurrency & Store Evolution (Phases 18-24) - SHIPPED 2026-11-26</summary>
+
+- [x] Phase 18: Spikes, baseline and stress harness (#127) (7/7 plans) — completed 2026-11-21
+- [x] Phase 19: Fine-grained locks (#21) (16/16 plans) — completed 2026-11-22
+- [x] Phase 20: Dirty budget and rebase flusher (#21) (8/8 plans) — completed 2026-11-23
+- [x] Phase 21: Worker pool (#22) (9/9 plans) — completed 2026-11-24
+- [x] Phase 21.1: Store header and format policy (#154) (4/4 plans) — completed 2026-11-24
+- [x] Phase 21.2: Thread-safety verification and CI gates (11/11 plans) — completed 2026-11-25
+- [x] Phase 22: Chunk profiles (#67) (4/4 plans) — completed 2026-11-26
+- [x] Phase 23: Hashes and rehash (#62) (5/5 plans) — completed 2026-11-26
+- [x] Phase 24: Prolly evaluation (#19) (5/5 plans) — completed 2026-11-26
+
+Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestones/v2.2-ROADMAP.md`. Audit: `.planning/milestones/v2.2-MILESTONE-AUDIT.md`.
+
+</details>
+
 ## Progress
 
 | Milestone | Phases | Plans | Status | Shipped |
@@ -169,3 +187,4 @@ Full details: `.planning/milestones/v2.1-ROADMAP.md`. Audit: `.planning/mileston
 | v1.0 Foundation | 1-7 | 24 | Complete | 2026-03-29 |
 | v2.0 Streaming Writes & Hardening | 7.1-12 | 13 | Complete | 2026-11-17 |
 | v2.1 Store Index & Measurements | 13-17 | 27 | Complete | 2026-11-20 |
+| v2.2 Concurrency & Store Evolution | 18-24 | 69 | Complete | 2026-11-26 |

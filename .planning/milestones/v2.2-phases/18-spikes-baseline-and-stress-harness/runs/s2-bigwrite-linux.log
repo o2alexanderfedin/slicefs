@@ -1,0 +1,31 @@
+# S2 bigwrite, commit f31ef2e (slicefs code as of 98e3522; only scripts changed since), 2026-11-21
+# docker host (OrbStack): Kernel Version: 7.2.12-orbstack-00394-gbecdd6130068;Operating System: OrbStack;CPUs: 32;Total Memory: 15.68GiB;
+# scripts/docker-linux-test/run.sh bigwrite 1024 4096 with BW_QUIET_REF=1, release build, 3 runs one after the other, nothing else running
+# limits: store is on overlayfs inside the container (the #108 spike used btrfs); S2 numbers vary a lot between runs
+# references (post-#108): slowest write 440 / 686 ms at 1 / 4 GiB on 90a5443; 117 / 1542 ms on 3f3ff34
+## run 1
+    store_fs=overlayfs
+    pack syncs: 195, sum 4.4 s, max 375 ms
+    bigwrite 1024 MiB: VmHWM after cp 33, after random write 111, after cmp 111 MiB (cap 256 MiB); writes 65792, max write 124 ms, max fsync 308 ms; overlay switches 1; CAS bytes 2597769838; times cp/rw/cmp 15/32/8 s
+    store_fs=overlayfs
+    pack syncs: 230, sum 4.2 s, max 65 ms
+    bigwrite 4096 MiB: VmHWM after cp 72, after random write 154, after cmp 154 MiB (cap 256 MiB); writes 65792, max write 314 ms, max fsync 677 ms; overlay switches 1; CAS bytes 6069395158; times cp/rw/cmp 51/46/32 s
+RESULT bigwrite: PASS
+## run 2
+    store_fs=overlayfs
+    pack syncs: 192, sum 3.7 s, max 220 ms
+    bigwrite 1024 MiB: VmHWM after cp 34, after random write 107, after cmp 108 MiB (cap 256 MiB); writes 65792, max write 224 ms, max fsync 621 ms; overlay switches 1; CAS bytes 2591775935; times cp/rw/cmp 15/31/10 s
+    store_fs=overlayfs
+    pack syncs: 231, sum 16.7 s, max 1756 ms
+    bigwrite 4096 MiB: VmHWM after cp 78, after random write 170, after cmp 168 MiB (cap 256 MiB); writes 65792, max write 1353 ms, max fsync 1637 ms; overlay switches 1; CAS bytes 6066590504; times cp/rw/cmp 54/44/30 s
+RESULT bigwrite: PASS
+## run 3
+    store_fs=overlayfs
+    pack syncs: 195, sum 4.8 s, max 518 ms
+    bigwrite 1024 MiB: VmHWM after cp 41, after random write 112, after cmp 112 MiB (cap 256 MiB); writes 65792, max write 244 ms, max fsync 136 ms; overlay switches 1; CAS bytes 2597988604; times cp/rw/cmp 15/34/7 s
+    store_fs=overlayfs
+    pack syncs: 223, sum 5.1 s, max 235 ms
+    bigwrite 4096 MiB: VmHWM after cp 85, after random write 152, after cmp 151 MiB (cap 256 MiB); writes 65792, max write 343 ms, max fsync 220 ms; overlay switches 1; CAS bytes 6066425293; times cp/rw/cmp 60/54/35 s
+RESULT bigwrite: PASS
+S2 size_mib=1024 runs=3 max_write_ms min=124 median=224 max=244 max_fsync_ms min=136 median=308 max=621 vmhwm_max_mib=112
+S2 size_mib=4096 runs=3 max_write_ms min=314 median=343 max=1353 max_fsync_ms min=220 median=677 max=1637 vmhwm_max_mib=170

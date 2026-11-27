@@ -1,10 +1,11 @@
 //! End the FUSE-T session when the mount goes away (macOS).
 //!
 //! FUSE-T serves the mount from a `go-nfsv4` child process. With the NFS
-//! backend, that child exits when the volume is unmounted, the FUSE channel
-//! reaches EOF, and the session ends (destroy, final commit). With the SMB
-//! backend the child keeps running after the unmount: the session never ends
-//! and the daemon never exits.
+//! backend (now removed), that child exited when the volume was unmounted,
+//! the FUSE channel reached EOF, and the session ended (destroy, final
+//! commit). With the SMB backend (now removed) the child kept running after
+//! the unmount: the session never ended and the daemon never exited. The
+//! FSKit server may also not exit, so the watcher stays.
 //!
 //! This watcher polls the kernel mount table (`getfsstat`, which never
 //! touches the FUSE mount, so it cannot hang on it). When the mount it saw is
@@ -12,9 +13,18 @@
 //! SIGTERM). The channel then reaches EOF and the session ends normally.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::stop::StopSignal;
+
+/// How often the watcher reads the mount table while the volume is
+/// mounted. The end of the session waits for this poll after an unmount,
+/// so it is short; one `getfsstat` call costs a few microseconds.
+const POLL_MOUNTED: Duration = Duration::from_millis(50);
+
+/// How often the watcher reads the mount table before the volume appears.
+const POLL_NOT_YET: Duration = Duration::from_millis(100);
 
 /// True if a file system is mounted at exactly `path` (from the kernel mount
 /// table; the mount itself is not accessed).
@@ -57,12 +67,12 @@ fn go_nfsv4_children() -> Vec<i32> {
 
 /// Watch `mountpoint`; see the module docs. Prints `on_mounted` when the mount
 /// first appears. Ends when `shutdown` is set or after it ended the children
-/// once. Returns true if the mount appeared at all: a FUSE-T session can start
+/// once; a stop wakes it at once. Returns true if the mount appeared at all: a FUSE-T session can start
 /// and end without a volume (for example a backend that cannot mount).
 pub fn spawn_unmount_watcher(
     mountpoint: &Path,
     on_mounted: String,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<StopSignal>,
 ) -> std::thread::JoinHandle<bool> {
     // The kernel mount table holds the resolved path (/tmp -> /private/tmp).
     let path: PathBuf = std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
@@ -71,7 +81,7 @@ pub fn spawn_unmount_watcher(
         .spawn(move || {
             let mut seen = false;
             loop {
-                let stop = shutdown.load(Ordering::SeqCst);
+                let stop = shutdown.is_stopped();
                 let mounted = is_mounted(&path);
                 if mounted && !seen {
                     println!("{on_mounted}");
@@ -81,11 +91,11 @@ pub fn spawn_unmount_watcher(
                     return seen;
                 }
                 if mounted {
-                    std::thread::sleep(Duration::from_millis(500));
+                    shutdown.wait(POLL_MOUNTED);
                     continue;
                 }
                 if !seen {
-                    std::thread::sleep(Duration::from_millis(100));
+                    shutdown.wait(POLL_NOT_YET);
                     continue; // not mounted yet
                 }
                 for pid in go_nfsv4_children() {
@@ -109,5 +119,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = std::fs::canonicalize(dir.path()).unwrap();
         assert!(!is_mounted(&p));
+    }
+
+    /// The watcher of a mounted path ends at once on its stop, not after
+    /// its 500 ms poll.
+    #[test]
+    fn the_watcher_ends_at_once_on_stop() {
+        let stop = StopSignal::new();
+        let h = spawn_unmount_watcher(Path::new("/"), String::new(), Arc::clone(&stop));
+        std::thread::sleep(Duration::from_millis(50));
+        let t = std::time::Instant::now();
+        stop.stop();
+        assert!(h.join().unwrap(), "the root is mounted");
+        let took = t.elapsed();
+        assert!(took < Duration::from_millis(200), "the watcher took {took:?}");
     }
 }

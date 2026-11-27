@@ -7,15 +7,15 @@
 //!   - dir_size helper (via compute_statfs with a real store_path)
 //!   - set_auto_snapshot / auto_snapshot field
 //!   - test_write: EBADF on unknown fh
-//!   - test_write: fallback from Streaming to Buffered with prior content
-//!   - test_write: fallback from Streaming to Buffered with empty streaming state
+//!   - test_write: switch from Streaming to Overlay with prior content
+//!   - test_write: a first write past offset 0 (a pending write in the stream)
 //!   - test_release: already-closed fh (Ok)
 //!   - test_release: fsync-already-committed skip path (cas_committed + same digest)
-//!   - flush_buffer_for_fsync buffered mode
-//!   - flush_buffer_for_fsync empty file (byte_count==0) fast path
-//!   - flush_buffer_for_fsync closed fh no-op
-//!   - test_setattr_size: open Buffered handle to zero
-//!   - test_setattr_size: open Buffered handle to nonzero
+//!   - flush_handle on a stream whose gap a write filled
+//!   - flush_handle empty file (byte_count==0) fast path
+//!   - flush_handle closed fh no-op
+//!   - test_setattr_size: open stream handle (gap filled) to zero
+//!   - test_setattr_size: open stream handle (gap filled) to nonzero
 //!   - test_setattr_size: open Streaming handle to nonzero (materialize+resize)
 //!   - test_setattr_size: open Streaming handle to zero (fast path)
 //!   - test_setattr_mode on non-existent inode (error path)
@@ -45,7 +45,6 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore, MetaError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use tempfile::TempDir;
-#[allow(unused_imports)]
 use fuser::FileType;
 
 const S_IFREG: u32 = 0o100_000;
@@ -201,7 +200,7 @@ fn test_meta_error_to_fuse_errno_all_variants() {
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&MetaError::InvalidName("x".into()))), libc::EINVAL);
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&MetaError::Corrupted("x".into()))), libc::EIO);
     // MetaError::Io wraps std::io::Error
-    let io_err = MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test io error"));
+    let io_err = MetaError::Io(std::io::Error::other("test io error"));
     assert_eq!(errno_to_i32(meta_error_to_fuse_errno(&io_err)), libc::EIO);
 }
 
@@ -215,7 +214,7 @@ fn test_meta_error_to_errno_all_variants() {
     assert_eq!(meta_error_to_errno(&MetaError::InvalidName("x".into())), libc::EINVAL);
     assert_eq!(meta_error_to_errno(&MetaError::Corrupted("x".into())), libc::EIO);
     // MetaError::Io wraps std::io::Error
-    let io_err = MetaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test io error"));
+    let io_err = MetaError::Io(std::io::Error::other("test io error"));
     assert_eq!(meta_error_to_errno(&io_err), libc::EIO);
 }
 
@@ -241,7 +240,7 @@ fn test_write_invalid_fh_returns_ebadf() {
     assert_eq!(result.unwrap_err(), libc::EBADF, "unknown fh must return EBADF");
 }
 
-// ── test_write: streaming fallback to buffered ────────────────────────────────
+// ── test_write: streaming switch to an overlay ────────────────────────────────
 
 #[test]
 fn test_write_nonsequential_after_write_loads_from_streaming_state() {
@@ -250,7 +249,7 @@ fn test_write_nonsequential_after_write_loads_from_streaming_state() {
         .unwrap();
     // Write 5 bytes at offset 0 (streaming)
     fs.test_write(fh, 0, b"hello").unwrap();
-    // Write at offset 3 (non-sequential — triggers fallback from streaming to buffered)
+    // Write at offset 3 (non-sequential — triggers the switch from streaming to an overlay)
     // The existing streaming content must be materialized first
     fs.test_write(fh, 3, b"XX").unwrap();
 
@@ -259,7 +258,7 @@ fn test_write_nonsequential_after_write_loads_from_streaming_state() {
     // "hello" with positions 3-4 overwritten: "helXX" → wait, offset 3 = 'l','o' → "helXXo"? No:
     // "hello" = [h,e,l,l,o] at [0,1,2,3,4]
     // pwrite at offset 3 with "XX" → [h,e,l,X,X]
-    assert_eq!(content, b"helXX", "fallback to buffered must produce correct merged content");
+    assert_eq!(content, b"helXX", "the switch to an overlay must give the correct merged content");
 }
 
 #[test]
@@ -282,10 +281,10 @@ fn test_write_buffered_mode_extends_buffer() {
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "buffered.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
-    // Trigger fallback to buffered mode first
-    fs.test_write(fh, 5, b"world").unwrap(); // non-sequential → buffered
-    // Now write at a later offset (buffered mode pwrite)
-    fs.test_write(fh, 0, b"hello").unwrap(); // write into existing buffered space
+    // A write ahead of the stream first
+    fs.test_write(fh, 5, b"world").unwrap(); // non-sequential → pending in the stream
+    // Now write at offset 0 (fills the gap; the file stays a stream)
+    fs.test_write(fh, 0, b"hello").unwrap(); // the pending write then lines up
 
     fs.test_release(ino, fh).unwrap();
     let content = read_content(&fs, ino);
@@ -299,8 +298,8 @@ fn test_write_buffered_beyond_end_extends() {
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "buf_extend.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
-    // Trigger buffered mode
-    fs.test_write(fh, 3, b"abc").unwrap(); // buffered with 6 bytes total: [0,0,0,a,b,c]
+    // A write ahead of the stream (pending)
+    fs.test_write(fh, 3, b"abc").unwrap(); // 6 bytes total: [0,0,0,a,b,c]
     // Extend beyond current buffer end
     fs.test_write(fh, 8, b"xyz").unwrap(); // → [0,0,0,a,b,c,0,0,x,y,z]
 
@@ -319,7 +318,7 @@ fn test_release_already_closed_returns_ok() {
     let (ino, fh) = fs.test_create(1, "once.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
     fs.test_release(ino, fh).unwrap();
-    // Second release on same fh should be Ok (already removed from open_files)
+    // Second release on same fh should be Ok (already removed from the handle table)
     let result = fs.test_release(ino, fh);
     assert!(result.is_ok(), "second release on same fh must return Ok");
 }
@@ -345,7 +344,7 @@ fn test_release_after_fsync_skips_redundant_commit() {
         "manifest should not change when release finds same committed digest");
 }
 
-// ── test_fsync: buffered mode flush ───────────────────────────────────────────
+// ── test_fsync: flush of a stream whose gap a write filled ───────────────────
 
 #[test]
 fn test_fsync_buffered_mode_flushes_to_cas() {
@@ -353,15 +352,15 @@ fn test_fsync_buffered_mode_flushes_to_cas() {
     let (ino, fh) = fs.test_create(1, "buf_fsync.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
 
-    // Trigger buffered mode
+    // A pending write, then the write that fills the gap (still a stream)
     fs.test_write(fh, 5, b"world").unwrap();
     fs.test_write(fh, 0, b"hello").unwrap();
 
-    // fsync should flush buffered mode to CAS
+    // fsync should flush the stream to CAS
     fs.test_fsync(ino, fh).unwrap();
 
     let manifest = fs.meta().get_manifest(ino).unwrap();
-    assert!(!manifest.is_empty(), "manifest must be set after fsync in buffered mode");
+    assert!(!manifest.is_empty(), "manifest must be set after fsync in overlay mode");
 
     // Verify content is correct
     let content = fs.read_content(&manifest[0]).unwrap();
@@ -415,7 +414,7 @@ fn test_fsync_closed_fh_is_noop() {
     assert!(result.is_ok(), "fsync on closed fh must return Ok (no-op)");
 }
 
-// ── test_setattr_size: open buffered handle ───────────────────────────────────
+// ── test_setattr_size: open stream handle (gap filled) ───────────────────────
 
 #[test]
 fn test_setattr_size_zero_on_open_buffered_handle() {
@@ -423,11 +422,11 @@ fn test_setattr_size_zero_on_open_buffered_handle() {
     let (ino, fh) = fs.test_create(1, "buf_zero.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
 
-    // Trigger buffered mode and write some data
+    // A pending write, then the write that fills the gap (still a stream)
     fs.test_write(fh, 5, b"world").unwrap();
     fs.test_write(fh, 0, b"hello").unwrap();
 
-    // Truncate to zero while in buffered mode
+    // Truncate to zero while the handle is open
     fs.test_setattr_size(ino, Some(fh), 0).unwrap();
 
     // Release and verify content is empty
@@ -442,7 +441,7 @@ fn test_setattr_size_nonzero_on_open_buffered_handle() {
     let (ino, fh) = fs.test_create(1, "buf_resize.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
 
-    // Trigger buffered mode with 10 bytes
+    // A pending write, then the write that fills the gap: 10 bytes
     fs.test_write(fh, 5, b"world").unwrap();
     fs.test_write(fh, 0, b"hello").unwrap();
 
@@ -460,8 +459,8 @@ fn test_setattr_size_extend_on_open_buffered_handle() {
     let (ino, fh) = fs.test_create(1, "buf_extend2.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
 
-    // Trigger buffered mode with 5 bytes: [h,e,l,l,o]
-    fs.test_write(fh, 5, b"hello").unwrap(); // nonseq → buffered
+    // A pending write of 5 bytes: [h,e,l,l,o]
+    fs.test_write(fh, 5, b"hello").unwrap(); // nonseq → pending in the stream
     fs.test_write(fh, 0, b"START").unwrap(); // [S,T,A,R,T,h,e,l,l,o]
 
     // Extend to 15 (zero-fill the tail)
@@ -794,15 +793,15 @@ fn test_read_from_uncommitted_streaming_write() {
 
 #[test]
 fn test_read_from_uncommitted_buffered_write() {
-    // test_read should see in-flight (uncommitted) buffered writes
+    // test_read should see in-flight (uncommitted) writes
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "uncommitted_buf.txt", S_IFREG | 0o644, 0o022, 0, 0)
         .unwrap();
-    // Trigger buffered mode and write
+    // A pending write, then the write that fills the gap
     fs.test_write(fh, 5, b"world").unwrap();
     fs.test_write(fh, 0, b"hello").unwrap();
 
-    // Read should see the uncommitted buffered content
+    // Read should see the uncommitted content
     let result = fs.test_read(ino, 0, 20).unwrap();
     assert_eq!(&result[..5], b"hello", "first 5 bytes must be 'hello'");
     assert_eq!(&result[5..], b"world", "next 5 bytes must be 'world'");
@@ -1075,14 +1074,14 @@ fn test_create_duplicate_name_returns_error() {
 
 #[test]
 fn test_release_never_opened_fh_returns_ok() {
-    // test_release on a fh that was never in open_files returns Ok (already closed path)
+    // test_release on a fh that was never in the handle table returns Ok (already closed path)
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "protected.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
     fs.test_write(fh, 0, b"original content").unwrap();
     fs.test_release(ino, fh).unwrap();
 
-    // fh 99999 was never inserted into open_files — second release is a no-op
+    // fh 99999 was never inserted into the handle table — second release is a no-op
     let result = fs.test_release(ino, 99999);
     assert!(result.is_ok(), "release of never-opened fh must return Ok");
 
@@ -1140,8 +1139,8 @@ fn test_statfs_with_store_path_and_written_data() {
 
 #[test]
 fn test_write_fallback_with_prior_committed_root_decrements_refcount() {
-    // Streaming write → fsync (commits root) → non-sequential write (fallback to buffered)
-    // This exercises lines 344-345: decrement_refcount on the old_root in streaming fallback
+    // Streaming write → fsync (commits root) → non-sequential write (switch to an overlay)
+    // This exercises: decrement_refcount on the old_root at the switch to an overlay
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "fallback_root.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
@@ -1175,7 +1174,7 @@ fn test_write_fallback_with_prior_committed_root_decrements_refcount() {
 #[test]
 fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
     // File has committed content → open fresh handle (byte_count=0) → non-sequential write
-    // This exercises lines 322-324: loading from committed manifest when streaming state is empty
+    // This exercises: loading from committed manifest when streaming state is empty
     let (fs, _dir) = fresh_fs();
 
     // Create file with committed content
@@ -1205,7 +1204,7 @@ fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
     fs.test_fsync(ino2, fh2).unwrap(); // Now byte_count > 0 (8) and committed
 
     // Write at non-sequential offset → triggers fallback with existing streaming state
-    // (not the empty streaming path, but still covers lines 322-324 via the else branch)
+    // (not the empty streaming path, but still covers the load from the committed manifest via the else branch)
     fs.test_write(fh2, 0, b"override").unwrap(); // offset 0 < next_expected=8 → fallback
     fs.test_release(ino2, fh2).unwrap();
 
@@ -1217,13 +1216,13 @@ fn test_write_fallback_loads_from_manifest_when_streaming_empty() {
 
 #[test]
 fn test_setattr_size_zero_buffered_with_prior_committed_root() {
-    // Exercises line 660: decrement_refcount in Buffered zero-truncate
+    // Exercises: decrement_refcount in an overlay zero-truncate
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "buf_committed_zero.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
 
-    // Trigger buffered mode and fsync to set last_committed_root
-    fs.test_write(fh, 5, b"world").unwrap(); // nonseq → buffered
+    // A pending write, the write that fills the gap, and fsync to set last_committed_root
+    fs.test_write(fh, 5, b"world").unwrap(); // nonseq → pending in the stream
     fs.test_write(fh, 0, b"hello").unwrap();
     fs.test_fsync(ino, fh).unwrap(); // sets last_committed_root
 
@@ -1248,7 +1247,7 @@ fn test_setattr_size_zero_buffered_with_prior_committed_root() {
 
 #[test]
 fn test_setattr_size_streaming_resize_with_prior_committed_root() {
-    // Exercises line 729: decrement_refcount in Streaming non-zero resize with prior root
+    // Exercises: decrement_refcount in Streaming non-zero resize with prior root
     let (fs, _dir) = fresh_fs();
     let (ino, fh) = fs.test_create(1, "strm_committed_resize.txt", S_IFREG | 0o644, 0, 0, 0)
         .unwrap();
@@ -1305,7 +1304,7 @@ fn test_dir_size_exercised_via_compute_statfs() {
     assert!(files >= 1, "must have at least root inode");
     assert!(bsize >= 512, "bsize must be reasonable");
     // On normal filesystems blocks > 0
-    // This also exercises the statvfs path in compute_statfs (lines 918-925)
+    // This also exercises the statvfs path in compute_statfs
     let _ = blocks; // may be 0 on some test envs, that's ok
 }
 
@@ -1313,7 +1312,7 @@ fn test_dir_size_exercised_via_compute_statfs() {
 
 #[test]
 fn test_statfs_no_store_path_returns_zero_blocks() {
-    // exercises the "None" branch in compute_statfs (fallback line 931)
+    // exercises the "None" branch in compute_statfs (the fallback)
     let (fs, _dir) = fresh_fs(); // store_path = None
     let (blocks, bfree, bavail, _files, _ffree, _bsize) = fs.test_statfs_values();
     assert_eq!(blocks, 0, "no store_path should give 0 blocks");
@@ -1493,7 +1492,7 @@ fn test_getattr_reports_size_of_open_write_handle() {
     let (ino, fh) = fs.test_create(1, "w", 0o644, 0, 0, 0).unwrap();
     fs.test_write(fh, 0, b"x").unwrap();
     assert_eq!(fs.test_getattr(ino).unwrap().size, 1, "fstat during a write must see the new size");
-    fs.test_write(fh, 5, b"yz").unwrap(); // out of order -> buffered
+    fs.test_write(fh, 5, b"yz").unwrap(); // out of order -> pending in the stream
     assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
     fs.test_release(ino, fh).unwrap();
     assert_eq!(fs.test_getattr(ino).unwrap().size, 7);
@@ -1659,9 +1658,9 @@ fn test_repeated_fsync_without_writes_keeps_content() {
     let (ino, fh) = fs.test_create(1, "r", 0o644, 0, 0, 0).unwrap();
     fs.test_write(fh, 4, b"5678").unwrap();
     fs.test_write(fh, 0, b"1234").unwrap();
-    fs.test_write(fh, 2, b"xx").unwrap(); // overlap -> Buffered
-    // fsync of a Buffered handle does not re-hash the file (#3); reads see
-    // the buffer, and release writes it, including writes after the fsync.
+    fs.test_write(fh, 2, b"xx").unwrap(); // overlap -> Overlay
+    // fsync of an overlay handle does not re-hash the file (#3); reads see
+    // the extents, and release writes them, including writes after the fsync.
     fs.test_fsync(ino, fh).unwrap();
     fs.test_fsync(ino, fh).unwrap();
     assert_eq!(fs.test_read(ino, 0, 100).unwrap(), b"12xx5678");

@@ -1,15 +1,15 @@
-/// End-to-end crash recovery integration tests.
-///
-/// These tests prove the 5 phase success criteria for Phase 5 (Crash Safety and GC):
-///
-/// SC1: Crash (kill -9) during write — no data corruption, filesystem is consistent on remount.
-/// SC2: fsync guarantees durability — data written before fsync is present after crash + remount.
-/// SC3: Orphaned blocks from interrupted writes are reclaimed by GC.
-/// SC4: Multiple fsync cycles — all synced data survives crash.
-/// SC5: WAL replay on dirty mount — state matches pre-crash state.
-///
-/// Tests use test_* helpers to drive the filesystem without FUSE mounting,
-/// making them portable to macOS where a FUSE mount is unavailable.
+//! End-to-end crash recovery integration tests.
+//!
+//! These tests prove the 5 phase success criteria for Phase 5 (Crash Safety and GC):
+//!
+//! SC1: Crash (kill -9) during write — no data corruption, filesystem is consistent on remount.
+//! SC2: fsync guarantees durability — data written before fsync is present after crash + remount.
+//! SC3: Orphaned blocks from interrupted writes are reclaimed by GC.
+//! SC4: Multiple fsync cycles — all synced data survives crash.
+//! SC5: WAL replay on dirty mount — state matches pre-crash state.
+//!
+//! Tests use test_* helpers to drive the filesystem without FUSE mounting,
+//! making them portable to macOS where a FUSE mount is unavailable.
 
 use metadata::gc::GarbageCollector;
 use metadata::segment::load_store_from_segments;
@@ -26,6 +26,7 @@ use tempfile::TempDir;
 
 /// Create a `SliceFsFilesystem` backed by a fresh PerOpWal store in `store_dir`.
 fn make_fs_per_op(store_dir: &TempDir) -> SliceFsFilesystem {
+    slicefs_cli::header::create(store_dir.path()).unwrap();
     std::fs::create_dir_all(store_dir.path().join("segments")).unwrap();
     let wal = create_wal(WalConfig::PerOp, store_dir.path(), 1).unwrap();
     let io = Arc::new(Mutex::new(StoreIo::open(store_dir.path()).unwrap()));

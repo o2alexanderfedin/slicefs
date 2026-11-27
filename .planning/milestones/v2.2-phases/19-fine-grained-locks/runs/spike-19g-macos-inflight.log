@@ -1,0 +1,1118 @@
+=== run 1
+SPIKE slowio what=wal_drain us=19834 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19886 span[wal_drain_write]=19871x1
+SPIKE slowio what=wal_drain us=20063 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20110 span[wal_drain_write]=20094x1
+SPIKE slowio what=wal_drain us=20022 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20069 span[wal_drain_write]=20052x1
+SPIKE slowio what=wal_drain us=19798 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19845 span[wal_drain_write]=19828x1
+SPIKE slowio what=wal_drain us=19709 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19756 span[wal_drain_write]=19740x1
+SPIKE slowio what=wal_drain us=20710 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20755 span[wal_drain_write]=20739x1
+SPIKE slowio what=wal_drain us=20042 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20088 span[wal_drain_write]=20071x1
+SPIKE slowio what=wal_drain us=20555 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20598 span[wal_drain_write]=20583x1
+SPIKE slowio what=wal_drain us=20867 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20912 span[wal_drain_write]=20897x1
+SPIKE slowio what=wal_drain us=20547 inflight_start=[wal] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20590 span[wal_drain_write]=20576x1
+SPIKE long site=store hold_us=21054 span[join_seal]=0x1 span[sync2_active]=21046x1
+SPIKE slowio what=wal_drain us=57010 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=57052 span[wal_drain_write]=57035x1
+SPIKE slowio what=wal_drain us=21082 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21141 span[wal_drain_write]=21113x1
+SPIKE slowio what=wal_drain us=35836 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=35882 span[wal_drain_write]=35866x1
+SPIKE long site=store hold_us=20923 span[join_seal]=0x1 span[sync2_active]=20915x1
+SPIKE slowio what=wal_drain us=21127 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21178 span[wal_drain_write]=21154x1
+SPIKE slowio what=wal_drain us=20510 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20565 span[wal_drain_write]=20536x1
+SPIKE slowio what=wal_drain us=47055 inflight_start=[wal_root] inflight_end=[wal_root]
+SPIKE long site=wal_writer hold_us=47110 span[wal_drain_write]=47091x1
+SPIKE slowio what=wal_drain us=36476 inflight_start=[wal_root,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=36519 span[wal_drain_write]=36504x1
+SPIKE slowio what=wal_drain us=20965 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21035 span[wal_drain_write]=21007x1
+SPIKE slowio what=wal_drain us=20343 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20405 span[wal_drain_write]=20371x1
+SPIKE slowio what=wal_drain us=21564 inflight_start=[] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21625 span[wal_drain_write]=21594x1
+SPIKE slowio what=wal_drain us=36182 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=36230 span[wal_drain_write]=36215x1
+SPIKE slowio what=wal_drain us=20904 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20962 span[wal_drain_write]=20935x1
+SPIKE slowio what=wal_drain us=20202 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20243 span[wal_drain_write]=20225x1
+SPIKE slowio what=wal_drain us=18471 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=18517 span[wal_drain_write]=18500x1
+SPIKE slowio what=wal_drain us=20912 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20960 span[wal_drain_write]=20944x1
+SPIKE slowio what=wal_drain us=19242 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19286 span[wal_drain_write]=19271x1
+SPIKE slowio what=wal_drain us=36685 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=36738 span[wal_drain_write]=36723x1
+SPIKE slowio what=wal_drain us=20113 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20163 span[wal_drain_write]=20145x1
+SPIKE slowio what=wal_drain us=21810 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21862 span[wal_drain_write]=21844x1
+SPIKE slowio what=wal_drain us=20341 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20389 span[wal_drain_write]=20372x1
+SPIKE slowio what=wal_drain us=19661 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19711 span[wal_drain_write]=19693x1
+SPIKE slowio what=wal_drain us=23078 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23129 span[wal_drain_write]=23112x1
+SPIKE slowio what=wal_drain us=20082 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20129 span[wal_drain_write]=20113x1
+SPIKE slowio what=wal_drain us=21859 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21908 span[wal_drain_write]=21888x1
+SPIKE slowio what=wal_drain us=20959 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21008 span[wal_drain_write]=20985x1
+SPIKE slowio what=wal_drain us=20571 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20639 span[wal_drain_write]=20597x1
+SPIKE slowio what=wal_drain us=19942 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19986 span[wal_drain_write]=19966x1
+SPIKE slowio what=wal_drain us=19789 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19839 span[wal_drain_write]=19821x1
+SPIKE slowio what=wal_drain us=19810 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19875 span[wal_drain_write]=19857x1
+SPIKE slowio what=wal_drain us=23136 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23186 span[wal_drain_write]=23167x1
+SPIKE slowio what=wal_drain us=22364 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22411 span[wal_drain_write]=22395x1
+SPIKE slowio what=wal_drain us=19713 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19767 span[wal_drain_write]=19745x1
+SPIKE slowio what=wal_drain us=19975 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20024 span[wal_drain_write]=20006x1
+SPIKE slowio what=wal_drain us=20735 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20788 span[wal_drain_write]=20768x1
+SPIKE slowio what=wal_drain us=20135 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20187 span[wal_drain_write]=20170x1
+SPIKE slowio what=wal_drain us=20485 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20541 span[wal_drain_write]=20515x1
+SPIKE slowio what=wal_drain us=19047 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19097 span[wal_drain_write]=19079x1
+SPIKE slowio what=wal_drain us=26364 inflight_start=[wal_root] inflight_end=[wal_root]
+SPIKE long site=wal_writer hold_us=26415 span[wal_drain_write]=26397x1
+SPIKE slowio what=wal_drain us=19978 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20034 span[wal_drain_write]=20009x1
+SPIKE slowio what=wal_drain us=21325 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=21389 span[wal_drain_write]=21368x1
+SPIKE slowio what=wal_drain us=20544 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20613 span[wal_drain_write]=20583x1
+SPIKE slowio what=wal_drain us=20848 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20902 span[wal_drain_write]=20881x1
+SPIKE slowio what=wal_drain us=20696 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20750 span[wal_drain_write]=20726x1
+SPIKE slowio what=wal_drain us=20374 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20431 span[wal_drain_write]=20413x1
+SPIKE slowio what=wal_drain us=19732 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19778 span[wal_drain_write]=19760x1
+SPIKE slowio what=wal_drain us=19334 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19390 span[wal_drain_write]=19367x1
+SPIKE slowio what=wal_drain us=22710 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22758 span[wal_drain_write]=22742x1
+SPIKE slowio what=wal_drain us=22865 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22913 span[wal_drain_write]=22896x1
+SPIKE slowio what=wal_drain us=20575 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20622 span[wal_drain_write]=20605x1
+SPIKE slowio what=wal_drain us=20353 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20398 span[wal_drain_write]=20383x1
+SPIKE slowio what=wal_drain us=20061 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20109 span[wal_drain_write]=20092x1
+SPIKE slowio what=wal_drain us=21161 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21213 span[wal_drain_write]=21192x1
+SPIKE slowio what=wal_drain us=21124 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21179 span[wal_drain_write]=21157x1
+SPIKE slowio what=wal_drain us=20048 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20107 span[wal_drain_write]=20085x1
+SPIKE slowio what=wal_drain us=20381 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20436 span[wal_drain_write]=20407x1
+SPIKE slowio what=wal_drain us=19915 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19957 span[wal_drain_write]=19938x1
+SPIKE slowio what=wal_drain us=19996 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20043 span[wal_drain_write]=20027x1
+SPIKE slowio what=wal_drain us=21127 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21176 span[wal_drain_write]=21159x1
+SPIKE long site=file_cell hold_us=5930
+SPIKE slowio what=wal_drain us=20784 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20834 span[wal_drain_write]=20818x1
+SPIKE slowio what=wal_drain us=20282 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20352 span[wal_drain_write]=20324x1
+SPIKE slowio what=wal_drain us=20530 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20580 span[wal_drain_write]=20560x1
+SPIKE slowio what=wal_drain us=20303 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20351 span[wal_drain_write]=20333x1
+SPIKE slowio what=wal_drain us=23043 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23095 span[wal_drain_write]=23073x1
+SPIKE slowio what=wal_drain us=19686 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19735 span[wal_drain_write]=19717x1
+SPIKE slowio what=wal_drain us=20491 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20535 span[wal_drain_write]=20520x1
+SPIKE slowio what=wal_drain us=20284 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20343 span[wal_drain_write]=20327x1
+SPIKE slowio what=pack_pwrite us=20228 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=store hold_us=20284 span[raw_pwrite]=20264x1 span[append_pwrite]=20271x1
+SPIKE slowio what=pack_pwrite us=20551 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20605 span[raw_pwrite]=20582x1 span[append_pwrite]=20590x1
+SPIKE slowio what=pack_pwrite us=20608 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20679 span[raw_pwrite]=20655x1 span[append_pwrite]=20664x1
+SPIKE slowio what=pack_pwrite us=19986 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20038 span[raw_pwrite]=20017x1 span[append_pwrite]=20025x1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3560 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=1.7 hold_p99_us=31.6 hold_max_us=21069.8
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=528.4 hold_max_us=528.4
+lock site=wal n=2184 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=1.8 hold_max_us=2.5
+lock site=wal_writer n=1156 wait_p50_us=0.0 wait_p99_us=36339.7 wait_max_us=76939.3 hold_p50_us=77.5 hold_p99_us=22773.8 hold_max_us=57081.9
+lock site=wal_queue n=2125 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.2 hold_p50_us=0.6 hold_p99_us=3.5 hold_max_us=34.1
+lock site=readers n=1192 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.8 hold_p99_us=1.9 hold_max_us=6.5
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=11.1 hold_max_us=15.7
+lock site=inode_live n=251 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.8 hold_max_us=32.9
+lock site=handles n=983 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=5.8 hold_p50_us=1.0 hold_p99_us=3.4 hold_max_us=19.1
+lock site=file_cell n=2599 wait_p50_us=0.0 wait_p99_us=1207.3 wait_max_us=3717.1 hold_p50_us=8.4 hold_p99_us=725.0 hold_max_us=5931.0
+lock site=cell_map n=3593 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=32.4 hold_p50_us=0.7 hold_p99_us=4.3 hold_max_us=19.6
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=28.6 wait_max_us=28.6 hold_p50_us=13.3 hold_p99_us=351.7 hold_max_us=351.7
+SPIKE slowio what=pack_pwrite us=20167 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20223 span[raw_pwrite]=20200x1 span[append_pwrite]=20205x1
+SPIKE slowio what=wal_drain us=20422 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20487 span[wal_drain_write]=20469x1
+SPIKE slowio what=pack_pwrite us=20043 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20189 span[raw_pwrite]=20159x1 span[append_pwrite]=20177x1
+SPIKE slowio what=wal_drain us=22035 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=21677 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22089 span[wal_drain_write]=22070x1
+SPIKE long site=store hold_us=21743 span[raw_pwrite]=21724x1 span[append_pwrite]=21728x1
+SPIKE slowio what=wal_drain us=20553 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19900 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20599 span[wal_drain_write]=20583x1
+SPIKE long site=store hold_us=20016 span[raw_pwrite]=19966x1 span[append_pwrite]=19973x1
+SPIKE slowio what=wal_drain us=20477 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20338 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20523 span[wal_drain_write]=20506x1
+SPIKE long site=store hold_us=20386 span[raw_pwrite]=20365x1 span[append_pwrite]=20369x1
+SPIKE slowio what=wal_drain us=20537 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20217 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20585 span[wal_drain_write]=20566x1
+SPIKE long site=store hold_us=20266 span[raw_pwrite]=20246x1 span[append_pwrite]=20251x1
+SPIKE slowio what=pack_pwrite us=20066 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20130 span[raw_pwrite]=20103x1 span[append_pwrite]=20107x1
+SPIKE slowio what=wal_drain us=20103 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19869 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20191 span[wal_drain_write]=20160x1
+SPIKE long site=store hold_us=19991 span[raw_pwrite]=19951x1 span[append_pwrite]=19977x1
+SPIKE slowio what=pack_pwrite us=20565 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20626 span[raw_pwrite]=20601x1 span[append_pwrite]=20605x1
+SPIKE slowio what=pack_pwrite us=20816 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20850 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20884 span[raw_pwrite]=20850x1 span[append_pwrite]=20854x1
+SPIKE long site=wal_writer hold_us=20887 span[wal_drain_write]=20872x1
+SPIKE long site=stripe hold_us=21041 wait[store]=20865
+SPIKE long site=stripe hold_us=21059 wait[store]=20865
+SPIKE slowio what=pack_pwrite us=20489 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20482 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20521 span[wal_drain_write]=20506x1
+SPIKE long site=store hold_us=20549 span[raw_pwrite]=20527x1 span[append_pwrite]=20532x1
+SPIKE slowio what=pack_pwrite us=20318 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE long site=store hold_us=20460 span[raw_pwrite]=20364x1 span[append_pwrite]=20443x1
+SPIKE long site=store hold_us=20974 span[join_seal]=0x1 span[sync2_active]=20960x1
+SPIKE slowio what=pack_pwrite us=20508 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20538 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20563 span[raw_pwrite]=20537x1 span[append_pwrite]=20543x1
+SPIKE long site=wal_writer hold_us=20570 span[wal_drain_write]=20559x1
+SPIKE slowio what=pack_pwrite us=36816 inflight_start=[pack_or_dir(same)] inflight_end=[pack_or_dir(same),wal,wal]
+SPIKE long site=store hold_us=36873 span[raw_pwrite]=36851x1 span[append_pwrite]=36856x1
+SPIKE long site=stripe hold_us=36960 wait[store]=36807
+SPIKE long site=stripe hold_us=36973 wait[store]=36807
+SPIKE slowio what=wal_drain us=20780 inflight_start=[pack_or_dir,wal,wal] inflight_end=[wal,wal]
+SPIKE slowio what=pack_pwrite us=20852 inflight_start=[pack_or_dir(same),wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=20840 span[wal_drain_write]=20831x1
+SPIKE long site=store hold_us=20975 span[raw_pwrite]=20914x1 span[append_pwrite]=20961x1
+SPIKE long site=store hold_us=41666 span[join_seal]=0x1 span[sync2_active]=41652x1
+SPIKE slowio what=wal_drain us=21316 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21347 span[wal_drain_write]=21338x1
+SPIKE slowio what=pack_pwrite us=20048 inflight_start=[wal,wal_root] inflight_end=[wal_root]
+SPIKE long site=store hold_us=20109 span[raw_pwrite]=20084x1 span[append_pwrite]=20089x1
+SPIKE slowio what=wal_drain us=20679 inflight_start=[wal,wal_root] inflight_end=[wal_root]
+SPIKE long site=wal_writer hold_us=20714 span[wal_drain_write]=20702x1
+SPIKE slowio what=wal_drain us=20423 inflight_start=[wal_root] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20208 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20476 span[wal_drain_write]=20458x1
+SPIKE long site=store hold_us=20270 span[raw_pwrite]=20242x1 span[append_pwrite]=20248x1
+SPIKE slowio what=wal_drain us=20181 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20079 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20227 span[wal_drain_write]=20206x1
+SPIKE long site=store hold_us=20135 span[raw_pwrite]=20115x1 span[append_pwrite]=20123x1
+SPIKE slowio what=wal_drain us=20234 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20243 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20286 span[wal_drain_write]=20266x1
+SPIKE long site=store hold_us=20311 span[raw_pwrite]=20281x1 span[append_pwrite]=20288x1
+SPIKE slowio what=pack_pwrite us=20265 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20512 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20333 span[raw_pwrite]=20303x1 span[append_pwrite]=20309x1
+SPIKE long site=wal_writer hold_us=20588 span[wal_drain_write]=20569x1
+SPIKE slowio what=wal_drain us=20122 inflight_start=[wal,wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20170 span[wal_drain_write]=20153x1
+SPIKE slowio what=pack_pwrite us=20098 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20134 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20170 span[raw_pwrite]=20139x1 span[append_pwrite]=20144x1
+SPIKE long site=wal_writer hold_us=20207 span[wal_drain_write]=20191x1
+SPIKE slowio what=wal_drain us=20623 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20671 span[wal_drain_write]=20652x1
+SPIKE slowio what=pack_pwrite us=21219 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=21143 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=21279 span[raw_pwrite]=21260x1 span[append_pwrite]=21266x1
+SPIKE long site=wal_writer hold_us=21193 span[wal_drain_write]=21179x1
+SPIKE slowio what=wal_drain us=20355 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20421 span[wal_drain_write]=20404x1
+SPIKE slowio what=pack_pwrite us=20160 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20224 span[raw_pwrite]=20196x1 span[append_pwrite]=20202x1
+SPIKE slowio what=pack_pwrite us=20035 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20109 span[raw_pwrite]=20067x1 span[append_pwrite]=20073x1
+SPIKE slowio what=wal_drain us=19966 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20128 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20017 span[wal_drain_write]=20000x1
+SPIKE long site=store hold_us=20191 span[raw_pwrite]=20167x1 span[append_pwrite]=20173x1
+SPIKE slowio what=pack_pwrite us=20050 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20116 span[raw_pwrite]=20087x1 span[append_pwrite]=20094x1
+SPIKE slowio what=wal_drain us=20301 inflight_start=[wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=20230 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20363 span[wal_drain_write]=20343x1
+SPIKE long site=store hold_us=20278 span[raw_pwrite]=20261x1 span[append_pwrite]=20265x1
+SPIKE slowio what=pack_pwrite us=20111 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE slowio what=wal_drain us=20109 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20163 span[wal_drain_write]=20152x1
+SPIKE long site=store hold_us=20255 span[raw_pwrite]=20150x1 span[append_pwrite]=20239x1
+SPIKE long site=store hold_us=20892 span[join_seal]=0x1 span[sync2_active]=20871x1
+SPIKE slowio what=pack_pwrite us=20566 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20620 span[raw_pwrite]=20592x1 span[append_pwrite]=20598x1
+SPIKE slowio what=pack_pwrite us=20305 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20359 span[raw_pwrite]=20334x1 span[append_pwrite]=20338x1
+SPIKE slowio what=pack_pwrite us=20445 inflight_start=[wal,wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20451 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=store hold_us=20503 span[raw_pwrite]=20487x1 span[append_pwrite]=20490x1
+SPIKE long site=wal_writer hold_us=20537 span[wal_drain_write]=20522x1
+SPIKE slowio what=pack_pwrite us=23043 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=23104 span[raw_pwrite]=23077x1 span[append_pwrite]=23083x1
+SPIKE slowio what=pack_pwrite us=21922 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=store hold_us=22018 span[raw_pwrite]=21954x1 span[append_pwrite]=21999x1
+SPIKE long site=store hold_us=40898 span[join_seal]=0x1 span[sync2_active]=40881x1
+SPIKE slowio what=wal_drain us=20414 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20461 span[wal_drain_write]=20443x1
+SPIKE long site=store hold_us=20988 span[join_seal]=1x1 span[sync2_active]=20963x1
+SPIKE slowio what=wal_drain us=20473 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20548 span[wal_drain_write]=20533x1
+SPIKE long site=stripe hold_us=21036 wait[store]=20823
+SPIKE long site=stripe hold_us=21049 wait[store]=20823
+SPIKE slowio what=wal_drain us=20122 inflight_start=[wal_root] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20072 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20172 span[wal_drain_write]=20159x1
+SPIKE long site=store hold_us=20167 span[raw_pwrite]=20127x1 span[append_pwrite]=20146x1
+SPIKE slowio what=pack_pwrite us=20337 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20552 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20614 span[wal_drain_write]=20597x1
+SPIKE long site=store hold_us=20403 span[raw_pwrite]=20373x1 span[append_pwrite]=20380x1
+SPIKE slowio what=wal_drain us=20241 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20039 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20291 span[wal_drain_write]=20268x1
+SPIKE long site=store hold_us=20100 span[raw_pwrite]=20070x1 span[append_pwrite]=20076x1
+SPIKE slowio what=pack_pwrite us=20646 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20578 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20710 span[raw_pwrite]=20682x1 span[append_pwrite]=20688x1
+SPIKE long site=wal_writer hold_us=20642 span[wal_drain_write]=20630x1
+SPIKE long site=stripe hold_us=20951 wait[store]=20793
+SPIKE long site=stripe hold_us=20970 wait[store]=20793
+SPIKE slowio what=wal_drain us=20668 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20718 span[wal_drain_write]=20699x1
+SPIKE slowio what=wal_drain us=21359 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=21282 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21416 span[wal_drain_write]=21400x1
+SPIKE long site=store hold_us=21369 span[raw_pwrite]=21351x1 span[append_pwrite]=21356x1
+SPIKE slowio what=pack_pwrite us=19612 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20050 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19666 span[raw_pwrite]=19647x1 span[append_pwrite]=19653x1
+SPIKE long site=wal_writer hold_us=20092 span[wal_drain_write]=20077x1
+SPIKE slowio what=pack_pwrite us=20269 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20758 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20328 span[raw_pwrite]=20309x1 span[append_pwrite]=20315x1
+SPIKE long site=wal_writer hold_us=20800 span[wal_drain_write]=20785x1
+SPIKE slowio what=pack_pwrite us=19932 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=19957 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19997 span[raw_pwrite]=19968x1 span[append_pwrite]=19972x1
+SPIKE long site=wal_writer hold_us=19993 span[wal_drain_write]=19979x1
+SPIKE slowio what=pack_pwrite us=20381 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20534 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20442 span[raw_pwrite]=20419x1 span[append_pwrite]=20425x1
+SPIKE long site=wal_writer hold_us=20579 span[wal_drain_write]=20564x1
+SPIKE slowio what=pack_pwrite us=20572 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20552 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20620 span[wal_drain_write]=20608x1
+SPIKE long site=store hold_us=20644 span[raw_pwrite]=20614x1 span[append_pwrite]=20620x1
+SPIKE slowio what=pack_pwrite us=19884 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=19977 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20042 span[wal_drain_write]=20026x1
+SPIKE long site=store hold_us=19953 span[raw_pwrite]=19920x1 span[append_pwrite]=19927x1
+SPIKE slowio what=wal_drain us=21945 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21989 span[wal_drain_write]=21973x1
+SPIKE slowio what=pack_pwrite us=20944 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20934 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=21045 span[raw_pwrite]=21018x1 span[append_pwrite]=21023x1
+SPIKE long site=wal_writer hold_us=20991 span[wal_drain_write]=20975x1
+SPIKE slowio what=wal_drain us=36135 inflight_start=[wal] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=36177 span[wal_drain_write]=36163x1
+SPIKE slowio what=pack_pwrite us=20128 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE slowio what=wal_drain us=20162 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20219 span[wal_drain_write]=20203x1
+SPIKE long site=store hold_us=20289 span[raw_pwrite]=20173x1 span[append_pwrite]=20272x1
+SPIKE long site=store hold_us=20574 span[join_seal]=0x1 span[sync2_active]=20557x1
+SPIKE slowio what=pack_pwrite us=21301 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=21353 span[raw_pwrite]=21327x1 span[append_pwrite]=21332x1
+SPIKE slowio what=pack_pwrite us=20154 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20222 span[raw_pwrite]=20190x1 span[append_pwrite]=20195x1
+SPIKE slowio what=pack_pwrite us=20464 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20529 span[raw_pwrite]=20500x1 span[append_pwrite]=20504x1
+SPIKE slowio what=pack_pwrite us=20329 inflight_start=[wal,wal,wal] inflight_end=[wal,wal]
+SPIKE long site=store hold_us=20420 span[raw_pwrite]=20394x1 span[append_pwrite]=20398x1
+SPIKE slowio what=wal_drain us=20234 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20201 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20291 span[wal_drain_write]=20272x1
+SPIKE long site=store hold_us=20281 span[raw_pwrite]=20256x1 span[append_pwrite]=20262x1
+SPIKE slowio what=pack_pwrite us=19913 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19975 span[raw_pwrite]=19950x1 span[append_pwrite]=19954x1
+SPIKE slowio what=wal_drain us=20962 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20904 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21003 span[wal_drain_write]=20995x1
+SPIKE long site=store hold_us=21020 span[raw_pwrite]=20959x1 span[append_pwrite]=21002x1
+SPIKE long site=store hold_us=21121 span[join_seal]=0x1 span[sync2_active]=21108x1
+SPIKE slowio what=pack_pwrite us=20148 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20236 span[raw_pwrite]=20187x1 span[append_pwrite]=20220x1
+SPIKE slowio what=wal_drain us=20453 inflight_start=[pack_or_dir,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=20483 span[wal_drain_write]=20476x1
+SPIKE long site=store hold_us=42094 span[join_seal]=0x1 span[sync2_active]=42078x1
+SPIKE slowio what=wal_drain us=20380 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20437 span[wal_drain_write]=20416x1
+SPIKE slowio what=wal_drain us=19673 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19592 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19719 span[wal_drain_write]=19700x1
+SPIKE long site=store hold_us=19668 span[raw_pwrite]=19643x1 span[append_pwrite]=19649x1
+SPIKE slowio what=pack_pwrite us=19693 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=19646 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=19759 span[raw_pwrite]=19724x1 span[append_pwrite]=19735x1
+SPIKE long site=wal_writer hold_us=19726 span[wal_drain_write]=19718x1
+SPIKE slowio what=pack_pwrite us=21397 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=21449 span[raw_pwrite]=21424x1 span[append_pwrite]=21428x1
+SPIKE long site=stripe hold_us=21590 wait[store]=21445
+SPIKE long site=stripe hold_us=21602 wait[store]=21445
+SPIKE slowio what=wal_drain us=20643 inflight_start=[wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=20723 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20684 span[wal_drain_write]=20676x1
+SPIKE long site=store hold_us=20799 span[raw_pwrite]=20778x1 span[append_pwrite]=20782x1
+SPIKE slowio what=pack_pwrite us=19518 inflight_start=[wal] inflight_end=[wal]
+SPIKE slowio what=wal_drain us=19738 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=19595 span[raw_pwrite]=19570x1 span[append_pwrite]=19574x1
+SPIKE long site=wal_writer hold_us=19822 span[wal_drain_write]=19810x1
+SPIKE slowio what=wal_drain us=20151 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20155 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20210 span[wal_drain_write]=20178x1
+SPIKE long site=store hold_us=20235 span[raw_pwrite]=20185x1 span[append_pwrite]=20206x1
+SPIKE slowio what=wal_drain us=20390 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20342 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20440 span[wal_drain_write]=20425x1
+SPIKE long site=store hold_us=20411 span[raw_pwrite]=20387x1 span[append_pwrite]=20393x1
+SPIKE slowio what=wal_drain us=20053 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20065 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20110 span[wal_drain_write]=20091x1
+SPIKE long site=store hold_us=20141 span[raw_pwrite]=20111x1 span[append_pwrite]=20118x1
+SPIKE slowio what=pack_pwrite us=20680 inflight_start=[wal] inflight_end=[wal]
+SPIKE slowio what=wal_drain us=20724 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20775 span[raw_pwrite]=20747x1 span[append_pwrite]=20752x1
+SPIKE long site=wal_writer hold_us=20796 span[wal_drain_write]=20780x1
+SPIKE slowio what=wal_drain us=20008 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19952 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20061 span[wal_drain_write]=20046x1
+SPIKE long site=store hold_us=20023 span[raw_pwrite]=20005x1 span[append_pwrite]=20011x1
+SPIKE slowio what=wal_drain us=19981 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20030 span[wal_drain_write]=20011x1
+SPIKE slowio what=pack_pwrite us=19894 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19966 span[raw_pwrite]=19936x1 span[append_pwrite]=19941x1
+SPIKE slowio what=pack_pwrite us=20373 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20437 span[raw_pwrite]=20408x1 span[append_pwrite]=20414x1
+SPIKE long site=store hold_us=20856 span[join_seal]=0x1 span[sync2_active]=20847x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=7886 wait_p50_us=0.0 wait_p99_us=20152.3 wait_max_us=42139.6 hold_p50_us=2.2 hold_p99_us=392.7 hold_max_us=42106.9
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=344.8 hold_max_us=344.8
+lock site=wal n=2697 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=4.8 hold_p50_us=0.4 hold_p99_us=1.1 hold_max_us=6.4
+lock site=wal_writer n=1324 wait_p50_us=0.0 wait_p99_us=20529.2 wait_max_us=36339.7 hold_p50_us=19.7 hold_p99_us=20725.8 hold_max_us=36208.6
+lock site=wal_queue n=2462 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.6 hold_p50_us=0.5 hold_p99_us=2.4 hold_max_us=17.6
+lock site=readers n=677 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=10.3 hold_p50_us=1.7 hold_p99_us=10.3 hold_max_us=18.2
+lock site=dir_live n=1806 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=18.8 hold_p50_us=2.7 hold_p99_us=13.2 hold_max_us=34.4
+lock site=inode_live n=3165 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.6 hold_p50_us=1.6 hold_p99_us=7.0 hold_max_us=13.4
+lock site=handles n=1587 wait_p50_us=0.0 wait_p99_us=0.4 wait_max_us=29.0 hold_p50_us=1.4 hold_p99_us=4.4 hold_max_us=23.3
+lock site=file_cell n=2962 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.5 hold_p99_us=96.1 hold_max_us=399.6
+lock site=cell_map n=2511 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.0 hold_p50_us=1.0 hold_p99_us=4.7 hold_max_us=151.3
+lock site=stripe n=1271 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=168.4 hold_p50_us=27.9 hold_p99_us=199.6 hold_max_us=36995.1
+SPIKE slowio what=wal_drain us=20050 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20106 span[wal_drain_write]=20087x1
+SPIKE slowio what=wal_drain us=20883 inflight_start=[wal,wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20930 span[wal_drain_write]=20914x1
+SPIKE slowio what=wal_drain us=20310 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20383 span[wal_drain_write]=20365x1
+SPIKE slowio what=wal_drain us=20532 inflight_start=[wal,wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20582 span[wal_drain_write]=20565x1
+SPIKE slowio what=wal_drain us=26630 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=26690 span[wal_drain_write]=26664x1
+SPIKE slowio what=wal_drain us=20760 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20809 span[wal_drain_write]=20792x1
+SPIKE slowio what=wal_drain us=20605 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20655 span[wal_drain_write]=20637x1
+SPIKE slowio what=wal_drain us=19813 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19862 span[wal_drain_write]=19845x1
+SPIKE slowio what=wal_drain us=21043 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21098 span[wal_drain_write]=21079x1
+SPIKE slowio what=wal_drain us=20215 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20264 span[wal_drain_write]=20247x1
+SPIKE slowio what=wal_drain us=20133 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20184 span[wal_drain_write]=20165x1
+SPIKE slowio what=wal_drain us=36918 inflight_start=[wal] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=36969 span[wal_drain_write]=36950x1
+SPIKE slowio what=wal_drain us=22384 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22435 span[wal_drain_write]=22420x1
+SPIKE long site=store hold_us=20817 span[join_seal]=0x1 span[sync2_active]=20808x1
+SPIKE slowio what=wal_drain us=20754 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20797 span[wal_drain_write]=20782x1
+SPIKE slowio what=pack_pwrite us=20448 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20426 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20504 span[raw_pwrite]=20481x1 span[append_pwrite]=20488x1
+SPIKE long site=wal_writer hold_us=20465 span[wal_drain_write]=20454x1
+SPIKE slowio what=pack_pwrite us=20736 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20715 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20790 span[raw_pwrite]=20776x1 span[append_pwrite]=20781x1
+SPIKE long site=wal_writer hold_us=20766 span[wal_drain_write]=20755x1
+SPIKE slowio what=pack_pwrite us=20443 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=store hold_us=20505 span[raw_pwrite]=20483x1 span[append_pwrite]=20493x1
+SPIKE slowio what=wal_drain us=20606 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=20686 span[wal_drain_write]=20674x1
+SPIKE slowio what=wal_drain us=20526 inflight_start=[wal,wal,wal,pack_or_dir] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=20575 span[wal_drain_write]=20560x1
+SPIKE slowio what=wal_drain us=20671 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20752 span[wal_drain_write]=20734x1
+SPIKE slowio what=wal_drain us=20679 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20732 span[wal_drain_write]=20716x1
+SPIKE long site=store hold_us=37316 span[join_seal]=0x1 span[sync2_active]=37308x1
+SPIKE slowio what=wal_drain us=37024 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=37083 span[wal_drain_write]=37064x1
+SPIKE slowio what=wal_drain us=20481 inflight_start=[wal,wal_root] inflight_end=[wal_root]
+SPIKE long site=wal_writer hold_us=20537 span[wal_drain_write]=20519x1
+SPIKE slowio what=wal_drain us=20139 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20203 span[wal_drain_write]=20183x1
+SPIKE slowio what=wal_drain us=41521 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=41580 span[wal_drain_write]=41557x1
+SPIKE slowio what=wal_drain us=20749 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20824 span[wal_drain_write]=20782x1
+SPIKE slowio what=wal_drain us=20681 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20728 span[wal_drain_write]=20706x1
+SPIKE slowio what=wal_drain us=20053 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20102 span[wal_drain_write]=20085x1
+SPIKE slowio what=wal_drain us=21158 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21205 span[wal_drain_write]=21189x1
+SPIKE slowio what=wal_drain us=20670 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20720 span[wal_drain_write]=20701x1
+SPIKE slowio what=wal_drain us=19827 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19878 span[wal_drain_write]=19861x1
+SPIKE slowio what=wal_drain us=20264 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20313 span[wal_drain_write]=20296x1
+SPIKE slowio what=wal_drain us=20925 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20979 span[wal_drain_write]=20961x1
+SPIKE slowio what=wal_drain us=20177 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20249 span[wal_drain_write]=20211x1
+SPIKE slowio what=wal_drain us=20652 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20704 span[wal_drain_write]=20686x1
+SPIKE slowio what=wal_drain us=20895 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20950 span[wal_drain_write]=20931x1
+SPIKE slowio what=wal_drain us=20375 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20427 span[wal_drain_write]=20408x1
+SPIKE slowio what=wal_drain us=20382 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20434 span[wal_drain_write]=20416x1
+SPIKE slowio what=wal_drain us=20557 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20608 span[wal_drain_write]=20590x1
+SPIKE slowio what=wal_drain us=20237 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20293 span[wal_drain_write]=20271x1
+SPIKE slowio what=wal_drain us=19968 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20019 span[wal_drain_write]=19994x1
+SPIKE slowio what=wal_drain us=20346 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20392 span[wal_drain_write]=20372x1
+SPIKE slowio what=wal_drain us=20824 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20871 span[wal_drain_write]=20850x1
+SPIKE slowio what=wal_drain us=20078 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20122 span[wal_drain_write]=20102x1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=2977 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=13.3 hold_p50_us=1.7 hold_p99_us=25.4 hold_max_us=37322.8
+lock site=io n=6 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=317.7 hold_max_us=317.7
+lock site=wal n=1575 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=1.6 hold_max_us=14.6
+lock site=wal_writer n=814 wait_p50_us=0.0 wait_p99_us=22577.2 wait_max_us=61931.5 hold_p50_us=25.0 hold_p99_us=20955.1 hold_max_us=41582.6
+lock site=wal_queue n=1522 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.4 hold_p50_us=0.5 hold_p99_us=3.0 hold_max_us=15.6
+lock site=readers n=1515 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=3.7 hold_p50_us=0.8 hold_p99_us=2.0 hold_max_us=10.0
+lock site=dir_live n=131 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=7.0 hold_max_us=11.0
+lock site=inode_live n=165 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.3 hold_max_us=14.0
+lock site=handles n=519 wait_p50_us=0.0 wait_p99_us=0.5 wait_max_us=2.8 hold_p50_us=1.0 hold_p99_us=4.6 hold_max_us=31.8
+lock site=file_cell n=1385 wait_p50_us=0.0 wait_p99_us=84.4 wait_max_us=173.3 hold_p50_us=4.3 hold_p99_us=67.5 hold_max_us=845.8
+lock site=cell_map n=2163 wait_p50_us=0.0 wait_p99_us=0.3 wait_max_us=29.2 hold_p50_us=0.6 hold_p99_us=4.0 hold_max_us=13.2
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=71.3 wait_max_us=71.3 hold_p50_us=9.1 hold_p99_us=184.8 hold_max_us=184.8
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.28s
+=== run 2
+SPIKE slowio what=wal_drain us=20418 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20485 span[wal_drain_write]=20460x1
+SPIKE slowio what=wal_drain us=20552 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20595 span[wal_drain_write]=20579x1
+SPIKE slowio what=wal_drain us=19793 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19844 span[wal_drain_write]=19827x1
+SPIKE slowio what=wal_drain us=19739 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19794 span[wal_drain_write]=19775x1
+SPIKE slowio what=wal_drain us=19603 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19650 span[wal_drain_write]=19633x1
+SPIKE slowio what=wal_drain us=19591 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19637 span[wal_drain_write]=19620x1
+SPIKE slowio what=wal_drain us=36446 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=36547 span[wal_drain_write]=36515x1
+SPIKE slowio what=wal_drain us=20429 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20490 span[wal_drain_write]=20464x1
+SPIKE slowio what=wal_drain us=19688 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19734 span[wal_drain_write]=19718x1
+SPIKE slowio what=wal_drain us=20273 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20342 span[wal_drain_write]=20325x1
+SPIKE slowio what=wal_drain us=20814 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20864 span[wal_drain_write]=20847x1
+SPIKE slowio what=wal_drain us=20752 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20807 span[wal_drain_write]=20781x1
+SPIKE long site=store hold_us=20925 span[join_seal]=0x1 span[sync2_active]=20918x1
+SPIKE slowio what=wal_drain us=20142 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20207 span[wal_drain_write]=20186x1
+SPIKE slowio what=wal_drain us=20409 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20462 span[wal_drain_write]=20443x1
+SPIKE slowio what=wal_drain us=20812 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20908 span[wal_drain_write]=20860x1
+SPIKE long site=store hold_us=22125 span[join_seal]=0x1 span[sync2_active]=22119x1
+SPIKE slowio what=wal_drain us=21337 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21384 span[wal_drain_write]=21369x1
+SPIKE slowio what=wal_drain us=35831 inflight_start=[wal,wal,wal_root] inflight_end=[wal,wal_root]
+SPIKE long site=wal_writer hold_us=35882 span[wal_drain_write]=35864x1
+SPIKE slowio what=wal_drain us=19675 inflight_start=[wal,wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19722 span[wal_drain_write]=19705x1
+SPIKE slowio what=wal_drain us=20076 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20122 span[wal_drain_write]=20102x1
+SPIKE slowio what=wal_drain us=20155 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20209 span[wal_drain_write]=20183x1
+SPIKE slowio what=wal_drain us=20432 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20481 span[wal_drain_write]=20463x1
+SPIKE slowio what=wal_drain us=19289 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19339 span[wal_drain_write]=19322x1
+SPIKE slowio what=wal_drain us=20383 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20448 span[wal_drain_write]=20427x1
+SPIKE slowio what=wal_drain us=20063 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20111 span[wal_drain_write]=20093x1
+SPIKE slowio what=wal_drain us=20069 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20119 span[wal_drain_write]=20101x1
+SPIKE slowio what=wal_drain us=20000 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20049 span[wal_drain_write]=20031x1
+SPIKE slowio what=wal_drain us=20352 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20410 span[wal_drain_write]=20393x1
+SPIKE slowio what=wal_drain us=20310 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20359 span[wal_drain_write]=20341x1
+SPIKE slowio what=wal_drain us=23141 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23190 span[wal_drain_write]=23174x1
+SPIKE slowio what=wal_drain us=22027 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22077 span[wal_drain_write]=22057x1
+SPIKE slowio what=wal_drain us=20048 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20103 span[wal_drain_write]=20085x1
+SPIKE slowio what=wal_drain us=23498 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23552 span[wal_drain_write]=23530x1
+SPIKE slowio what=wal_drain us=20205 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20253 span[wal_drain_write]=20231x1
+SPIKE slowio what=wal_drain us=20183 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20226 span[wal_drain_write]=20212x1
+SPIKE slowio what=wal_drain us=20426 inflight_start=[wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=20478 span[wal_drain_write]=20459x1
+SPIKE slowio what=wal_drain us=19497 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19542 span[wal_drain_write]=19526x1
+SPIKE slowio what=wal_drain us=21108 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21154 span[wal_drain_write]=21138x1
+SPIKE slowio what=wal_drain us=19753 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19806 span[wal_drain_write]=19783x1
+SPIKE slowio what=wal_drain us=19953 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20001 span[wal_drain_write]=19983x1
+SPIKE slowio what=wal_drain us=19732 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19786 span[wal_drain_write]=19769x1
+SPIKE slowio what=wal_drain us=20433 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20483 span[wal_drain_write]=20465x1
+SPIKE slowio what=wal_drain us=20337 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20383 span[wal_drain_write]=20367x1
+SPIKE slowio what=wal_drain us=19937 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19980 span[wal_drain_write]=19966x1
+SPIKE slowio what=wal_drain us=20506 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20564 span[wal_drain_write]=20539x1
+SPIKE slowio what=wal_drain us=20086 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20139 span[wal_drain_write]=20124x1
+SPIKE slowio what=wal_drain us=20123 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20175 span[wal_drain_write]=20156x1
+SPIKE slowio what=wal_drain us=19670 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=19728 span[wal_drain_write]=19708x1
+SPIKE slowio what=wal_drain us=19906 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19950 span[wal_drain_write]=19935x1
+SPIKE slowio what=wal_drain us=24332 inflight_start=[wal_root] inflight_end=[wal_root]
+SPIKE long site=wal_writer hold_us=24388 span[wal_drain_write]=24366x1
+SPIKE slowio what=wal_drain us=19991 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20065 span[wal_drain_write]=20031x1
+SPIKE slowio what=wal_drain us=18763 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=18814 span[wal_drain_write]=18795x1
+SPIKE slowio what=wal_drain us=20704 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20759 span[wal_drain_write]=20732x1
+SPIKE slowio what=wal_drain us=20644 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20713 span[wal_drain_write]=20688x1
+SPIKE slowio what=wal_drain us=19356 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19410 span[wal_drain_write]=19393x1
+SPIKE slowio what=wal_drain us=20253 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20300 span[wal_drain_write]=20283x1
+SPIKE slowio what=wal_drain us=23570 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=23625 span[wal_drain_write]=23603x1
+SPIKE slowio what=wal_drain us=19975 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20023 span[wal_drain_write]=20006x1
+SPIKE slowio what=wal_drain us=19725 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19771 span[wal_drain_write]=19753x1
+SPIKE slowio what=wal_drain us=23415 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23460 span[wal_drain_write]=23444x1
+SPIKE slowio what=wal_drain us=22276 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22324 span[wal_drain_write]=22307x1
+SPIKE slowio what=wal_drain us=19527 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19575 span[wal_drain_write]=19557x1
+SPIKE slowio what=wal_drain us=20615 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20661 span[wal_drain_write]=20644x1
+SPIKE slowio what=wal_drain us=23597 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23652 span[wal_drain_write]=23626x1
+SPIKE slowio what=wal_drain us=20290 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20345 span[wal_drain_write]=20319x1
+SPIKE slowio what=wal_drain us=20487 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20531 span[wal_drain_write]=20512x1
+SPIKE slowio what=wal_drain us=20376 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20429 span[wal_drain_write]=20402x1
+SPIKE slowio what=wal_drain us=21008 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21062 span[wal_drain_write]=21040x1
+SPIKE slowio what=wal_drain us=19453 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19496 span[wal_drain_write]=19478x1
+SPIKE slowio what=wal_drain us=20284 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20329 span[wal_drain_write]=20312x1
+SPIKE slowio what=wal_drain us=19812 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19856 span[wal_drain_write]=19840x1
+SPIKE slowio what=wal_drain us=20185 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20236 span[wal_drain_write]=20219x1
+SPIKE slowio what=wal_drain us=20283 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20357 span[wal_drain_write]=20339x1
+SPIKE slowio what=wal_drain us=20147 inflight_start=[wal,wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20201 span[wal_drain_write]=20184x1
+SPIKE slowio what=wal_drain us=20408 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20460 span[wal_drain_write]=20441x1
+SPIKE slowio what=wal_drain us=20828 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20874 span[wal_drain_write]=20857x1
+SPIKE long site=file_cell hold_us=7564
+SPIKE slowio what=wal_drain us=21236 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21281 span[wal_drain_write]=21265x1
+SPIKE slowio what=wal_drain us=22670 inflight_start=[wal,wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=22721 span[wal_drain_write]=22704x1
+SPIKE slowio what=wal_drain us=20516 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20564 span[wal_drain_write]=20547x1
+SPIKE long site=file_cell hold_us=6534
+SPIKE slowio what=pack_pwrite us=21113 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=store hold_us=21185 span[raw_pwrite]=21164x1 span[append_pwrite]=21171x1
+SPIKE slowio what=pack_pwrite us=21355 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=21410 span[raw_pwrite]=21388x1 span[append_pwrite]=21396x1
+SPIKE slowio what=pack_pwrite us=20213 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20280 span[raw_pwrite]=20250x1 span[append_pwrite]=20264x1
+SPIKE slowio what=pack_pwrite us=21094 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=21190 span[raw_pwrite]=21154x1 span[append_pwrite]=21163x1
+report mode=one-file (closed loop: no coordinated-omission correction)
+lock site=store n=3573 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.4 hold_p50_us=1.9 hold_p99_us=32.9 hold_max_us=22134.8
+lock site=io n=9 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=520.7 hold_max_us=520.7
+lock site=wal n=2254 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=1.8 hold_max_us=22.9
+lock site=wal_writer n=1194 wait_p50_us=0.0 wait_p99_us=23298.0 wait_max_us=43974.7 hold_p50_us=76.0 hold_p99_us=21397.5 hold_max_us=36569.1
+lock site=wal_queue n=2192 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.6 hold_p99_us=3.2 hold_max_us=20.1
+lock site=readers n=1260 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.8 hold_p99_us=2.3 hold_max_us=6.8
+lock site=dir_live n=227 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=10.0 hold_max_us=15.7
+lock site=inode_live n=251 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.0 hold_max_us=49.0
+lock site=handles n=1006 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=9.6 hold_p50_us=1.1 hold_p99_us=3.2 hold_max_us=20.4
+lock site=file_cell n=2711 wait_p50_us=0.0 wait_p99_us=1578.0 wait_max_us=6283.3 hold_p50_us=8.5 hold_p99_us=800.3 hold_max_us=7565.3
+lock site=cell_map n=3693 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=43.0 hold_p50_us=0.7 hold_p99_us=4.6 hold_max_us=23.1
+lock site=stripe n=12 wait_p50_us=0.0 wait_p99_us=36.2 wait_max_us=36.2 hold_p50_us=13.0 hold_p99_us=318.7 hold_max_us=318.7
+SPIKE slowio what=pack_pwrite us=20108 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20449 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20167 span[raw_pwrite]=20145x1 span[append_pwrite]=20152x1
+SPIKE long site=wal_writer hold_us=20480 span[wal_drain_write]=20465x1
+SPIKE slowio what=pack_pwrite us=20907 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20971 span[raw_pwrite]=20943x1 span[append_pwrite]=20947x1
+SPIKE slowio what=wal_drain us=20724 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20341 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20771 span[wal_drain_write]=20755x1
+SPIKE long site=store hold_us=20388 span[raw_pwrite]=20370x1 span[append_pwrite]=20376x1
+SPIKE slowio what=wal_drain us=19973 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20025 span[wal_drain_write]=20006x1
+SPIKE slowio what=wal_drain us=20003 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19895 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20056 span[wal_drain_write]=20037x1
+SPIKE long site=store hold_us=19981 span[raw_pwrite]=19955x1 span[append_pwrite]=19960x1
+SPIKE slowio what=wal_drain us=22136 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=21927 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22185 span[wal_drain_write]=22169x1
+SPIKE long site=store hold_us=21999 span[raw_pwrite]=21959x1 span[append_pwrite]=21964x1
+SPIKE slowio what=pack_pwrite us=20543 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20519 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20602 span[raw_pwrite]=20578x1 span[append_pwrite]=20584x1
+SPIKE long site=wal_writer hold_us=20560 span[wal_drain_write]=20545x1
+SPIKE slowio what=wal_drain us=20629 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20650 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20696 span[raw_pwrite]=20678x1 span[append_pwrite]=20684x1
+SPIKE long site=wal_writer hold_us=20678 span[wal_drain_write]=20662x1
+SPIKE slowio what=pack_pwrite us=20473 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20540 span[raw_pwrite]=20511x1 span[append_pwrite]=20518x1
+SPIKE slowio what=pack_pwrite us=20484 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20510 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20550 span[raw_pwrite]=20523x1 span[append_pwrite]=20528x1
+SPIKE long site=wal_writer hold_us=20549 span[wal_drain_write]=20533x1
+SPIKE slowio what=pack_pwrite us=36500 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=36566 span[raw_pwrite]=36542x1 span[append_pwrite]=36547x1
+SPIKE slowio what=wal_drain us=20527 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20590 span[wal_drain_write]=20573x1
+SPIKE slowio what=pack_pwrite us=21173 inflight_start=[wal,pack_or_dir(same)] inflight_end=[pack_or_dir(same),wal]
+SPIKE long site=store hold_us=21227 span[raw_pwrite]=21203x1 span[append_pwrite]=21208x1
+SPIKE slowio what=wal_drain us=20392 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=20575 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20456 span[wal_drain_write]=20446x1
+SPIKE long site=store hold_us=20743 span[raw_pwrite]=20643x1 span[append_pwrite]=20728x1
+SPIKE long site=store hold_us=41552 span[join_seal]=0x1 span[sync2_active]=41537x1
+SPIKE slowio what=pack_pwrite us=20539 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20602 span[raw_pwrite]=20572x1 span[append_pwrite]=20579x1
+SPIKE slowio what=pack_pwrite us=20381 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20440 span[raw_pwrite]=20410x1 span[append_pwrite]=20415x1
+SPIKE slowio what=pack_pwrite us=19761 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=19703 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19825 span[raw_pwrite]=19801x1 span[append_pwrite]=19806x1
+SPIKE long site=wal_writer hold_us=19762 span[wal_drain_write]=19745x1
+SPIKE slowio what=wal_drain us=20135 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20304 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20206 span[wal_drain_write]=20189x1
+SPIKE long site=store hold_us=20401 span[raw_pwrite]=20368x1 span[append_pwrite]=20373x1
+SPIKE slowio what=wal_drain us=20279 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20262 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20327 span[wal_drain_write]=20314x1
+SPIKE long site=store hold_us=20380 span[raw_pwrite]=20316x1 span[append_pwrite]=20363x1
+SPIKE long site=store hold_us=20938 span[join_seal]=0x1 span[sync2_active]=20921x1
+SPIKE slowio what=wal_drain us=19980 inflight_start=[wal_root] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19785 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20036 span[wal_drain_write]=20016x1
+SPIKE long site=store hold_us=19855 span[raw_pwrite]=19836x1 span[append_pwrite]=19841x1
+SPIKE slowio what=pack_pwrite us=19724 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=19793 span[raw_pwrite]=19754x1 span[append_pwrite]=19763x1
+SPIKE slowio what=wal_drain us=20823 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20827 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20872 span[wal_drain_write]=20853x1
+SPIKE long site=store hold_us=20907 span[raw_pwrite]=20878x1 span[append_pwrite]=20884x1
+SPIKE slowio what=pack_pwrite us=22062 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=22118 span[raw_pwrite]=22095x1 span[append_pwrite]=22099x1
+SPIKE slowio what=pack_pwrite us=20094 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20159 span[raw_pwrite]=20141x1 span[append_pwrite]=20146x1
+SPIKE slowio what=wal_drain us=21050 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21095 span[wal_drain_write]=21080x1
+SPIKE slowio what=wal_drain us=20274 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19713 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20328 span[wal_drain_write]=20311x1
+SPIKE long site=store hold_us=19782 span[raw_pwrite]=19761x1 span[append_pwrite]=19769x1
+SPIKE slowio what=wal_drain us=19926 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19794 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19983 span[wal_drain_write]=19964x1
+SPIKE long site=store hold_us=19886 span[raw_pwrite]=19857x1 span[append_pwrite]=19863x1
+SPIKE slowio what=wal_drain us=19869 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19940 span[wal_drain_write]=19918x1
+SPIKE slowio what=wal_drain us=20027 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19778 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20082 span[wal_drain_write]=20064x1
+SPIKE long site=store hold_us=19857 span[raw_pwrite]=19838x1 span[append_pwrite]=19844x1
+SPIKE slowio what=pack_pwrite us=21285 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=21348 span[raw_pwrite]=21321x1 span[append_pwrite]=21325x1
+SPIKE slowio what=wal_drain us=20406 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20288 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20334 span[raw_pwrite]=20315x1 span[append_pwrite]=20321x1
+SPIKE long site=wal_writer hold_us=20462 span[wal_drain_write]=20441x1
+SPIKE slowio what=wal_drain us=20358 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20450 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20407 span[wal_drain_write]=20392x1
+SPIKE long site=store hold_us=20535 span[raw_pwrite]=20509x1 span[append_pwrite]=20516x1
+SPIKE slowio what=wal_drain us=20779 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20535 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20830 span[wal_drain_write]=20815x1
+SPIKE long site=store hold_us=20610 span[raw_pwrite]=20582x1 span[append_pwrite]=20598x1
+SPIKE slowio what=pack_pwrite us=19846 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=19888 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19907 span[raw_pwrite]=19885x1 span[append_pwrite]=19892x1
+SPIKE long site=wal_writer hold_us=19929 span[wal_drain_write]=19912x1
+SPIKE slowio what=wal_drain us=20610 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20479 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20666 span[wal_drain_write]=20648x1
+SPIKE long site=store hold_us=20549 span[raw_pwrite]=20521x1 span[append_pwrite]=20527x1
+SPIKE slowio what=wal_drain us=21044 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20737 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21100 span[wal_drain_write]=21081x1
+SPIKE long site=store hold_us=20818 span[raw_pwrite]=20798x1 span[append_pwrite]=20805x1
+SPIKE slowio what=pack_pwrite us=21535 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=store hold_us=21680 span[raw_pwrite]=21572x1 span[append_pwrite]=21657x1
+SPIKE slowio what=wal_drain us=22107 inflight_start=[pack_or_dir,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=22137 span[wal_drain_write]=22130x1
+SPIKE long site=store hold_us=42081 span[join_seal]=0x1 span[sync2_active]=42062x1
+SPIKE slowio what=wal_drain us=19960 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20004 span[wal_drain_write]=19993x1
+SPIKE slowio what=pack_pwrite us=20379 inflight_start=[pack_or_dir(same)] inflight_end=[pack_or_dir(same)]
+SPIKE long site=store hold_us=20439 span[raw_pwrite]=20406x1 span[append_pwrite]=20410x1
+SPIKE slowio what=pack_pwrite us=20059 inflight_start=[pack_or_dir(same)] inflight_end=[]
+SPIKE slowio what=wal_drain us=20244 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20353 span[wal_drain_write]=20337x1
+SPIKE long site=store hold_us=20283 span[raw_pwrite]=20148x1 span[append_pwrite]=20262x1
+SPIKE long site=store hold_us=22021 span[join_seal]=0x1 span[sync2_active]=22001x1
+SPIKE slowio what=wal_drain us=22000 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=22033 span[wal_drain_write]=22026x1
+SPIKE slowio what=wal_drain us=20387 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20439 span[wal_drain_write]=20422x1
+SPIKE slowio what=pack_pwrite us=20696 inflight_start=[wal,pack_or_dir(same)] inflight_end=[pack_or_dir(same)]
+SPIKE long site=store hold_us=20741 span[raw_pwrite]=20721x1 span[append_pwrite]=20724x1
+SPIKE slowio what=pack_pwrite us=20571 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20658 span[raw_pwrite]=20611x1 span[append_pwrite]=20638x1
+SPIKE slowio what=wal_drain us=21024 inflight_start=[pack_or_dir,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=21056 span[wal_drain_write]=21050x1
+SPIKE slowio what=wal_drain us=20719 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20767 span[wal_drain_write]=20750x1
+SPIKE long site=store hold_us=41709 span[join_seal]=0x1 span[sync2_active]=41692x1
+SPIKE slowio what=wal_drain us=20493 inflight_start=[pack_or_dir] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20534 span[wal_drain_write]=20519x1
+SPIKE slowio what=wal_drain us=20174 inflight_start=[wal_root] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20062 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20238 span[wal_drain_write]=20214x1
+SPIKE long site=store hold_us=20136 span[raw_pwrite]=20110x1 span[append_pwrite]=20114x1
+SPIKE slowio what=pack_pwrite us=20361 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20313 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20426 span[raw_pwrite]=20398x1 span[append_pwrite]=20405x1
+SPIKE long site=wal_writer hold_us=20370 span[wal_drain_write]=20353x1
+SPIKE slowio what=pack_pwrite us=20510 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=20562 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20596 span[wal_drain_write]=20586x1
+SPIKE long site=store hold_us=20572 span[raw_pwrite]=20541x1 span[append_pwrite]=20547x1
+SPIKE slowio what=pack_pwrite us=20315 inflight_start=[wal] inflight_end=[wal]
+SPIKE slowio what=wal_drain us=20684 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20363 span[raw_pwrite]=20345x1 span[append_pwrite]=20350x1
+SPIKE long site=wal_writer hold_us=20724 span[wal_drain_write]=20707x1
+SPIKE slowio what=wal_drain us=20162 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20239 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20214 span[wal_drain_write]=20197x1
+SPIKE long site=store hold_us=20314 span[raw_pwrite]=20293x1 span[append_pwrite]=20300x1
+SPIKE slowio what=pack_pwrite us=19692 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19769 span[raw_pwrite]=19731x1 span[append_pwrite]=19739x1
+SPIKE slowio what=wal_drain us=21217 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21263 span[wal_drain_write]=21246x1
+SPIKE slowio what=wal_drain us=19876 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19525 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19949 span[wal_drain_write]=19934x1
+SPIKE long site=store hold_us=19606 span[raw_pwrite]=19585x1 span[append_pwrite]=19593x1
+SPIKE slowio what=pack_pwrite us=19829 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19911 span[raw_pwrite]=19883x1 span[append_pwrite]=19887x1
+SPIKE slowio what=wal_drain us=21038 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=20467 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21115 span[wal_drain_write]=21099x1
+SPIKE long site=store hold_us=20581 span[raw_pwrite]=20547x1 span[append_pwrite]=20561x1
+SPIKE slowio what=pack_pwrite us=19989 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20102 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20055 span[raw_pwrite]=20035x1 span[append_pwrite]=20041x1
+SPIKE long site=wal_writer hold_us=20162 span[wal_drain_write]=20145x1
+SPIKE slowio what=pack_pwrite us=20465 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20544 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20538 span[raw_pwrite]=20510x1 span[append_pwrite]=20516x1
+SPIKE long site=wal_writer hold_us=20613 span[wal_drain_write]=20598x1
+SPIKE slowio what=wal_drain us=20520 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20565 span[wal_drain_write]=20550x1
+SPIKE slowio what=wal_drain us=20624 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20485 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20672 span[wal_drain_write]=20656x1
+SPIKE long site=store hold_us=20553 span[raw_pwrite]=20528x1 span[append_pwrite]=20534x1
+SPIKE slowio what=wal_drain us=20063 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19887 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20110 span[wal_drain_write]=20093x1
+SPIKE long site=store hold_us=19950 span[raw_pwrite]=19925x1 span[append_pwrite]=19931x1
+SPIKE slowio what=wal_drain us=22181 inflight_start=[pack_or_dir,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=22223 span[wal_drain_write]=22210x1
+SPIKE slowio what=wal_drain us=20477 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20535 span[wal_drain_write]=20509x1
+SPIKE long site=store hold_us=57360 span[join_seal]=0x1 span[sync2_active]=57342x1
+SPIKE slowio what=wal_drain us=36676 inflight_start=[pack_or_dir,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=36713 span[wal_drain_write]=36700x1
+SPIKE slowio what=pack_pwrite us=19952 inflight_start=[] inflight_end=[]
+SPIKE slowio what=wal_drain us=19996 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20014 span[raw_pwrite]=19982x1 span[append_pwrite]=19988x1
+SPIKE long site=wal_writer hold_us=20023 span[wal_drain_write]=20013x1
+SPIKE slowio what=pack_pwrite us=21361 inflight_start=[] inflight_end=[wal]
+SPIKE long site=store hold_us=21435 span[raw_pwrite]=21399x1 span[append_pwrite]=21406x1
+SPIKE slowio what=pack_pwrite us=20394 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20465 span[raw_pwrite]=20434x1 span[append_pwrite]=20439x1
+SPIKE slowio what=pack_pwrite us=20316 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20312 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20356 span[wal_drain_write]=20343x1
+SPIKE long site=store hold_us=20388 span[raw_pwrite]=20350x1 span[append_pwrite]=20355x1
+SPIKE slowio what=wal_drain us=21645 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE slowio what=pack_pwrite us=21461 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21703 span[wal_drain_write]=21687x1
+SPIKE long site=store hold_us=21558 span[raw_pwrite]=21531x1 span[append_pwrite]=21536x1
+SPIKE slowio what=pack_pwrite us=19638 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=19686 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=19694 span[raw_pwrite]=19671x1 span[append_pwrite]=19676x1
+SPIKE long site=wal_writer hold_us=19739 span[wal_drain_write]=19720x1
+SPIKE slowio what=pack_pwrite us=20707 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20685 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20784 span[raw_pwrite]=20756x1 span[append_pwrite]=20761x1
+SPIKE long site=wal_writer hold_us=20751 span[wal_drain_write]=20737x1
+SPIKE long site=stripe hold_us=20954 wait[store]=20812
+SPIKE long site=stripe hold_us=20965 wait[store]=20812
+SPIKE long site=stripe hold_us=20842 wait[store]=20727
+SPIKE long site=stripe hold_us=20865 wait[store]=20727
+SPIKE slowio what=pack_pwrite us=20285 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20345 span[raw_pwrite]=20318x1 span[append_pwrite]=20323x1
+SPIKE slowio what=pack_pwrite us=20515 inflight_start=[wal,pack_or_dir(same)] inflight_end=[pack_or_dir(same)]
+SPIKE slowio what=wal_drain us=20485 inflight_start=[wal,pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=store hold_us=20585 span[raw_pwrite]=20554x1 span[append_pwrite]=20559x1
+SPIKE long site=wal_writer hold_us=20526 span[wal_drain_write]=20514x1
+SPIKE slowio what=pack_pwrite us=20131 inflight_start=[pack_or_dir(same),wal] inflight_end=[wal]
+SPIKE long site=store hold_us=20263 span[raw_pwrite]=20168x1 span[append_pwrite]=20245x1
+SPIKE long site=store hold_us=41941 span[join_seal]=0x1 span[sync2_active]=41922x1
+SPIKE slowio what=wal_drain us=20145 inflight_start=[wal_root] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19759 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20197 span[wal_drain_write]=20177x1
+SPIKE long site=store hold_us=19826 span[raw_pwrite]=19800x1 span[append_pwrite]=19806x1
+SPIKE slowio what=wal_drain us=19733 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19940 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=19776 span[wal_drain_write]=19763x1
+SPIKE long site=store hold_us=20016 span[raw_pwrite]=19989x1 span[append_pwrite]=19994x1
+SPIKE slowio what=wal_drain us=20535 inflight_start=[] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=20493 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20581 span[wal_drain_write]=20560x1
+SPIKE long site=store hold_us=20573 span[raw_pwrite]=20539x1 span[append_pwrite]=20545x1
+SPIKE slowio what=pack_pwrite us=20249 inflight_start=[] inflight_end=[]
+SPIKE long site=store hold_us=20327 span[raw_pwrite]=20279x1 span[append_pwrite]=20302x1
+SPIKE slowio what=pack_pwrite us=22312 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=22390 span[raw_pwrite]=22360x1 span[append_pwrite]=22367x1
+SPIKE slowio what=wal_drain us=20009 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=pack_pwrite us=19997 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20063 span[wal_drain_write]=20047x1
+SPIKE long site=store hold_us=20063 span[raw_pwrite]=20042x1 span[append_pwrite]=20046x1
+SPIKE slowio what=pack_pwrite us=21006 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=21004 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=21066 span[raw_pwrite]=21046x1 span[append_pwrite]=21052x1
+SPIKE long site=wal_writer hold_us=21061 span[wal_drain_write]=21046x1
+SPIKE slowio what=pack_pwrite us=20324 inflight_start=[wal] inflight_end=[]
+SPIKE slowio what=wal_drain us=20290 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20357 span[wal_drain_write]=20343x1
+SPIKE long site=store hold_us=20396 span[raw_pwrite]=20369x1 span[append_pwrite]=20375x1
+SPIKE slowio what=pack_pwrite us=20505 inflight_start=[wal] inflight_end=[]
+SPIKE long site=store hold_us=20569 span[raw_pwrite]=20542x1 span[append_pwrite]=20547x1
+SPIKE long site=store hold_us=20865 span[join_seal]=0x1 span[sync2_active]=20857x1
+SPIKE long site=store hold_us=36943 span[join_seal]=0x1 span[sync2_active]=36935x1
+report mode=many-files (closed loop: no coordinated-omission correction)
+lock site=store n=9611 wait_p50_us=0.0 wait_p99_us=12091.4 wait_max_us=42139.6 hold_p50_us=2.2 hold_p99_us=166.0 hold_max_us=57376.8
+lock site=io n=7 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.4 hold_p99_us=398.6 hold_max_us=398.6
+lock site=wal n=3147 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.9 hold_p50_us=0.4 hold_p99_us=1.0 hold_max_us=11.7
+lock site=wal_writer n=1527 wait_p50_us=0.0 wait_p99_us=20545.5 wait_max_us=42205.2 hold_p50_us=20.3 hold_p99_us=20774.9 hold_max_us=36732.9
+lock site=wal_queue n=2881 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.8 hold_p50_us=0.5 hold_p99_us=2.1 hold_max_us=24.4
+lock site=readers n=918 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=20.1 hold_p50_us=1.6 hold_p99_us=8.1 hold_max_us=65.7
+lock site=dir_live n=1981 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=14.2 hold_p50_us=2.9 hold_p99_us=13.7 hold_max_us=28.1
+lock site=inode_live n=3697 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=1.0 hold_p50_us=1.6 hold_p99_us=7.7 hold_max_us=19.1
+lock site=handles n=1853 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=12.0 hold_p50_us=1.4 hold_p99_us=4.6 hold_max_us=16.0
+lock site=file_cell n=3532 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=3.4 hold_p99_us=126.1 hold_max_us=460.0
+lock site=cell_map n=2950 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.8 hold_p50_us=1.0 hold_p99_us=4.6 hold_max_us=137.6
+lock site=stripe n=1471 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=74.9 hold_p50_us=27.1 hold_p99_us=180.5 hold_max_us=20971.5
+SPIKE long site=store hold_us=77559 span[join_seal]=0x1 span[sync2_active]=26528x1 span[sync2_dir]=51021x1
+SPIKE slowio what=wal_drain us=25980 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=26030 span[wal_drain_write]=26011x1
+SPIKE slowio what=wal_drain us=20444 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20503 span[wal_drain_write]=20478x1
+SPIKE slowio what=wal_drain us=22590 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=22646 span[wal_drain_write]=22623x1
+SPIKE slowio what=wal_drain us=20986 inflight_start=[wal,wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21035 span[wal_drain_write]=21019x1
+SPIKE slowio what=wal_drain us=20892 inflight_start=[wal,wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=20944 span[wal_drain_write]=20926x1
+SPIKE slowio what=wal_drain us=21602 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=21653 span[wal_drain_write]=21636x1
+SPIKE slowio what=wal_drain us=21392 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21443 span[wal_drain_write]=21427x1
+SPIKE slowio what=wal_drain us=20039 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20098 span[wal_drain_write]=20079x1
+SPIKE slowio what=wal_drain us=36602 inflight_start=[wal,wal,wal] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=36663 span[wal_drain_write]=36643x1
+SPIKE slowio what=wal_drain us=22702 inflight_start=[pack_or_dir,wal] inflight_end=[wal,pack_or_dir]
+SPIKE long site=wal_writer hold_us=22743 span[wal_drain_write]=22731x1
+SPIKE slowio what=wal_drain us=20579 inflight_start=[pack_or_dir,wal,wal,wal] inflight_end=[]
+SPIKE long site=store hold_us=46506 span[join_seal]=1x1 span[sync2_active]=46500x1
+SPIKE long site=wal_writer hold_us=20630 span[wal_drain_write]=20616x1
+SPIKE slowio what=wal_drain us=21084 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=21133 span[wal_drain_write]=21120x1
+SPIKE slowio what=wal_drain us=21131 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=21176 span[wal_drain_write]=21164x1
+SPIKE slowio what=wal_drain us=20556 inflight_start=[pack_or_dir] inflight_end=[pack_or_dir]
+SPIKE long site=wal_writer hold_us=20596 span[wal_drain_write]=20583x1
+SPIKE slowio what=wal_drain us=21512 inflight_start=[pack_or_dir,wal] inflight_end=[pack_or_dir,wal]
+SPIKE long site=wal_writer hold_us=21560 span[wal_drain_write]=21547x1
+SPIKE long site=store hold_us=70832 span[join_seal]=0x1 span[sync2_active]=70824x1
+SPIKE slowio what=wal_drain us=20902 inflight_start=[pack_or_dir,wal,wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20962 span[wal_drain_write]=20949x1
+SPIKE slowio what=wal_drain us=21617 inflight_start=[wal_root,wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=21675 span[wal_drain_write]=21651x1
+SPIKE slowio what=wal_drain us=22034 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22080 span[wal_drain_write]=22065x1
+SPIKE slowio what=wal_drain us=20364 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20413 span[wal_drain_write]=20389x1
+SPIKE slowio what=wal_drain us=20324 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20388 span[wal_drain_write]=20368x1
+SPIKE slowio what=wal_drain us=20718 inflight_start=[wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=20762 span[wal_drain_write]=20746x1
+SPIKE slowio what=wal_drain us=20548 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20602 span[wal_drain_write]=20581x1
+SPIKE slowio what=wal_drain us=21593 inflight_start=[wal,wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=21665 span[wal_drain_write]=21629x1
+SPIKE slowio what=wal_drain us=20749 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20799 span[wal_drain_write]=20783x1
+SPIKE slowio what=wal_drain us=21756 inflight_start=[wal,wal] inflight_end=[wal]
+SPIKE long site=wal_writer hold_us=21811 span[wal_drain_write]=21793x1
+SPIKE slowio what=wal_drain us=36991 inflight_start=[wal,wal,wal] inflight_end=[wal,wal]
+SPIKE long site=wal_writer hold_us=37050 span[wal_drain_write]=37029x1
+SPIKE slowio what=wal_drain us=20479 inflight_start=[wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20533 span[wal_drain_write]=20513x1
+SPIKE slowio what=wal_drain us=22551 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=22614 span[wal_drain_write]=22597x1
+SPIKE slowio what=wal_drain us=20561 inflight_start=[wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20617 span[wal_drain_write]=20595x1
+SPIKE slowio what=wal_drain us=20549 inflight_start=[wal,wal,wal] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20600 span[wal_drain_write]=20582x1
+SPIKE slowio what=wal_drain us=23888 inflight_start=[wal_root] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23938 span[wal_drain_write]=23916x1
+SPIKE slowio what=wal_drain us=23366 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=23416 span[wal_drain_write]=23393x1
+SPIKE slowio what=wal_drain us=20591 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=20646 span[wal_drain_write]=20622x1
+SPIKE slowio what=wal_drain us=36835 inflight_start=[] inflight_end=[]
+SPIKE long site=wal_writer hold_us=36885 span[wal_drain_write]=36860x1
+report mode=multi-handle (closed loop: no coordinated-omission correction)
+lock site=store n=3067 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.8 hold_p50_us=1.8 hold_p99_us=31.8 hold_max_us=77594.6
+lock site=io n=6 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.3 hold_p99_us=409.3 hold_max_us=409.3
+lock site=wal n=2237 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.2 hold_p50_us=0.3 hold_p99_us=1.5 hold_max_us=8.3
+lock site=wal_writer n=1155 wait_p50_us=0.0 wait_p99_us=22708.2 wait_max_us=36896.8 hold_p50_us=31.2 hold_p99_us=21676.0 hold_max_us=37060.6
+lock site=wal_queue n=2174 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=14.8 hold_p50_us=0.5 hold_p99_us=2.8 hold_max_us=19.5
+lock site=readers n=1754 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=2.3 hold_p50_us=0.8 hold_p99_us=2.1 hold_max_us=19.1
+lock site=dir_live n=131 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.9 hold_max_us=16.8
+lock site=inode_live n=161 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=0.6 hold_p99_us=9.3 hold_max_us=13.8
+lock site=handles n=761 wait_p50_us=0.0 wait_p99_us=1.0 wait_max_us=31.6 hold_p50_us=1.0 hold_p99_us=5.0 hold_max_us=22.5
+lock site=file_cell n=1968 wait_p50_us=0.0 wait_p99_us=80.7 wait_max_us=493.1 hold_p50_us=4.1 hold_p99_us=68.0 hold_max_us=1098.8
+lock site=cell_map n=2660 wait_p50_us=0.0 wait_p99_us=0.3 wait_max_us=22.4 hold_p50_us=0.6 hold_p99_us=4.1 hold_max_us=23.5
+lock site=stripe n=28 wait_p50_us=0.0 wait_p99_us=0.0 wait_max_us=0.0 hold_p50_us=6.2 hold_p99_us=198.1 hold_max_us=198.1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 6.51s
