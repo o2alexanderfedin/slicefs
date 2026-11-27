@@ -17,9 +17,9 @@ layout.csv 111 rows, shape.csv 20 rows, build.csv 2 rows, checks.txt 2 lines
 results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
 # load after: 2.69 2.85 2.65 3/872 3825
 # layout.sh rc=0
-# Task 2: full matrix, Docker case prolly-layout, RESUME=1 (pilot rows reused: none were skipped for lack of the other layouts; the pilot rows are part of the 27)
+# Task 2: full matrix, Docker case prolly-layout, RESUME=1; the two pilot rows (boost-0-a-4096-16384, synth-1000000-a-4096-16384) were skipped and reused, the other 25 rows ran
 # docker ps before: no other container; host load average (uptime) before: 126.64 72.89 67.60 (other host jobs); VM load before: 2.02 2.65 2.59, after: 1.94 2.00 2.49
-# run time of the container run: 2026-11-27T07:01:46Z to 2026-11-27T07:29:26Z (28 min, 27 rows, no retry, no failed row, every .err file empty)
+# run time of the container run: 2026-11-27T07:01:46Z to 2026-11-27T07:29:26Z (28 min, 25 new rows plus 2 reused, no retry, no failed row, every .err file empty)
 row boost-0-a-8192-16384
 row boost-0-a-8192-32768
 row boost-0-b-4096-16384
@@ -49,3 +49,6 @@ layout.csv 1449 rows, shape.csv 144 rows, build.csv 27 rows, checks.txt 27 lines
 results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in /work/run; failed rows: 0
 # layout.sh rc=0
 # checks: 27 ok=1, 0 ok=0
+# Task 3: determinism re-run (synthetic 1M, layout a, config 8192:16384), RESUME=0, empty work volume, Boost steps run too
+# docker ps before: no other container; VM load before 1.66 1.91 2.43, after 3.25 2.56 2.61; run 2026-11-27T07:30:17Z to 2026-11-27T07:32:36Z (2 min 19 s); checks: 2 ok=1
+# determinism.txt: 50 of 50 commits equal on edits, nodes_read, nodes_written, bytes_written, forced_cuts; same=1

@@ -1,0 +1,85 @@
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=1 commits=10 nodes=22.5 cpu_ms=2.317 bytes_written=15012
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=100 commits=10 nodes=247 cpu_ms=20.450 bytes_written=401336
+row source=synth n=1000000 layout=a l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=51 cpu_ms=3.180 bytes_written=45809.5
+row source=synth n=1000000 layout=a l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=1821.5 cpu_ms=78.787 bytes_written=2.96744e+06
+row source=synth n=10000000 layout=a l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=63 cpu_ms=3.641 bytes_written=54611.5
+row source=synth n=10000000 layout=a l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=2540.5 cpu_ms=118.566 bytes_written=3.74554e+06
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=scatter k=1000 commits=10 nodes=1325 cpu_ms=81.060 bytes_written=2.53227e+06
+row source=boost n=0 layout=a l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=2404.5 cpu_ms=134.366 bytes_written=4.58037e+06
+row source=synth n=1000000 layout=a l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=10264.5 cpu_ms=511.249 bytes_written=1.88577e+07
+row source=synth n=1000000 layout=a l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=9408 cpu_ms=482.821 bytes_written=1.7099e+07
+row source=synth n=10000000 layout=a l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=18023 cpu_ms=940.628 bytes_written=2.92756e+07
+row source=synth n=10000000 layout=a l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=16098 cpu_ms=847.010 bytes_written=2.6076e+07
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=1 commits=10 nodes=9 cpu_ms=1.719 bytes_written=9265
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=100 commits=10 nodes=177 cpu_ms=14.775 bytes_written=299014
+row source=synth n=1000000 layout=b l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=33 cpu_ms=2.840 bytes_written=36104
+row source=synth n=1000000 layout=b l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=1446.5 cpu_ms=59.310 bytes_written=2.32596e+06
+row source=synth n=10000000 layout=b l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=45.5 cpu_ms=3.587 bytes_written=43323
+row source=synth n=10000000 layout=b l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=2051.5 cpu_ms=101.409 bytes_written=2.951e+06
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=scatter k=1000 commits=10 nodes=993 cpu_ms=81.612 bytes_written=1.89102e+06
+row source=boost n=0 layout=b l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=1807 cpu_ms=136.842 bytes_written=3.37938e+06
+row source=synth n=1000000 layout=b l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=8541 cpu_ms=391.059 bytes_written=1.53137e+07
+row source=synth n=1000000 layout=b l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=8692 cpu_ms=400.064 bytes_written=1.55945e+07
+row source=synth n=10000000 layout=b l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=14409 cpu_ms=695.930 bytes_written=2.31265e+07
+row source=synth n=10000000 layout=b l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=14647 cpu_ms=720.261 bytes_written=2.36072e+07
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=1 commits=10 nodes=9 cpu_ms=1.759 bytes_written=9265
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=100 commits=10 nodes=177 cpu_ms=13.462 bytes_written=299014
+row source=synth n=1000000 layout=c l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=37 cpu_ms=4.414 bytes_written=36670
+row source=synth n=1000000 layout=c l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=1448.5 cpu_ms=107.698 bytes_written=2.30357e+06
+row source=synth n=10000000 layout=c l=4096 node_max=16384 pattern=one k=1 commits=10 nodes=48 cpu_ms=2.704 bytes_written=43889
+row source=synth n=10000000 layout=c l=4096 node_max=16384 pattern=mixed k=100 commits=10 nodes=2029.5 cpu_ms=91.305 bytes_written=2.94251e+06
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=scatter k=1000 commits=10 nodes=993 cpu_ms=70.454 bytes_written=1.89102e+06
+row source=boost n=0 layout=c l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=1807 cpu_ms=107.695 bytes_written=3.37938e+06
+row source=synth n=1000000 layout=c l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=8526 cpu_ms=539.170 bytes_written=1.5298e+07
+row source=synth n=1000000 layout=c l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=8649 cpu_ms=424.750 bytes_written=1.54898e+07
+row source=synth n=10000000 layout=c l=4096 node_max=16384 pattern=mixed k=1000 commits=10 nodes=14341.5 cpu_ms=634.767 bytes_written=2.31212e+07
+row source=synth n=10000000 layout=c l=4096 node_max=16384 pattern=insdel k=1000 commits=10 nodes=14514 cpu_ms=637.154 bytes_written=2.34391e+07
+extrapolation layout=a l=4096 node_max=16384 map=inode entries_1b=1000000000 depth=5 levels=12090100/163200/2203/30/1 nodes=12255534
+extrapolation layout=a l=4096 node_max=16384 map=dir entries_1b=100036700 depth=5 levels=1206300/17300/249/4/1 nodes=1223854
+extrapolation layout=a l=4096 node_max=16384 map=manifest entries_1b=899963300 depth=5 levels=10864800/147800/2011/28/1 nodes=11014640
+extrapolation layout=a l=4096 node_max=16384 map=xattr entries_1b=49818700 depth=5 levels=602300/8400/118/2/1 nodes=610821
+extrapolation layout=a l=4096 node_max=16384 map=refcounts entries_1b=1799926600 depth=6 levels=21733600/444101/9075/186/4/1 nodes=22186967
+nodes_1b layout=a l=4096 node_max=16384 nodes=47291816
+extrapolation layout=b l=4096 node_max=16384 map=ns entries_1b=3849745300 depth=6 levels=48085100/823300/14097/242/5/1 nodes=48922745
+nodes_1b layout=b l=4096 node_max=16384 nodes=48922745
+extrapolation layout=c l=4096 node_max=16384 map=ns entries_1b=2049818700 depth=6 levels=25872000/364800/5144/73/2/1 nodes=26242020
+extrapolation layout=c l=4096 node_max=16384 map=refcounts entries_1b=1799926600 depth=6 levels=21733600/444101/9075/186/4/1 nodes=22186967
+nodes_1b layout=c l=4096 node_max=16384 nodes=48428987
+rule layout=b nodes_ratio measured=0.6813 max=0.8 pass
+rule layout=b cpu_ratio measured=0.8251 max=1.25 pass
+rule layout=b bytes_ratio measured=0.912 max=1.1 pass
+rule layout=b nodes_1b measured=4.892e+07 max=4.729e+07 fail
+rule layout=c nodes_ratio measured=0.6997 max=0.8 pass
+rule layout=c cpu_ratio measured=0.9475 max=1.25 pass
+rule layout=c bytes_ratio measured=0.9059 max=1.1 pass
+rule layout=c nodes_1b measured=4.843e+07 max=4.729e+07 fail
+rule layout_choice=a qualified=none
+row source=synth n=10000000 layout=a l=8192 node_max=16384 pattern=one k=1 commits=10 nodes=52 cpu_ms=6.912 bytes_written=90285.5
+row source=synth n=10000000 layout=a l=8192 node_max=16384 pattern=mixed k=100 commits=10 nodes=1991.5 cpu_ms=195.495 bytes_written=6.30606e+06
+row source=boost n=0 layout=a l=8192 node_max=16384 pattern=scatter k=1 commits=10 nodes=20.5 cpu_ms=1.651 bytes_written=23537
+extrapolation layout=a l=8192 node_max=16384 map=inode entries_1b=1000000000 depth=5 levels=6048100/40600/273/2/1 nodes=6088976
+extrapolation layout=a l=8192 node_max=16384 map=dir entries_1b=100036700 depth=4 levels=604900/4400/33/1 nodes=609334
+extrapolation layout=a l=8192 node_max=16384 map=manifest entries_1b=899963300 depth=5 levels=5448000/37600/260/2/1 nodes=5485863
+extrapolation layout=a l=8192 node_max=16384 map=xattr entries_1b=49818700 depth=4 levels=302300/2100/15/1 nodes=304416
+extrapolation layout=a l=8192 node_max=16384 map=refcounts entries_1b=1799926600 depth=5 levels=10880200/110000/1113/12/1 nodes=10991326
+nodes_1b layout=a l=8192 node_max=16384 nodes=23479915
+row source=synth n=10000000 layout=a l=8192 node_max=32768 pattern=one k=1 commits=10 nodes=52 cpu_ms=6.437 bytes_written=90285.5
+row source=synth n=10000000 layout=a l=8192 node_max=32768 pattern=mixed k=100 commits=10 nodes=1991.5 cpu_ms=192.317 bytes_written=6.30596e+06
+row source=boost n=0 layout=a l=8192 node_max=32768 pattern=scatter k=1 commits=10 nodes=20.5 cpu_ms=1.788 bytes_written=23537
+extrapolation layout=a l=8192 node_max=32768 map=inode entries_1b=1000000000 depth=5 levels=6048100/40600/273/2/1 nodes=6088976
+extrapolation layout=a l=8192 node_max=32768 map=dir entries_1b=100036700 depth=4 levels=604900/4400/33/1 nodes=609334
+extrapolation layout=a l=8192 node_max=32768 map=manifest entries_1b=899963300 depth=5 levels=5448000/37600/260/2/1 nodes=5485863
+extrapolation layout=a l=8192 node_max=32768 map=xattr entries_1b=49818700 depth=4 levels=302300/2100/15/1 nodes=304416
+extrapolation layout=a l=8192 node_max=32768 map=refcounts entries_1b=1799926600 depth=5 levels=10880100/110000/1113/12/1 nodes=10991226
+nodes_1b layout=a l=8192 node_max=32768 nodes=23479815
+rule config l=4096 node_max=16384 forced_share=0.00000 max=0.00500 pass
+rule config l=8192 node_max=16384 forced_share=0.00011 max=0.00500 pass
+rule config l=8192 node_max=16384 n1b_ratio measured=0.4965 max=0.65 pass
+rule config l=8192 node_max=16384 bytes_ratio measured=1.683 max=2.5 pass
+rule config l=8192 node_max=16384 cpu_ratio measured=1.639 max=2 pass
+rule config l=8192 node_max=32768 forced_share=0.00000 max=0.00500 pass
+rule config l=8192 node_max=32768 n1b_ratio measured=0.4965 max=0.65 pass
+rule config l=8192 node_max=32768 bytes_ratio measured=1.683 max=2.5 pass
+rule config l=8192 node_max=32768 cpu_ratio measured=1.61 max=2 pass
+note boost refcounts are empty (the product writes none today): the layout b-versus-c and refcount signal comes only from the synthetic rows
+verdict layout=a l=8192 node_max=16384
