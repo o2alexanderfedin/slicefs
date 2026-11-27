@@ -37,10 +37,10 @@ use crate::replay::{batch_path, field, measure, num_field, read_roots, Digest, M
 use crate::{root_record, run_fail, stats_delta, usage, usage_fields, Args, Fail, Res, KEY_LEN, MAP_ENTRY};
 
 /// One entry of a prolly tree or of a native map stream.
-type Kv = (Vec<u8>, Vec<u8>);
+pub(crate) type Kv = (Vec<u8>, Vec<u8>);
 
 /// A stream of sorted native entries.
-type KvStream<'s> = Box<dyn Iterator<Item = Res<Kv>> + 's>;
+pub(crate) type KvStream<'s> = Box<dyn Iterator<Item = Res<Kv>> + 's>;
 
 /// How the five maps are put into trees.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -130,7 +130,7 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     /// `source=.. n=.. layout=.. l=.. node_max=..`
-    fn fields(&self) -> String {
+    pub(crate) fn fields(&self) -> String {
         format!(
             "source={} n={} layout={} l={} node_max={}",
             self.source,
@@ -447,28 +447,50 @@ impl<'s> Engine<'s> {
     /// Builds the trees from five sorted native streams (in `MapKind`
     /// order) and prints the `tree` lines of phase base.
     pub(crate) fn build(cs: &'s ChunkStore, ctx: Ctx, base: [KvStream<'s>; 5]) -> Res<Engine<'s>> {
-        let mut trees = Vec::new();
-        match ctx.layout {
-            Layout::A => {
-                for (kind, src) in MapKind::ALL.into_iter().zip(base) {
-                    let (root, st) = build_tree(cs, ctx.cfg, src)?;
-                    trees.push(Tree { name: kind.name(), root, built_forced: st.forced_cuts, applied_forced: 0 });
+        let cfg = ctx.cfg;
+        let layout = ctx.layout;
+        let (trees, m) = measure(cs, || {
+            let mut trees = Vec::new();
+            match layout {
+                Layout::A => {
+                    for (kind, src) in MapKind::ALL.into_iter().zip(base) {
+                        let (root, st) = build_tree(cs, cfg, src)?;
+                        trees.push((Tree { name: kind.name(), root, built_forced: st.forced_cuts, applied_forced: 0 }, st));
+                    }
+                }
+                Layout::B | Layout::C => {
+                    let mut per_inode: Vec<KvStream<'s>> = base.into_iter().collect();
+                    let refs = per_inode.pop().expect("five streams");
+                    let (inside, apart) = if layout == Layout::B { (Some(refs), None) } else { (None, Some(refs)) };
+                    let ns = NsMerge { per_inode, refcounts: inside, heads: vec![None; 4], primed: false };
+                    let (root, st) = build_tree(cs, cfg, ns)?;
+                    trees.push((Tree { name: "ns", root, built_forced: st.forced_cuts, applied_forced: 0 }, st));
+                    if let Some(refs) = apart {
+                        let (root, st) = build_tree(cs, cfg, refs)?;
+                        trees.push((Tree { name: "refcounts", root, built_forced: st.forced_cuts, applied_forced: 0 }, st));
+                    }
                 }
             }
-            Layout::B | Layout::C => {
-                let mut per_inode: Vec<KvStream<'s>> = base.into_iter().collect();
-                let refs = per_inode.pop().expect("five streams");
-                let (inside, apart) = if ctx.layout == Layout::B { (Some(refs), None) } else { (None, Some(refs)) };
-                let ns = NsMerge { per_inode, refcounts: inside, heads: vec![None; 4], primed: false };
-                let (root, st) = build_tree(cs, ctx.cfg, ns)?;
-                trees.push(Tree { name: "ns", root, built_forced: st.forced_cuts, applied_forced: 0 });
-                if let Some(refs) = apart {
-                    let (root, st) = build_tree(cs, ctx.cfg, refs)?;
-                    trees.push(Tree { name: "refcounts", root, built_forced: st.forced_cuts, applied_forced: 0 });
-                }
-            }
-        }
-        cs.sync()?;
+            cs.sync()?;
+            Ok(trees)
+        })?;
+        let (mut nodes, mut bytes, mut forced) = (0u64, 0u64, 0u64);
+        let trees: Vec<Tree> = trees
+            .into_iter()
+            .map(|(t, st)| {
+                nodes += st.nodes_written;
+                bytes += st.bytes_written;
+                forced += st.forced_cuts;
+                t
+            })
+            .collect();
+        // The time of a build includes the time to make its input streams.
+        println!(
+            "build mode=layout {} ms={:.3} {} nodes_written={nodes} bytes_written={bytes} forced_cuts={forced}",
+            ctx.fields(),
+            m.ms,
+            usage_fields(&m.u0, &m.u1)
+        );
         let e = Engine { cs, ctx, trees };
         e.print_trees("base")?;
         Ok(e)
@@ -574,6 +596,46 @@ impl<'s> Engine<'s> {
     }
 }
 
+impl Engine<'_> {
+    /// The value of a native key of one map, reading one path of nodes.
+    pub(crate) fn get(&self, map: MapKind, key: &[u8]) -> Res<Option<Vec<u8>>> {
+        let (ti, k) = self.route(map, key);
+        Ok(prolly::get(self.cs, &self.trees[ti].root, &k)?)
+    }
+
+    /// The entry count of each map, in `MapKind` order, in one pass over the
+    /// combined tree (layouts b and c) or from the leaves of each tree (a).
+    pub(crate) fn map_counts(&self) -> Res<[u64; 5]> {
+        let mut c = [0u64; 5];
+        match self.ctx.layout {
+            Layout::A => {
+                for (i, t) in self.trees.iter().enumerate() {
+                    c[i] = shape_of(self.cs, &t.root)?.entries;
+                }
+            }
+            Layout::B | Layout::C => {
+                for r in prolly::iter(self.cs, &self.trees[0].root)? {
+                    let (k, _) = r?;
+                    match (k.first(), k.len(), k.last()) {
+                        (Some(&NS_REFCOUNT), _, _) => c[MapKind::Refcounts.index()] += 1,
+                        (Some(&NS_INODE), 10, Some(&kind)) if kind < 4 => c[usize::from(kind)] += 1,
+                        _ => return run_fail("a key of the combined tree is not of the grammar"),
+                    }
+                }
+                if self.ctx.layout == Layout::C {
+                    c[MapKind::Refcounts.index()] = shape_of(self.cs, &self.trees[1].root)?.entries;
+                }
+            }
+        }
+        Ok(c)
+    }
+
+    /// Prints the `check` line.
+    pub(crate) fn print_check(&self, ok: bool) {
+        println!("check mode=layout {} ok={}", self.ctx.fields(), u8::from(ok));
+    }
+}
+
 // ── layout ───────────────────────────────────────────────────────────────────
 
 /// A flat `base.bin` as a stream of native entries.
@@ -662,11 +724,8 @@ fn read_batch(dir: &Path, kind: MapKind, seq: u64, out: &mut Vec<MapEdit>) -> Re
     Ok(())
 }
 
-/// Replays the batches of `maps` into the trees of one layout and checks
-/// the final trees against the real final maps.
-pub(crate) fn layout(argv: &[String]) -> Res<()> {
-    let a = Args::parse(argv)?;
-    a.check(&["maps", "layout", "store", "l", "node-max"])?;
+/// The `--layout`, `--l` and `--node-max` options (shared with `synth`).
+pub(crate) fn layout_opts(a: &Args) -> Res<(Layout, Config)> {
     let which = a.str("layout")?;
     let Some(layout) = Layout::parse(which) else { return usage(format!("--layout: want a, b or c, got {which}")) };
     let (l, node_max) = (a.num("l", Some(4096))?, a.num("node-max", Some(16384))?);
@@ -675,6 +734,15 @@ pub(crate) fn layout(argv: &[String]) -> Res<()> {
         .zip(usize::try_from(node_max).ok())
         .and_then(|(l, m)| Config::new(l, m))
         .ok_or_else(|| Fail::Usage(format!("--l {l} --node-max {node_max}: want l in 256..=16384 and node-max in 4096..=32768")))?;
+    Ok((layout, cfg))
+}
+
+/// Replays the batches of `maps` into the trees of one layout and checks
+/// the final trees against the real final maps.
+pub(crate) fn layout(argv: &[String]) -> Res<()> {
+    let a = Args::parse(argv)?;
+    a.check(&["maps", "layout", "store", "l", "node-max"])?;
+    let (layout, cfg) = layout_opts(&a)?;
     let dir = a.path("maps")?;
     let store = a.path("store")?;
 
@@ -691,7 +759,6 @@ pub(crate) fn layout(argv: &[String]) -> Res<()> {
     }
     let Ok(base) = <[KvStream<'_>; 5]>::try_from(streams) else { return run_fail("five maps") };
     let ctx = Ctx { source: "boost", n, layout, cfg };
-    let fields = ctx.fields();
     let mut engine = Engine::build(&cs, ctx, base)?;
 
     for (seq, pattern, k) in &plan.commits {
@@ -712,7 +779,7 @@ pub(crate) fn layout(argv: &[String]) -> Res<()> {
         }
         ok &= plan.finals[kind.index()].as_ref().is_some_and(|(entries, digest)| *entries == d.entries && *digest == d.hex());
     }
-    println!("check mode=layout {fields} ok={}", u8::from(ok));
+    engine.print_check(ok);
     drop(engine);
     cs.close()?;
     if !ok {
