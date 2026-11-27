@@ -1169,6 +1169,102 @@ mod tests {
         assert_eq!(h.chunk_profile(), Some(ChunkProfile::DEFAULT));
     }
 
+    const SALT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    /// The `boundary-salt` flag line of this build, of the class `class`.
+    fn salt_flag(class: &str) -> String {
+        format!("{class} {BOUNDARY_SALT_FLAG} {BOUNDARY_SALT_RELEASE}\n")
+    }
+
+    /// D-10: a salt line is two words, the second 64 lowercase hex digits;
+    /// anything else is M9 `bad boundary-salt line`, a second line is M9
+    /// `two boundary-salt lines`.
+    #[test]
+    fn boundary_salt_line_errors() {
+        let ro = salt_flag("ro_compat");
+        let short = &SALT[..63];
+        let long = format!("{SALT}0");
+        let upper = SALT.to_uppercase();
+        let non_hex = format!("g{}", &SALT[1..]);
+        let lines = [
+            "boundary-salt".to_string(),
+            "boundary-salt ".to_string(),
+            format!("boundary-salt {short}"),
+            format!("boundary-salt {long}"),
+            format!("boundary-salt {upper}"),
+            format!("boundary-salt {non_hex}"),
+            format!("boundary-salt {SALT} {SALT}"),
+            format!("boundary-salt {SALT} x"),
+        ];
+        for line in lines {
+            let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{line}\n{ro}")).expect_err(&line).to_string();
+            assert!(err.contains("line 3: bad boundary-salt line"), "{line:?}: {err}");
+        }
+        let two = format!("{FORMAT}{HASH}boundary-salt {SALT}\n{ro}boundary-salt {SALT}\n");
+        let err = parse(Path::new(STORE), &two).expect_err("two lines").to_string();
+        assert!(err.contains("line 5: two boundary-salt lines"), "{err}");
+    }
+
+    /// D-10: the salt line and the `boundary-salt` flag come together or
+    /// not at all, and the flag is ro_compat (M9 with the line number); a
+    /// valid pair parses, opens read and write and writes back as it is.
+    #[test]
+    fn boundary_salt_pairing() {
+        let line = format!("boundary-salt {SALT}\n");
+        let cases = [
+            (format!("{FORMAT}{HASH}{line}"), "line 3: boundary-salt line with no boundary-salt flag"),
+            (format!("{FORMAT}{HASH}{}", salt_flag("ro_compat")), "line 3: boundary-salt flag with no boundary-salt line"),
+            (format!("{FORMAT}{HASH}{}", salt_flag("compat")), "line 3: boundary-salt flag with no boundary-salt line"),
+            (format!("{FORMAT}{HASH}{line}{}", salt_flag("compat")), "line 4: the feature boundary-salt must be ro_compat"),
+            (format!("{FORMAT}{HASH}{}{line}", salt_flag("incompat")), "line 3: the feature boundary-salt must be ro_compat"),
+        ];
+        for (text, want) in cases {
+            let err = parse(Path::new(STORE), &text).expect_err(want).to_string();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+        let ro = salt_flag("ro_compat");
+        for text in [format!("{FORMAT}{HASH}{line}{ro}"), format!("{FORMAT}{HASH}{ro}{line}")] {
+            let h = parse(Path::new(STORE), &text).unwrap();
+            assert_eq!(h.boundary_salt().map(|s| salt_hex(&s)).as_deref(), Some(SALT));
+            for want in ALL {
+                assert_eq!(decide(Path::new(STORE), &h, want).unwrap(), Access::ReadWrite, "{want:?}");
+            }
+            assert_eq!(h.to_text(), text);
+        }
+        let none = parse(Path::new(STORE), &format!("{FORMAT}{HASH}")).unwrap();
+        assert_eq!(none.boundary_salt(), None);
+    }
+
+    /// D-10: `marker_with_salt` writes the salt line and its flag after the
+    /// chunks lines, and the default marker has neither.
+    #[test]
+    fn marker_with_salt_has_the_line_and_the_flag() {
+        let salt = parse_salt_hex(SALT).unwrap();
+        assert_eq!(salt_hex(&salt), SALT);
+        assert_eq!(marker_with_salt(DEFAULT_HASHER, ChunkProfile::DEFAULT, None), marker(DEFAULT_HASHER));
+        assert_eq!(
+            marker_with_salt(DEFAULT_HASHER, ChunkProfile::DEFAULT, Some(salt)),
+            format!("{FORMAT}{HASH}boundary-salt {SALT}\n{}", salt_flag("ro_compat"))
+        );
+        let p = ChunkProfile::new(16384, 65536, 262144).unwrap();
+        let text = marker_with_salt(DEFAULT_HASHER, p, Some(salt));
+        let h = parse(Path::new(STORE), &text).unwrap();
+        assert_eq!((h.chunk_profile(), h.boundary_salt()), (Some(p), Some(salt)));
+        assert_eq!(h.to_text(), text);
+    }
+
+    /// D-10, D-11: a rewrite of the header by a `--hash` change keeps the
+    /// salt line and its flag in their order.
+    #[test]
+    fn a_rewrite_keeps_the_boundary_salt_line() {
+        let d = tempfile::tempdir().unwrap();
+        let (line, ro) = (format!("boundary-salt {SALT}\n"), salt_flag("ro_compat"));
+        let old = format!("{FORMAT}{HASH}{line}{ro}");
+        std::fs::write(d.path().join(FORMAT_FILE), &old).unwrap();
+        crate::content::check_write_with(d.path(), Some("test-keyed-blake3"), None).unwrap();
+        assert_eq!(read(d.path()).unwrap().unwrap(), old.replace(HASH, "hash test-keyed-blake3\n"));
+    }
+
     /// [Compat], [Parse order]: a rewrite by `select_hash` keeps every flag
     /// line and every unknown line in its order; only the hash line changes.
     #[test]

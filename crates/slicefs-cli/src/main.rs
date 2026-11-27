@@ -55,8 +55,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Seed { store, source_dir, hash, chunk_profile } => {
-            if let Err(e) = seed::run_seed_with(&store, &source_dir, hash.as_deref(), chunk_profile) {
+        Cmd::Seed { store, source_dir, hash, chunk_profile, boundary_salt } => {
+            if let Err(e) = seed::run_seed_with_salt(&store, &source_dir, hash.as_deref(), chunk_profile, boundary_salt) {
                 if json {
                     eprintln!("{{\"error\": \"{e}\"}}");
                 } else {
