@@ -452,7 +452,7 @@ impl DictMetadataStore {
             cs,
             unsynced_puts: AtomicU64::new(0),
             put_error: lk(None),
-            inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeMap),
+            inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
@@ -1843,7 +1843,7 @@ impl DictMetadataStore {
             cs,
             unsynced_puts: AtomicU64::new(0),
             put_error: lk(None),
-            inode_alloc: lk(inode_alloc).timed(Site::InodeMap),
+            inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
@@ -2455,7 +2455,7 @@ mod tests {
         let (_dir, store) = make_store();
         let old = crate::store_io::put_value(store.io().lock().unwrap().store(), &[0u8; 230]).unwrap();
         let r = DictMetadataStore::load_from_root(Arc::clone(store.io()), &old);
-        assert!(matches!(r, Err(MetaError::Corrupted(_))));
+        assert!(matches!(&r, Err(MetaError::Corrupted(m)) if m.contains("expected 197 bytes, got 230")));
     }
 
     #[test]

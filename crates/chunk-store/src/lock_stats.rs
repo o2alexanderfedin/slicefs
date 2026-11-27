@@ -46,8 +46,8 @@ pub enum Site {
     CellMap,
     /// A namespace stripe of the file system core (`NamespaceLocks`).
     Stripe,
-    /// `inode_map` of the metadata store (inode allocator and table).
-    InodeMap,
+    /// The inode number allocator of the metadata store.
+    InodeAlloc,
     /// `inode_data` of the metadata store (inode -> data key as of the last flush).
     InodeData,
     /// `dir_data` of the metadata store (directory -> entry list key).
@@ -76,7 +76,7 @@ impl Site {
         Site::FileCell,
         Site::CellMap,
         Site::Stripe,
-        Site::InodeMap,
+        Site::InodeAlloc,
         Site::InodeData,
         Site::DirData,
         Site::ManifestData,
@@ -99,7 +99,7 @@ impl Site {
             Site::FileCell => "file_cell",
             Site::CellMap => "cell_map",
             Site::Stripe => "stripe",
-            Site::InodeMap => "inode_map",
+            Site::InodeAlloc => "inode_alloc",
             Site::InodeData => "inode_data",
             Site::DirData => "dir_data",
             Site::ManifestData => "manifest_data",

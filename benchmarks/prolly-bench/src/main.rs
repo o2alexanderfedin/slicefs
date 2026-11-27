@@ -37,23 +37,21 @@ const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--
 // Root record layout: a copy of `root_rec` in crates/metadata/src/store.rs
 // (it is `pub(crate)`), with 33-byte keys.
 /// Size of the root record.
-pub(crate) const ROOT_REC_SIZE: usize = 230;
-/// Offset of the `inode_map` key.
-pub(crate) const RR_INODE_MAP: usize = 0;
+pub(crate) const ROOT_REC_SIZE: usize = 197;
 /// Offset of `next_ino` (u64 LE).
-pub(crate) const RR_NEXT_INO: usize = 41;
+pub(crate) const RR_NEXT_INO: usize = 8;
 /// Offset of the `inode_data` key.
-pub(crate) const RR_INODE_DATA: usize = 49;
+pub(crate) const RR_INODE_DATA: usize = 16;
 /// Offset of the `dir_data` key.
-pub(crate) const RR_DIR_DATA: usize = 82;
+pub(crate) const RR_DIR_DATA: usize = 49;
 /// Offset of the `manifest_data` key.
-pub(crate) const RR_MANIFEST_DATA: usize = 115;
+pub(crate) const RR_MANIFEST_DATA: usize = 82;
 /// Offset of the `xattr_data` key.
-pub(crate) const RR_XATTR_DATA: usize = 148;
+pub(crate) const RR_XATTR_DATA: usize = 115;
 /// Offset of the `refcounts` key.
-pub(crate) const RR_REFCOUNTS: usize = 181;
+pub(crate) const RR_REFCOUNTS: usize = 148;
 /// Offset of `inode_count` (u64 LE).
-pub(crate) const RR_INODE_COUNT: usize = 222;
+pub(crate) const RR_INODE_COUNT: usize = 189;
 /// Bytes of an `ObjectKey` (tag and digest).
 pub(crate) const KEY_LEN: usize = 33;
 /// One map entry: ino u64 LE and a key (`MAP_ENTRY` of store.rs).
@@ -322,16 +320,16 @@ pub(crate) fn segment_root(store: &Path) -> Res<ObjectKey> {
 
 /// The fields of a root record that the bench reads.
 pub(crate) struct RootRec {
-    /// The keys of the six maps: inode_map, inode_data, dir_data,
-    /// manifest_data, xattr_data, refcounts.
-    pub(crate) maps: [ObjectKey; 6],
+    /// The keys of the five maps: inode_data, dir_data, manifest_data,
+    /// xattr_data, refcounts.
+    pub(crate) maps: [ObjectKey; 5],
     pub(crate) next_ino: u64,
     pub(crate) inode_count: u64,
 }
 
 impl RootRec {
     pub(crate) fn inode_data(&self) -> ObjectKey {
-        self.maps[1]
+        self.maps[0]
     }
 }
 
@@ -341,7 +339,7 @@ pub(crate) fn root_record(cs: &ChunkStore, root: &ObjectKey) -> Res<RootRec> {
         return run_fail(format!("root record of {} bytes, want {ROOT_REC_SIZE}", b.len()));
     }
     let u64_at = |at: usize| u64::from_le_bytes(b[at..at + 8].try_into().expect("8 bytes"));
-    let maps = [RR_INODE_MAP, RR_INODE_DATA, RR_DIR_DATA, RR_MANIFEST_DATA, RR_XATTR_DATA, RR_REFCOUNTS]
+    let maps = [RR_INODE_DATA, RR_DIR_DATA, RR_MANIFEST_DATA, RR_XATTR_DATA, RR_REFCOUNTS]
         .map(|at| ObjectKey::read(&b, at));
     Ok(RootRec { maps, next_ino: u64_at(RR_NEXT_INO), inode_count: u64_at(RR_INODE_COUNT) })
 }
@@ -351,7 +349,7 @@ pub(crate) fn map_len(cs: &ChunkStore, key: &ObjectKey) -> Res<u64> {
     Ok(FileReader::open(cs, to_id(key))?.len())
 }
 
-/// The serialized bytes of a commit: the six maps and the root record.
+/// The serialized bytes of a commit: the five maps and the root record.
 pub(crate) fn serialized_bytes(cs: &ChunkStore, rr: &RootRec) -> Res<u64> {
     let mut n = ROOT_REC_SIZE as u64;
     for k in &rr.maps {
