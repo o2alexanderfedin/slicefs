@@ -6,12 +6,15 @@
 //! `whole` commits on the real `DictMetadataStore`, `batches` extracts the
 //! `inode_data` change of each commit, and `flat` (a copy of today's map
 //! serializer) and `prolly` (the prototype) replay the changes, each in its
-//! own scratch store. `scale` compares the two on synthetic maps.
+//! own scratch store. `scale` compares the two on synthetic maps. `maps`
+//! extracts the change of all five metadata maps of each commit, and
+//! `layout` replays them into prolly trees of one layout (Phase 25).
 //!
 //! Output: one line per record, the first word is the kind, then
 //! `key=value` fields. Progress goes to stderr. A bad argument exits 2,
 //! another failure exits 1.
 
+mod layout;
 mod replay;
 mod whole;
 
@@ -32,7 +35,9 @@ const USAGE: &str = "usage: prolly-bench gen tree --dir D --files N --seed S [--
        prolly-bench batches --store S --roots FILE --out DIR
        prolly-bench flat --batches DIR --store F
        prolly-bench prolly --batches DIR --store P
-       prolly-bench scale --mode <flat|prolly> --n N --store DIR [--seed S]";
+       prolly-bench scale --mode <flat|prolly> --n N --store DIR [--seed S]
+       prolly-bench maps --store S --roots FILE --out DIR
+       prolly-bench layout --maps DIR --layout <a|b|c> --store P [--l L] [--node-max M]";
 
 // Root record layout: a copy of `root_rec` in crates/metadata/src/store.rs
 // (it is `pub(crate)`), with 33-byte keys.
@@ -71,6 +76,7 @@ pub(crate) const S_IFREG: u32 = 0o100_000;
 pub(crate) const S_IFDIR: u32 = 0o040_000;
 
 /// Why a subcommand stopped.
+#[derive(Debug)]
 pub(crate) enum Fail {
     /// A bad argument: print the usage, exit 2.
     Usage(String),
@@ -232,6 +238,8 @@ fn main() {
         Some("flat") => replay::flat(rest),
         Some("prolly") => replay::prolly(rest),
         Some("scale") => replay::scale(rest),
+        Some("maps") => layout::maps(rest),
+        Some("layout") => layout::layout(rest),
         Some(s) => usage(format!("unknown subcommand {s}")),
         None => usage("no subcommand"),
     };
