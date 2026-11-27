@@ -20,14 +20,24 @@ High-ratio data deduplication that works transparently as a real, daily-driver f
 - Writes: streaming for sequential writes; random writes use per-file overlays with a fixed dirty limit, so daemon memory does not grow with the file size. Write log with replay after a crash; reachability GC, online at mount.
 - macOS: FUSE-T 1.2+ with FSKit only. Linux: libfuse.
 
+## Current Milestone: v2.3 Prolly Metadata & Robustness
+
+**Goal:** Move the metadata maps to prolly trees so a commit stays fast with millions of inodes, and make the store safer to use: a migration path between store formats, random crash tests, a scrub that names the damaged files, and a user page for the limits. It ships as release `v2.4.0`.
+
+**Target features:**
+- Prolly trees for the metadata maps, behind a store format flag (#215)
+- Migration path between store formats: the copy path, `scripts/migrate-store.sh`, `docs/user/upgrade.md` (#155)
+- Random crash tests and soak runs of a live mount in Docker (#157)
+- Scrub lists the files and snapshots that each bad object damages; `--json`; exit codes 0/1/2; bounded memory (#159)
+- User page for status, crash guarantees and limits (#158)
+
 ## Next Milestone Goals
 
-Not defined yet (run `/gsd-new-milestone`). Owner items to carry forward:
+Items carried forward (not in v2.3):
 - Release publishing (#178, sub-issues #179-#195; review bugs #196-#199): binaries and reports for macOS and Linux.
 - Refcount removal (#165).
 - #207 remaining parts: whole `.idx` decode, Bloom filters at about 1.25 B per object.
 - #210: scrub keeps all content keys in RAM.
-- Prolly trees (#19): decision "later" (comment posted); no work planned now.
 - v2.2 audit warnings: G1 (no end-to-end test with a real mount and N workers around a rehash), G2 (the rehash refcount sorter has no free-space check), G3 (extsort, hash, rehash and the gc-tmp mark have no Miri, loom or TSan target of their own).
 - Open items from the Phase 19-21.2 deferred lists (see STATE.md Deferred Items), for example write scaling (the single pack appender), a macOS worker default above 1, and a public `--read-only` mount option.
 
@@ -91,7 +101,11 @@ Other candidates: idle-merge control (#141), several roots, commits and refs (#8
 
 ### Active
 
-- [ ] Next milestone not defined yet; see Next Milestone Goals.
+- [ ] Prolly-tree metadata maps behind a store format flag (#215)
+- [ ] Migration path between store formats (#155)
+- [ ] Random crash tests and soak runs of a live mount (#157)
+- [ ] Scrub names the damaged files and snapshots (#159)
+- [ ] User page for status, crash guarantees and limits (#158)
 
 ### Out of Scope
 
@@ -141,7 +155,7 @@ Other candidates: idle-merge control (#141), several roots, commits and refs (#8
 | Safety gates run in the release gate, not on each PR (v2.2, Phase 21.2) | Owner decision (2026-11-26); the release must not ship with a failed gate | ✓ Good |
 | Chunk profile fixed per store at `seed`; default stays 4/8/32 KiB (v2.2, Phase 22) | A profile change is a store-format change; the owner decides the default | — Pending (the benchmark recommends 8/32/128 KiB) |
 | SHA-256 as a second production hash; rehash is offline only (v2.2, Phase 23) | Owner decision; rehash refuses while the store is mounted | ✓ Good |
-| Prolly trees: decision "later" (v2.2, Phase 24) | At the Boost scale the gain per commit is small (about 4-8 ms); it grows with the map (1.6M entries pass 100 ms flat); file manifests are already content-cut trees | — Pending (#19) |
+| Prolly trees: decision "later" (v2.2, Phase 24) | At the Boost scale the gain per commit is small (about 4-8 ms); it grows with the map (1.6M entries pass 100 ms flat); file manifests are already content-cut trees | ⚠️ Overridden: the owner filed #215 (priority high) on 2026-11-26; prolly maps are adopted in v2.3 |
 | GSD milestone v2.2 ships as release `v2.3.0` | `v2.2.0` was already used by the v2.1 release | ✓ Done |
 
 ## Evolution
@@ -163,4 +177,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-11-26 after v2.2 milestone*
+*Last updated: 2026-11-26 after the start of milestone v2.3*

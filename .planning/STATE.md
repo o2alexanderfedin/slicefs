@@ -1,20 +1,16 @@
 ---
 gsd_state_version: "1.0"
-milestone: v2.2
-milestone_name: Concurrency & Store Evolution
-status: Awaiting next milestone
-stopped_at: Milestone v2.2 complete and archived
-last_updated: "2026-11-26T23:42:03.842Z"
+milestone: v2.3
+milestone_name: Prolly Metadata & Robustness
+status: planning
+last_updated: "2026-11-27T00:56:14.117Z"
 last_activity: 2026-11-26
-last_activity_desc: Milestone v2.2 completed and archived
-state_head: 8195e80c79d2924324b70bf46e2de7b4384b37d5
 progress:
-  total_phases: 9
-  completed_phases: 9
-  total_plans: 69
-  completed_plans: 69
-  percent: 100
-current_phase: 24
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -28,10 +24,11 @@ See: .planning/PROJECT.md (updated 2026-11-26)
 
 ## Current Position
 
-Phase: Milestone v2.2 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-11-26 — Milestone v2.2 completed and archived
+Status: Defining requirements
+Last activity: 2026-11-26 — Milestone v2.3 started
+
 
 ## Performance Metrics
 
