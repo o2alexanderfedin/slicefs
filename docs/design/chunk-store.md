@@ -172,7 +172,7 @@ snapshots are 33-byte keys in the `RootUpdate` and `Snapshot` records.
 The metadata and the file content share one `ChunkStore` instance: a commit
 syncs the active pack once, then logs the root. A directory entry key is
 BLAKE3-256 of the name (no object is stored for it). The store format
-number and the store header are in `docs/design/store-format.md` (format 7;
+number and the store header are in `docs/design/store-format.md` (format 8;
 a store of an older format is refused).
 
 ## Object IDs and the hash
