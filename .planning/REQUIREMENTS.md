@@ -14,7 +14,7 @@
 - [x] **PMAP-04**: The boundary rule uses a fixed-point table (no float test) and carries a version byte; the rule and its constants are in `docs/design/store-format.md`, together with the prolly node format.
 - [x] **PMAP-05**: Prolly stores are store format 8 (owner decision, Phase 25 discussion); an old release refuses such a store; the new build refuses format 7 with a message that points to the upgrade doc; no backward compatibility with old stores.
 - [ ] **PMAP-06**: GC mark reaches all prolly nodes with bounded memory (no whole map in RAM); online GC keeps working.
-- [ ] **PMAP-07**: The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more takes at most 1/5 of the flat time; Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance.
+- [ ] **PMAP-07**: The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more does its pre-sync work (CPU and nodes read and written, sync excluded) in at most 1/5 of the flat time, and its total wall time (sync included) is lower than flat (owner, 2026-11-27: a sync-bound total such as 0.7x is an accepted gain); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance.
 - [ ] **PMAP-08**: Crash tests: a commit cut at any point replays to a consistent tree.
 
 ### Store format migration (#155)

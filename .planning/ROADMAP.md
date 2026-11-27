@@ -249,7 +249,7 @@ Plans:
   2. A commit with one change does work in proportion to the change: a counter test at two store sizes shows that the nodes read and written grow at most with the tree height
   3. GC mark reaches every prolly node of the live root and of each snapshot with bounded memory (no whole map in RAM; a test caps peak memory on a large map); online GC at mount still runs, frees nodes that no root reaches, and keeps the rest
   4. A commit cut at any point replays to a consistent tree: a crash test cuts the commit at each write and sync step and checks the tree after replay
-  5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more takes at most 1/5 of the flat time (flat time measured with release `v2.3.0`); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
+  5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more does its pre-sync work in at most 1/5 of the flat time and its total wall time, sync included, is lower than flat (flat time measured with release `v2.3.0`; owner accepts a sync-bound total such as 0.7x); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
 **Plans**: TBD
 
 ### Phase 27: Store migration

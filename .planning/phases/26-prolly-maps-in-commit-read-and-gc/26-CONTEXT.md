@@ -25,6 +25,9 @@ Not in this phase: store migration (Phase 27), crash/soak tests of a live mount 
 - Scope (owner, after research): rehash is ported to rebuild the trees (node IDs change with the hash); paged readdir (resume from a name cookie) is a stretch item, not required; the GC mark walks every snapshot root in full (N snapshots cost N times the node count) and this cost is accepted and recorded; skipping shared subtrees is a later item.
 - `docs/design/store-format.md` § "Metadata maps (store format 8)" is updated with the new key grammar and value encodings (with a version or tag byte where an inline value and a spilled value can both occur).
 
+### PMAP-07 target (owner, 2026-11-27)
+- The 1/5 target applies to the pre-sync work of a one-change commit at 1,000,000 inodes (CPU time and nodes read and written, sync excluded). The total wall time, sync included, must be lower than flat; the owner said "even 0.7x is a good change", so a sync-bound total such as 0.7x passes. Both numbers are measured and recorded; the rule file is committed before any measurement.
+
 ### Carried from Phase 25 (locked)
 - Layout a (five trees), constants L=8192 / NODE_MAX=16384 / NODE_MIN=512 / MAX_ENTRY=2048 / MAX_KEY=1024, integer boundary rule with `RULE_VERSION` 1, optional boundary salt, store format 8, 197-byte root record with five map keys and `next_ino`.
 - Design target 1B+ inodes; counts from internal entry counts or the root record, never a full leaf walk.
