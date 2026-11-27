@@ -206,8 +206,13 @@ def info_rows(flat_rows, prolly_rows):
     with its absolute CPU and wall time."""
     gated = {(p, str(k)) for p in GATED_PATTERNS for k in GATED_KS}
     for key in sorted(set(flat_rows) & set(prolly_rows)):
-        fc, fw, fb = boost_values(flat_rows[key])
-        pc, pw, pb = boost_values(prolly_rows[key])
+        try:
+            fc, fw, fb = boost_values(flat_rows[key])
+            pc, pw, pb = boost_values(prolly_rows[key])
+        except Refuse:
+            # A row that no check gates never stops the verdict (a column may be NA).
+            print("info pattern=%s k=%s unreadable" % key)
+            continue
         if key not in gated:
             print("info pattern=%s k=%s cpu_ratio=%s wall_ratio=%s bytes_ratio=%s" % (
                 key[0], key[1], r3(ratio(pc, fc)), r3(ratio(pw, fw)), r3(ratio(pb, fb))))
@@ -404,6 +409,10 @@ def self_test():
     expect("exit 2 on same tree label", rc == 2 and err)
     rc, _, err = case(good, prolly_b=boost_csv().replace("whole,median,insdel,100,", "whole,median,insdel,101,"))
     expect("exit 2 on missing gated row", rc == 2 and err)
+    pb = boost_csv(cpu=0.5, wall=50.0, stored=1500) + "whole,median,version,0,0,NA,NA,NA,NA\n"
+    rc, out, _ = case(good, prolly_b=pb, flat_b=boost_csv() + "whole,median,version,0,0,NA,NA,NA,NA\n")
+    expect("NA in an ungated row is recorded", rc == 0 and "info pattern=version k=0 unreadable" in out
+           and out.strip().splitlines()[-1] == "verdict pmap07=pass")
     rc, _, err = case(good, prolly_b="mode,run\nwhole,median\n")
     expect("exit 2 on missing column", rc == 2 and err)
     r = subprocess.run([sys.executable, os.path.abspath(__file__), "--flat-commit", "/nonexistent/x", "--prolly-commit",
