@@ -50,7 +50,7 @@ pub enum Kind {
     ValueMap = 3,
     /// The `u64 -> key` map of manifest lists.
     ManifestMap = 4,
-    InodeMap = 5,
+    // 5 is not used (it was the inode map, removed in store format 8).
     Refcounts = 6,
     Root = 7,
 }

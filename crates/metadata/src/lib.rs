@@ -6,7 +6,7 @@
 //! (`store_io`), next to the file content.
 
 pub mod inode;
-pub mod inode_map;
+pub mod inode_alloc;
 pub mod directory;
 pub mod manifest;
 pub mod xattr;
