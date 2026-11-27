@@ -6,7 +6,7 @@
     {
       "number": "25",
       "name": "Prolly format and layout",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "26",
@@ -36,8 +36,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 1 of 6 · 0% · executing"
+    "label": "Advance to the next step (plan phase 26)",
+    "reason": "Phase 2 of 6 — needs a plan"
   },
-  "updated_at": "2026-11-27T05:16:57.889Z"
+  "updated_at": "2026-11-27T08:09:04.761Z"
 }
