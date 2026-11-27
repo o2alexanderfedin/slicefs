@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// One batch record: op u8 (1 put, 0 delete), ino u64 LE, key.
-const BATCH_REC: usize = 1 + MAP_ENTRY;
+pub(crate) const BATCH_REC: usize = 1 + MAP_ENTRY;
 
 /// Base records per read of the hash-cost loop (about 41 KB).
 const HASH_PIECE_ENTRIES: usize = 1024;
@@ -32,7 +32,7 @@ const BUILD_PIECE_ENTRIES: usize = 16_384;
 
 /// The entries of one `u64 -> key` map node, in order, read in `PIECE`
 /// reads: it holds at most one piece and one partial record.
-struct MapStream<'s> {
+pub(crate) struct MapStream<'s> {
     cs: &'s ChunkStore,
     r: FileReader,
     /// The next byte offset to read.
@@ -44,7 +44,7 @@ struct MapStream<'s> {
 }
 
 impl<'s> MapStream<'s> {
-    fn open(cs: &'s ChunkStore, key: &ObjectKey) -> Res<Self> {
+    pub(crate) fn open(cs: &'s ChunkStore, key: &ObjectKey) -> Res<Self> {
         let mut r = FileReader::open(cs, to_id(key))?;
         let len = r.len();
         if len < 8 {
@@ -59,6 +59,15 @@ impl<'s> MapStream<'s> {
     }
 
     fn next_entry(&mut self) -> Res<Option<(u64, [u8; KEY_LEN])>> {
+        Ok(self.next_raw()?.map(|e| {
+            let ino = u64::from_le_bytes(e[..8].try_into().expect("8 bytes"));
+            (ino, e[8..].try_into().expect("33 bytes"))
+        }))
+    }
+
+    /// The next raw 41-byte record: the per-inode maps give `(ino LE, key)`,
+    /// the refcount map `(key, count LE)`.
+    pub(crate) fn next_raw(&mut self) -> Res<Option<[u8; MAP_ENTRY]>> {
         if self.left == 0 {
             return Ok(None);
         }
@@ -73,24 +82,22 @@ impl<'s> MapStream<'s> {
                 return run_fail("map node ends inside an entry");
             }
         }
-        let e = &self.buf[self.pos..self.pos + MAP_ENTRY];
-        let ino = u64::from_le_bytes(e[..8].try_into().expect("8 bytes"));
-        let key: [u8; KEY_LEN] = e[8..].try_into().expect("33 bytes");
+        let e: [u8; MAP_ENTRY] = self.buf[self.pos..self.pos + MAP_ENTRY].try_into().expect("41 bytes");
         self.pos += MAP_ENTRY;
         self.left -= 1;
-        Ok(Some((ino, key)))
+        Ok(Some(e))
     }
 }
 
 /// The count and BLAKE3 digest of a map: over its 41-byte records (ino LE
 /// and key) in ino order, without the count.
-struct Digest {
+pub(crate) struct Digest {
     h: blake3::Hasher,
-    entries: u64,
+    pub(crate) entries: u64,
 }
 
 impl Digest {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Digest { h: blake3::Hasher::new(), entries: 0 }
     }
 
@@ -100,20 +107,26 @@ impl Digest {
         self.entries += 1;
     }
 
-    fn hex(&self) -> String {
+    /// Adds one raw 41-byte record (the same bytes as `add` of its parts).
+    pub(crate) fn add_raw(&mut self, rec: &[u8; MAP_ENTRY]) {
+        self.h.update(rec);
+        self.entries += 1;
+    }
+
+    pub(crate) fn hex(&self) -> String {
         self.h.finalize().to_hex().to_string()
     }
 }
 
 /// One line of the roots file: `seq pattern k root_hex`.
-struct RootLine {
-    seq: u64,
-    pattern: String,
-    k: u64,
-    root: ObjectKey,
+pub(crate) struct RootLine {
+    pub(crate) seq: u64,
+    pub(crate) pattern: String,
+    pub(crate) k: u64,
+    pub(crate) root: ObjectKey,
 }
 
-fn read_roots(path: &Path) -> Res<Vec<RootLine>> {
+pub(crate) fn read_roots(path: &Path) -> Res<Vec<RootLine>> {
     let mut out = Vec::new();
     for line in BufReader::new(fs::File::open(path)?).lines() {
         let line = line?;
@@ -128,7 +141,7 @@ fn read_roots(path: &Path) -> Res<Vec<RootLine>> {
     Ok(out)
 }
 
-fn batch_path(dir: &Path, seq: u64) -> PathBuf {
+pub(crate) fn batch_path(dir: &Path, seq: u64) -> PathBuf {
     dir.join(format!("batch-{seq:05}.bin"))
 }
 
@@ -237,13 +250,13 @@ struct Plan {
     digest: String,
 }
 
-fn field<'a>(line: &'a str, name: &str) -> Res<&'a str> {
+pub(crate) fn field<'a>(line: &'a str, name: &str) -> Res<&'a str> {
     line.split_whitespace()
         .find_map(|w| w.strip_prefix(name).and_then(|r| r.strip_prefix('=')))
         .ok_or_else(|| Fail::Run(format!("no {name}= in: {line}")))
 }
 
-fn num_field(line: &str, name: &str) -> Res<u64> {
+pub(crate) fn num_field(line: &str, name: &str) -> Res<u64> {
     field(line, name)?.parse().map_err(|_| Fail::Run(format!("bad {name}= in: {line}")))
 }
 
@@ -315,15 +328,15 @@ fn check(mode: &str, plan: &Plan, d: &Digest) -> Res<()> {
 }
 
 /// Wall time, usage and store stats around one timed step.
-struct Measured {
-    ms: f64,
-    u0: Usage,
-    u1: Usage,
-    s0: Stats,
-    s1: Stats,
+pub(crate) struct Measured {
+    pub(crate) ms: f64,
+    pub(crate) u0: Usage,
+    pub(crate) u1: Usage,
+    pub(crate) s0: Stats,
+    pub(crate) s1: Stats,
 }
 
-fn measure<T>(cs: &ChunkStore, f: impl FnOnce() -> Res<T>) -> Res<(T, Measured)> {
+pub(crate) fn measure<T>(cs: &ChunkStore, f: impl FnOnce() -> Res<T>) -> Res<(T, Measured)> {
     let s0 = cs.stats();
     let u0 = rusage();
     let t = Instant::now();

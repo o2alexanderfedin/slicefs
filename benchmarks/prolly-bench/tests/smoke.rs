@@ -93,6 +93,24 @@ fn smoke_end_to_end() {
     assert!(insdel.iter().map(|l| num(l, "inserts")).sum::<u64>() >= 1, "{out}");
     assert!(insdel.iter().map(|l| num(l, "dels")).sum::<u64>() >= 1, "{out}");
 
+    // The five-map change of each commit, and layout a over it.
+    let after_base = std::fs::read_to_string(&roots).expect("roots file").lines().count() - 1;
+    let maps = t.join("maps");
+    let out = ok(&["maps", "--store", p(&store), "--roots", p(&roots), "--out", p(&maps)]);
+    let ml = lines(&out, "maps");
+    assert_eq!(ml.len(), 5 * after_base, "{out}");
+    assert!(ml.iter().filter(|l| l.contains(" map=manifest ")).any(|l| num(l, "puts") >= 1), "{out}");
+    // The refcount map of this store stays empty (`whole` and `seed` do not
+    // count references), so no change of it is asserted here; the unit tests
+    // of layout.rs and the synthetic source (plan 25-06) cover it.
+    assert_eq!(lines(&out, "final").len(), 5, "{out}");
+    let out = ok(&["layout", "--maps", p(&maps), "--layout", "a", "--store", p(&t.join("layout-a"))]);
+    let check = lines(&out, "check");
+    assert_eq!(check.len(), 1, "{out}");
+    assert!(check[0].contains(" layout=a ") && check[0].ends_with(" ok=1"), "{out}");
+    assert_eq!(lines(&out, "commit").len(), after_base, "{out}");
+    assert_eq!(lines(&out, "tree").len(), 10, "{out}");
+
     let out = ok(&["prolly", "--batches", p(&batches), "--store", p(&pstore)]);
     let check = lines(&out, "check");
     assert_eq!(check.len(), 1, "{out}");
