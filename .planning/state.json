@@ -1,12 +1,43 @@
 {
   "contract": "1.0.0",
   "flavor": "core",
-  "milestone": "v2.3",
-  "phases": [],
+  "milestone": "v2.3 — Prolly Metadata & Robustness",
+  "phases": [
+    {
+      "number": "25",
+      "name": "Prolly format and layout",
+      "status": "pending"
+    },
+    {
+      "number": "26",
+      "name": "Prolly maps in commit, read and GC",
+      "status": "pending"
+    },
+    {
+      "number": "27",
+      "name": "Store migration",
+      "status": "pending"
+    },
+    {
+      "number": "28",
+      "name": "Crash and soak tests",
+      "status": "pending"
+    },
+    {
+      "number": "29",
+      "name": "Scrub damage report",
+      "status": "pending"
+    },
+    {
+      "number": "30",
+      "name": "Limits page",
+      "status": "pending"
+    }
+  ],
   "next": {
-    "command": "/gsd-discuss-phase",
-    "label": "Discuss the first phase",
-    "reason": "Project initialized — plan your first phase"
+    "command": "/gsd-progress --next",
+    "label": "Advance to the next step",
+    "reason": "Phase 1 of 6 · 0% · executing"
   },
-  "updated_at": "2026-11-27T00:56:14.124Z"
+  "updated_at": "2026-11-27T05:15:44.573Z"
 }
