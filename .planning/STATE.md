@@ -5,9 +5,11 @@ milestone_name: Prolly Metadata & Robustness
 current_phase: 25
 current_phase_name: Prolly format and layout
 status: planning
-stopped_at: Roadmap for v2.3 created (6 phases, 25-30); ready to plan Phase 25
-last_updated: "2026-11-27T00:56:14.117Z"
+stopped_at: Phase 25 context gathered
+last_updated: "2026-11-27T04:07:09.184Z"
 last_activity: 2026-11-26
+last_activity_desc: Roadmap for milestone v2.3 created; 21 of 21 requirements mapped
+state_head: d5d32657696c096a689c41d8479e927aa45f6609
 progress:
   total_phases: 6
   completed_phases: 0
@@ -55,7 +57,7 @@ None.
 
 ### Blockers/Concerns
 
-- Phase 25: Q-2 (one prolly map per metadata map, or one combined namespace map) needs an owner choice before the layout work starts.
+- Phase 25: Q-2 is decided by a bench test of both layouts at the start of the phase (owner delegated the choice; see 25-CONTEXT.md D-02).
 - Phase 26: the flat-map store code goes away. The "1/5 of the flat time" check (PMAP-07) needs a flat baseline; measure it with release `v2.3.0`.
 - Phase 27: `rsync -aHAX` copies the live tree only. Snapshots of the old store are not carried over; `docs/user/upgrade.md` must say this.
 - Phase 29: with prolly maps, a bad metadata node can damage many files or a whole snapshot. The scrub report must handle a bad node, not only a bad chunk.
@@ -100,9 +102,9 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-26
-Stopped at: Roadmap for v2.3 created; ready to plan Phase 25
-Resume file: None
+Last session: 2026-11-27T04:07:09.154Z
+Stopped at: Phase 25 context gathered
+Resume file: .planning/phases/25-prolly-format-and-layout/25-CONTEXT.md
 
 ## Operator Next Steps
 
