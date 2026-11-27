@@ -31,6 +31,11 @@ The code is `crates/slicefs-cli/src/header.rs`.
   flag line `ro_compat chunk-profile <release>`. The default profile writes
   neither line. With `seed --hash sha256`, the first header has the flag
   line `incompat hash-sha256 <release>` right after the hash line.
+  With `seed --boundary-salt random` (32 bytes from `/dev/urandom`) or
+  `seed --boundary-salt <64 hex digits>`, the first header also has the
+  `boundary-salt` line and the flag line `ro_compat boundary-salt <release>`
+  (after the `chunks` lines). Without the option a new store has neither
+  line.
 - A rewrite (`--hash` on `mount` or `seed`) changes only the hash line. All
   other lines stay, in their order, also the `chunks` line, the flag lines
   and the lines that this SliceFS does not know. If there is no hash line, the new hash line
@@ -66,6 +71,24 @@ hash sha256
 incompat hash-sha256 v2.3
 ```
 
+The header of a new store with a boundary salt
+(`seed --boundary-salt random`; the digits are an example, and the release
+word is the value of `BOUNDARY_SALT_RELEASE`, now `v2.4`):
+
+```
+slicefs-store 8 (store header with feature flags, prolly metadata maps)
+hash blake3-256
+boundary-salt 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+ro_compat boundary-salt v2.4
+```
+
+The salt is an optional per-store key of the boundary hash of the metadata
+trees (the boundary rule of the trees). The default is no salt, so equal
+metadata gives equal tree nodes in every store. The salt is fixed when the
+store is made: SliceFS has no command to change it, and an existing store
+refuses any other salt (M18). The salt is not a secret: it is plain text in
+`FORMAT`.
+
 A header with one flag of each class (the names are examples, and
 `<release>` is the place of a release name):
 
@@ -87,6 +110,7 @@ Lines are split into words at each space.
 | Flag line | `<class> <name> <release>` | Exactly three words. `<class>` is `compat`, `ro_compat` or `incompat`. |
 | Hash line | `hash <name>` | Exactly two words. At most one hash line. No hash line means `blake3-256`. |
 | Chunks line | `chunks <min> <avg> <max>` | The FastCDC chunk profile of the store. Exactly four words. The sizes are in bytes, as decimal digits. They are powers of two with min < avg < max, max at most 1 MiB (1048576, the SliceFS limit), at least the fastcdc v2020 minimums (min 64 B, avg 256 B, max 1 KiB), and FastCDC must cut a run of zeros at max. At most one chunks line. It always comes with the ro_compat flag `chunk-profile`, and the flag always comes with the line. No chunks line means 4/8/32 KiB. |
+| Boundary-salt line | `boundary-salt <salt>` | The key of the boundary hash of the metadata trees. Exactly two words. `<salt>` is exactly 64 digits of `0-9` and `a-f` (lowercase) and stands for 32 bytes. At most one salt line. It always comes with the ro_compat flag `boundary-salt`, and the flag always comes with the line. No salt line means no salt. Any other line that starts with the word `boundary-salt` is an error (M9), not an other line. |
 | Other line | any other text | An unknown setting (see the parse order). |
 
 - `<name>`: 1 to 64 characters; lowercase letters `a-z`, digits `0-9` and
@@ -102,6 +126,9 @@ Lines are split into words at each space.
 - The chunks line is a store setting too. It comes with its flag, by the
   rule below. SliceFS writes it only for a profile that is not 4/8/32 KiB;
   a chunks line of 4/8/32 KiB with the flag is accepted.
+- The boundary-salt line is a store setting too. It comes with its flag, by
+  the rule below. SliceFS writes it only when `seed --boundary-salt` makes
+  the store.
 
 Parse order:
 
@@ -117,7 +144,12 @@ Parse order:
    `hash sha256` line with no `hash-sha256` flag, or a `hash-sha256` flag
    that is not incompat, also stops the parse (M9). A `hash-sha256` flag
    with no `hash sha256` line is valid: the store can still hold SHA-256
-   objects after the write hash went back.
+   objects after the write hash went back. A line that starts with
+   `boundary-salt` and is not two words with a 64-digit lowercase hex
+   value, or a second `boundary-salt` line, stops the parse (M9). Then a
+   `boundary-salt` line with no `boundary-salt` flag, a `boundary-salt` flag
+   with no `boundary-salt` line, or a `boundary-salt` flag that is not
+   ro_compat stops the parse (M9).
 3. Find the unknown flags: the flags whose name is not in `KNOWN_FLAGS`.
    The strongest unknown flag decides:
    - an unknown incompat flag: refuse (M5);
@@ -168,17 +200,19 @@ The SliceFS classes use the same meanings. The differences:
 
 ## Flag list
 
-Store format 8 has two flags: `KNOWN_FLAGS` is `chunk-profile` and
-`hash-sha256`.
+Store format 8 has three flags: `KNOWN_FLAGS` is `chunk-profile`,
+`hash-sha256` and `boundary-salt`.
 
 | Name | Class | Release | What it means |
 |------|-------|---------|---------------|
 | chunk-profile | ro_compat | `CHUNK_PROFILE_RELEASE` | The store has a FastCDC chunk profile that is not 4/8/32 KiB, in its `chunks` line. An older SliceFS can read the store: a reader takes each chunk length from the manifest entries, and its zero shortcut matches only zero chunks of its own max length (it reads all other chunks). It must not write the store: it would cut new data with 4/8/32 KiB, so a store would have two profiles, and a spliced file would not have the key of a new write of the same bytes. |
 | hash-sha256 | incompat | `HASH_SHA256_RELEASE` | The store has, or had, objects with SHA-256 IDs (tag 0x12). An older SliceFS cannot verify or read these objects, so it must not open the store. SliceFS writes the flag before the first SHA-256 object: in the first header of `seed --hash sha256`, in the same header write as the hash line of `mount --hash sha256`, and alone before `rehash --to sha256` writes an object. The flag stays when the write hash goes back to `blake3-256`, because SHA-256 objects can still be live. Removing it after a GC that proves no SHA-256 object is left is deferred. |
+| boundary-salt | ro_compat | `BOUNDARY_SALT_RELEASE` | The store has a boundary salt, in its `boundary-salt` line. An older SliceFS can read the metadata trees, because a reader follows the node keys and does not cut. It must not write the store: it would cut the trees with another rule (no salt), so equal data would get different tree nodes, and the trees of the store would mix two rules. Same reason as `chunk-profile`. |
 
-The release words are the constants `CHUNK_PROFILE_RELEASE` and
-`HASH_SHA256_RELEASE` in `header.rs`. Both are `v2.3`, the first
-release that writes these flags.
+The release words are the constants `CHUNK_PROFILE_RELEASE`,
+`HASH_SHA256_RELEASE` and `BOUNDARY_SALT_RELEASE` in `header.rs`. The first
+two are `v2.3`, the first release that writes these flags. The last is
+`v2.4`.
 
 Rule to add a flag:
 
@@ -319,6 +353,7 @@ write.
 | M15 | A writable mount while another mount, gc, seed, rehash, snapshot create or snapshot switch holds the store lock. | `{store} is in use: it is mounted, or a command (gc, seed, rehash, snapshot create or snapshot switch) runs now. Unmount it or let that command end first.` |
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
 | M17 | The format number is 7 (a store of release v2.3.0). | `{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
+| M18 | `seed` with `--boundary-salt` on an existing store whose salt differs (also a store with no salt, and always for `random`). Nothing in the store changes. | `{store} has {have}; --boundary-salt {want} is another salt. The boundary salt of a store is fixed when the store is made.` |
 
 The values in the texts:
 
@@ -329,6 +364,8 @@ The values in the texts:
 - `{have}` in M16: the profile of the store; `{want}`: the profile of the
   option. Each is printed as `<min>/<avg>/<max> KiB` (in bytes, with `B`,
   when a size is not whole KiB).
+- `{have}` in M18: `a boundary salt` or `no boundary salt`; `{want}`: the
+  option as given (`random`, or the 64 hex digits).
 - `{k}` in M9: the line number (the first line is 1). `{line:?}` in M4 and
   M9: the line, in double quotes.
 - `{reason}` in M9 is one of:
@@ -340,6 +377,11 @@ The values in the texts:
   - `chunks line with no chunk-profile flag`
   - `chunk-profile flag with no chunks line`
   - `the feature chunk-profile must be ro_compat`
+  - `bad boundary-salt line`
+  - `two boundary-salt lines`
+  - `boundary-salt line with no boundary-salt flag`
+  - `boundary-salt flag with no boundary-salt line`
+  - `the feature boundary-salt must be ro_compat`
   - `hash sha256 with no hash-sha256 flag`
   - `the feature hash-sha256 must be incompat`
   - `unknown setting`

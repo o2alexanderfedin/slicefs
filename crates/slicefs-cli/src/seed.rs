@@ -44,6 +44,21 @@ pub fn run_seed(store_path: &Path, source_dir: &Path, hash: Option<&str>) -> Res
 /// records it in its first header write; a store with another profile is
 /// refused before anything is written.
 pub fn run_seed_with(store_path: &Path, source_dir: &Path, hash: Option<&str>, profile: Option<ChunkProfile>) -> Result<(), Box<dyn std::error::Error>> {
+    run_seed_with_salt(store_path, source_dir, hash, profile, None)
+}
+
+/// [`run_seed_with`] with `salt`, the boundary salt of `--boundary-salt`
+/// (`None`: no salt for a new store, the recorded one for an existing
+/// store). A new store records it in its first header write. An existing
+/// store refuses any salt that is not its own (M18) before anything is
+/// written: the salt of a store is fixed when the store is made.
+pub fn run_seed_with_salt(
+    store_path: &Path,
+    source_dir: &Path,
+    hash: Option<&str>,
+    profile: Option<ChunkProfile>,
+    salt: Option<content::SaltOpt>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // The exclusive store lock first, held to the end: seed writes a new
     // root (and with --hash, the header), so it must not run beside a
     // mount or an offline command (#201). The directory is made first so a
@@ -60,9 +75,10 @@ pub fn run_seed_with(store_path: &Path, source_dir: &Path, hash: Option<&str>, p
     std::fs::read_dir(source_dir).map_err(|e| format!("source {}: {e}", source_dir.display()))?;
     // Then the store header: a new store gets it durably before `packs/`
     // and `segments/` exist (with the hash of `--hash` and the profile of
-    // `--chunk-profile`); a store that this build may not write, or that
-    // has another profile, is refused.
-    if let Some(line) = content::check_write_with(store_path, hash, profile)? {
+    // `--chunk-profile` and the salt of `--boundary-salt`); a store that
+    // this build may not write, or that has another profile or salt, is
+    // refused.
+    if let Some(line) = content::check_write_with_salt(store_path, hash, profile, salt)? {
         println!("{line}");
     }
 

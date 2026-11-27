@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use chunk_store::ChunkProfile;
+use crate::content::SaltOpt;
 use clap::{Parser, Subcommand};
 
 /// SliceFS deduplicating filesystem
@@ -162,6 +163,13 @@ pub enum Cmd {
         /// with another profile is refused.
         #[arg(long, value_name = "MIN/AVG/MAX", value_parser = crate::content::parse_chunk_profile)]
         chunk_profile: Option<ChunkProfile>,
+        /// A per-store salt for the cut points of the metadata trees of a
+        /// new store: `random` (32 bytes from /dev/urandom) or 64 lowercase
+        /// hex digits. Default: no salt, so equal metadata gives equal tree
+        /// nodes in every store. The salt is fixed when the store is made;
+        /// an existing store refuses another salt.
+        #[arg(long, value_name = "random|HEX", value_parser = crate::content::parse_boundary_salt)]
+        boundary_salt: Option<SaltOpt>,
     },
 
     /// Run offline garbage collection on a SliceFS block store.
@@ -319,11 +327,12 @@ mod tests {
     fn test_seed() {
         let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src"]).unwrap();
         match cli.command {
-            Cmd::Seed { store, source_dir, hash, chunk_profile } => {
+            Cmd::Seed { store, source_dir, hash, chunk_profile, boundary_salt } => {
                 assert_eq!(store, PathBuf::from("/data"));
                 assert_eq!(source_dir, PathBuf::from("/src"));
                 assert!(hash.is_none(), "no --hash: keep the store's recorded hash");
                 assert!(chunk_profile.is_none(), "no --chunk-profile: keep the store's recorded profile");
+                assert!(boundary_salt.is_none(), "no --boundary-salt: no salt for a new store, the recorded one otherwise");
             }
             _ => panic!("expected Seed"),
         }
@@ -350,6 +359,28 @@ mod tests {
             let err = Cli::try_parse_from(args).expect_err("an unknown hash is refused").to_string();
             assert!(err.contains("unknown hash \"md5\"") && err.contains("blake3-256"), "{err}");
         }
+    }
+
+    /// `--boundary-salt` takes `random` or 64 lowercase hex digits on seed
+    /// only; anything else is refused at parse.
+    #[test]
+    fn test_boundary_salt_flag() {
+        let salt = |v: &str| match Cli::try_parse_from(["slicefs", "seed", "/data", "/src", "--boundary-salt", v]).unwrap().command {
+            Cmd::Seed { boundary_salt, .. } => boundary_salt,
+            _ => panic!("expected Seed"),
+        };
+        assert_eq!(salt("random"), Some(SaltOpt::Random));
+        let hex = "0123456789abcdef".repeat(4);
+        assert_eq!(salt(&hex), Some(SaltOpt::Value([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef].repeat(4).try_into().unwrap())));
+        assert_eq!(SaltOpt::Value([0xab; 32]).to_string(), "ab".repeat(32));
+        assert_eq!(SaltOpt::Random.to_string(), "random");
+        let cli = Cli::try_parse_from(["slicefs", "seed", "/data", "/src"]).unwrap();
+        assert!(matches!(cli.command, Cmd::Seed { boundary_salt: None, .. }));
+        for bad in ["", &hex[..63], &(hex.clone() + "0"), &hex.to_uppercase(), &format!("g{}", &hex[1..]), "Random"] {
+            let err = Cli::try_parse_from(["slicefs", "seed", "/data", "/src", "--boundary-salt", bad]).expect_err(bad).to_string();
+            assert!(err.contains("invalid boundary salt"), "{bad:?}: {err}");
+        }
+        assert!(Cli::try_parse_from(["slicefs", "mount", "/mnt", "--store", "/data", "--boundary-salt", "random"]).is_err(), "mount has no --boundary-salt");
     }
 
     /// `--chunk-profile` takes MIN/AVG/MAX in KiB on seed and mount; a bad

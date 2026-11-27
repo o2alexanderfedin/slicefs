@@ -3,7 +3,9 @@
 //! The first line names the store format (`slicefs-store 8 ...`). Each
 //! later line is one item: the store setting `hash <name>` (the write
 //! hash), the store setting `chunks <min> <avg> <max>` (the chunk profile,
-//! with the ro_compat flag `chunk-profile`), or a feature flag `<class> <name> <release>`, where the class is
+//! with the ro_compat flag `chunk-profile`), the store setting
+//! `boundary-salt <hex>` (the key of the boundary hash of the metadata
+//! trees, with the ro_compat flag `boundary-salt`), or a feature flag `<class> <name> <release>`, where the class is
 //! `compat`, `ro_compat` or `incompat` and the release is the lowest SliceFS
 //! release that knows the flag (shown in messages, never compared).
 //!
@@ -40,10 +42,18 @@ pub const HASH_SHA256_FLAG: &str = "hash-sha256";
 /// The release word of the `hash-sha256` flag, as
 /// [`CHUNK_PROFILE_RELEASE`]. Tests use this constant, never its text.
 pub const HASH_SHA256_RELEASE: &str = "v2.3";
+/// The ro_compat flag of a store with a boundary salt (the line
+/// `boundary-salt <hex>`): a build that does not know the flag can read the
+/// metadata trees (reading does not use the salt), but must not write them,
+/// because it would cut them with another rule.
+pub const BOUNDARY_SALT_FLAG: &str = "boundary-salt";
+/// The release word of the `boundary-salt` flag: the first release that
+/// writes it. Tests use this constant, never its text.
+pub const BOUNDARY_SALT_RELEASE: &str = "v2.4";
 /// The feature flags that this build knows (Phase 22: `chunk-profile`;
-/// Phase 23: `hash-sha256`). Add a name here with the rule of
-/// docs/design/store-format.md.
-pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG, HASH_SHA256_FLAG];
+/// Phase 23: `hash-sha256`; Phase 25: `boundary-salt`). Add a name here with
+/// the rule of docs/design/store-format.md.
+pub const KNOWN_FLAGS: &[&str] = &[CHUNK_PROFILE_FLAG, HASH_SHA256_FLAG, BOUNDARY_SALT_FLAG];
 
 /// The flag that a store needs before it holds objects of `hasher`
 /// (`None`: no flag). The one place that says which hash needs a flag.
@@ -68,6 +78,13 @@ pub fn marker(hasher: &dyn ObjectHasher) -> String {
 /// that needs a flag ([`hash_flag`]: SHA-256) gets its flag line right
 /// after the hash line.
 pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
+    marker_with_salt(hasher, profile, None)
+}
+
+/// [`marker_with`] and, for `Some(salt)`, the line `boundary-salt <hex>`
+/// and its ro_compat flag after the chunks lines. `None` adds nothing: the
+/// default store has no salt.
+pub fn marker_with_salt(hasher: &dyn ObjectHasher, profile: ChunkProfile, salt: Option<[u8; 32]>) -> String {
     let mut s = format!("{FORMAT}hash {}\n", hasher.name());
     if let Some(f) = hash_flag(hasher) {
         s.push_str(&format!("{} {} {}\n", f.class.word(), f.name, f.release));
@@ -76,7 +93,39 @@ pub fn marker_with(hasher: &dyn ObjectHasher, profile: ChunkProfile) -> String {
         s.push_str(&format!("chunks {} {} {}\n", profile.min(), profile.avg(), profile.max()));
         s.push_str(&format!("ro_compat {CHUNK_PROFILE_FLAG} {CHUNK_PROFILE_RELEASE}\n"));
     }
+    if let Some(salt) = salt {
+        s.push_str(&format!("boundary-salt {}\n", salt_hex(&salt)));
+        s.push_str(&format!("ro_compat {BOUNDARY_SALT_FLAG} {BOUNDARY_SALT_RELEASE}\n"));
+    }
     s
+}
+
+/// The 64 lowercase hex digits of a boundary salt.
+pub fn salt_hex(salt: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    salt.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+/// The salt of a word of exactly 64 characters, each in `0-9` or `a-f`
+/// (`None` for anything else: uppercase, another length, other characters).
+pub fn parse_salt_hex(word: &str) -> Option<[u8; 32]> {
+    let b = word.as_bytes();
+    if b.len() != 64 {
+        return None;
+    }
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut out = [0u8; 32];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = digit(b[2 * i])? << 4 | digit(b[2 * i + 1])?;
+    }
+    Some(out)
 }
 
 /// The class of a feature flag: what a build that does not know the flag
@@ -135,6 +184,10 @@ pub enum Line {
     /// bytes (a setting; it always comes with the ro_compat flag
     /// `chunk-profile`).
     Chunks(ChunkProfile),
+    /// `boundary-salt <64 lowercase hex>`: the key of the boundary hash of
+    /// the metadata trees (a setting; it always comes with the ro_compat
+    /// flag `boundary-salt`).
+    BoundarySalt([u8; 32]),
     /// `<class> <name> <release>`.
     Flag(Flag),
     /// A line of a kind that this build does not know, as it is.
@@ -167,6 +220,14 @@ impl Header {
         })
     }
 
+    /// The boundary salt (`None`: no `boundary-salt` line, no salt).
+    pub fn boundary_salt(&self) -> Option<[u8; 32]> {
+        self.lines.iter().find_map(|l| match l {
+            Line::BoundarySalt(s) => Some(*s),
+            _ => None,
+        })
+    }
+
     /// The feature flags, in their order.
     pub fn flags(&self) -> impl Iterator<Item = &Flag> {
         self.lines.iter().filter_map(|l| match l {
@@ -183,6 +244,7 @@ impl Header {
             match l {
                 Line::Hash(name) => s.push_str(&format!("hash {name}\n")),
                 Line::Chunks(p) => s.push_str(&format!("chunks {} {} {}\n", p.min(), p.avg(), p.max())),
+                Line::BoundarySalt(salt) => s.push_str(&format!("boundary-salt {}\n", salt_hex(salt))),
                 Line::Flag(f) => s.push_str(&format!("{} {} {}\n", f.class.word(), f.name, f.release)),
                 Line::Other(text) => s.push_str(&format!("{text}\n")),
             }
@@ -304,6 +366,14 @@ pub fn msg_profile_differs(store: &Path, have: ChunkProfile, want: ChunkProfile)
     format!("{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.")
 }
 
+/// `--boundary-salt want` on a store that has no salt (`has_salt` false) or
+/// another salt.
+pub fn msg_salt_differs(store: &Path, has_salt: bool, want: &str) -> String {
+    let store = store.display();
+    let have = if has_salt { "a boundary salt" } else { "no boundary salt" };
+    format!("{store} has {have}; --boundary-salt {want} is another salt. The boundary salt of a store is fixed when the store is made.")
+}
+
 fn msg_bad_line(store: &Path, k: usize, reason: &str, line: &str) -> String {
     let store = store.display();
     format!("{store}/FORMAT line {k}: {reason}: {line:?}")
@@ -396,6 +466,13 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
                 }
                 Line::Chunks(parse_chunks(&words).ok_or_else(|| bad("bad chunks line"))?)
             }
+            ("boundary-salt", _) => {
+                if lines.iter().any(|l| matches!(l, Line::BoundarySalt(_))) {
+                    return Err(bad("two boundary-salt lines"));
+                }
+                let salt = if words.len() == 2 { parse_salt_hex(words[1]) } else { None };
+                Line::BoundarySalt(salt.ok_or_else(|| bad("bad boundary-salt line"))?)
+            }
             (_, Some(class)) => {
                 if words.len() != 3 || !valid_name_bytes(words[1].as_bytes()) || !valid_release_bytes(words[2].as_bytes()) {
                     return Err(bad("bad feature flag line"));
@@ -420,6 +497,18 @@ pub fn parse(store: &Path, text: &str) -> std::io::Result<Header> {
         (None, Some(j)) => return Err(bad_at(j, "chunk-profile flag with no chunks line")),
         (Some(_), Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::RoCompat) => {
             return Err(bad_at(j, "the feature chunk-profile must be ro_compat"));
+        }
+        _ => {}
+    }
+    // The `boundary-salt` line and flag come as a pair too, and the flag is
+    // ro_compat.
+    let salt_at = lines.iter().position(|l| matches!(l, Line::BoundarySalt(_)));
+    let flag_at = lines.iter().position(|l| matches!(l, Line::Flag(f) if f.name == BOUNDARY_SALT_FLAG));
+    match (salt_at, flag_at) {
+        (Some(j), None) => return Err(bad_at(j, "boundary-salt line with no boundary-salt flag")),
+        (None, Some(j)) => return Err(bad_at(j, "boundary-salt flag with no boundary-salt line")),
+        (Some(_), Some(j)) if !matches!(&lines[j], Line::Flag(f) if f.class == Class::RoCompat) => {
+            return Err(bad_at(j, "the feature boundary-salt must be ro_compat"));
         }
         _ => {}
     }
@@ -525,17 +614,18 @@ pub fn decide(store: &Path, header: &Header, want: Want) -> std::io::Result<Acce
 /// access is read and write (`header: None`; a mount needs `segments/`, and
 /// `load_store` refuses a store with no committed state).
 pub fn check(store: &Path, want: Want) -> std::io::Result<Opened> {
-    check_with(store, want, DEFAULT_HASHER, ChunkProfile::DEFAULT)
+    check_with(store, want, DEFAULT_HASHER, ChunkProfile::DEFAULT, None)
 }
 
 /// [`check`], where a new store gets the header of `hasher` (`--hash`) and
-/// `profile` (`--chunk-profile`).
-pub fn check_with(store: &Path, want: Want, hasher: &dyn ObjectHasher, profile: ChunkProfile) -> std::io::Result<Opened> {
+/// `profile` (`--chunk-profile`) and `salt` (`--boundary-salt`). The salt
+/// is used only for the header of a new store.
+pub fn check_with(store: &Path, want: Want, hasher: &dyn ObjectHasher, profile: ChunkProfile, salt: Option<[u8; 32]>) -> std::io::Result<Opened> {
     let text = match read(store)? {
         Some(text) => text,
         None if has_data(store)? => return Err(refuse(msg_no_header(store))),
         None if want == Want::Write => {
-            match create_with(store, hasher, profile) {
+            match create_with(store, hasher, profile, salt) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
@@ -658,17 +748,17 @@ pub fn store_lock_held(store: &Path) -> bool {
 /// installed first. Tests that build a store with `StoreIo::open` or
 /// `ChunkStore::open` call it first.
 pub fn create(store: &Path) -> std::io::Result<()> {
-    create_with(store, DEFAULT_HASHER, ChunkProfile::DEFAULT)
+    create_with(store, DEFAULT_HASHER, ChunkProfile::DEFAULT, None)
 }
 
-/// [`create`] with the header [`marker_with`]`(hasher, profile)`.
-fn create_with(store: &Path, hasher: &dyn ObjectHasher, profile: ChunkProfile) -> std::io::Result<()> {
+/// [`create`] with the header [`marker_with_salt`]`(hasher, profile, salt)`.
+fn create_with(store: &Path, hasher: &dyn ObjectHasher, profile: ChunkProfile, salt: Option<[u8; 32]>) -> std::io::Result<()> {
     std::fs::create_dir_all(store)?;
     let format = store.join(FORMAT_FILE);
     if format.exists() {
         return Err(already_exists(store));
     }
-    let tmp = write_tmp(store, &marker_with(hasher, profile))?;
+    let tmp = write_tmp(store, &marker_with_salt(hasher, profile, salt))?;
     let linked = match std::fs::hard_link(&tmp, &format) {
         // A file system with no hard links: the rename of before (it can
         // replace a header that a parallel create wrote at the same time).
@@ -1077,6 +1167,102 @@ mod tests {
         }
         let h = parse(Path::new(STORE), &format!("{FORMAT}{HASH}chunks 4096 8192 32768\n{ro}")).unwrap();
         assert_eq!(h.chunk_profile(), Some(ChunkProfile::DEFAULT));
+    }
+
+    const SALT: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    /// The `boundary-salt` flag line of this build, of the class `class`.
+    fn salt_flag(class: &str) -> String {
+        format!("{class} {BOUNDARY_SALT_FLAG} {BOUNDARY_SALT_RELEASE}\n")
+    }
+
+    /// D-10: a salt line is two words, the second 64 lowercase hex digits;
+    /// anything else is M9 `bad boundary-salt line`, a second line is M9
+    /// `two boundary-salt lines`.
+    #[test]
+    fn boundary_salt_line_errors() {
+        let ro = salt_flag("ro_compat");
+        let short = &SALT[..63];
+        let long = format!("{SALT}0");
+        let upper = SALT.to_uppercase();
+        let non_hex = format!("g{}", &SALT[1..]);
+        let lines = [
+            "boundary-salt".to_string(),
+            "boundary-salt ".to_string(),
+            format!("boundary-salt {short}"),
+            format!("boundary-salt {long}"),
+            format!("boundary-salt {upper}"),
+            format!("boundary-salt {non_hex}"),
+            format!("boundary-salt {SALT} {SALT}"),
+            format!("boundary-salt {SALT} x"),
+        ];
+        for line in lines {
+            let err = parse(Path::new(STORE), &format!("{FORMAT}{HASH}{line}\n{ro}")).expect_err(&line).to_string();
+            assert!(err.contains("line 3: bad boundary-salt line"), "{line:?}: {err}");
+        }
+        let two = format!("{FORMAT}{HASH}boundary-salt {SALT}\n{ro}boundary-salt {SALT}\n");
+        let err = parse(Path::new(STORE), &two).expect_err("two lines").to_string();
+        assert!(err.contains("line 5: two boundary-salt lines"), "{err}");
+    }
+
+    /// D-10: the salt line and the `boundary-salt` flag come together or
+    /// not at all, and the flag is ro_compat (M9 with the line number); a
+    /// valid pair parses, opens read and write and writes back as it is.
+    #[test]
+    fn boundary_salt_pairing() {
+        let line = format!("boundary-salt {SALT}\n");
+        let cases = [
+            (format!("{FORMAT}{HASH}{line}"), "line 3: boundary-salt line with no boundary-salt flag"),
+            (format!("{FORMAT}{HASH}{}", salt_flag("ro_compat")), "line 3: boundary-salt flag with no boundary-salt line"),
+            (format!("{FORMAT}{HASH}{}", salt_flag("compat")), "line 3: boundary-salt flag with no boundary-salt line"),
+            (format!("{FORMAT}{HASH}{line}{}", salt_flag("compat")), "line 4: the feature boundary-salt must be ro_compat"),
+            (format!("{FORMAT}{HASH}{}{line}", salt_flag("incompat")), "line 3: the feature boundary-salt must be ro_compat"),
+        ];
+        for (text, want) in cases {
+            let err = parse(Path::new(STORE), &text).expect_err(want).to_string();
+            assert!(err.contains(want), "{text:?}: {err}");
+        }
+        let ro = salt_flag("ro_compat");
+        for text in [format!("{FORMAT}{HASH}{line}{ro}"), format!("{FORMAT}{HASH}{ro}{line}")] {
+            let h = parse(Path::new(STORE), &text).unwrap();
+            assert_eq!(h.boundary_salt().map(|s| salt_hex(&s)).as_deref(), Some(SALT));
+            for want in ALL {
+                assert_eq!(decide(Path::new(STORE), &h, want).unwrap(), Access::ReadWrite, "{want:?}");
+            }
+            assert_eq!(h.to_text(), text);
+        }
+        let none = parse(Path::new(STORE), &format!("{FORMAT}{HASH}")).unwrap();
+        assert_eq!(none.boundary_salt(), None);
+    }
+
+    /// D-10: `marker_with_salt` writes the salt line and its flag after the
+    /// chunks lines, and the default marker has neither.
+    #[test]
+    fn marker_with_salt_has_the_line_and_the_flag() {
+        let salt = parse_salt_hex(SALT).unwrap();
+        assert_eq!(salt_hex(&salt), SALT);
+        assert_eq!(marker_with_salt(DEFAULT_HASHER, ChunkProfile::DEFAULT, None), marker(DEFAULT_HASHER));
+        assert_eq!(
+            marker_with_salt(DEFAULT_HASHER, ChunkProfile::DEFAULT, Some(salt)),
+            format!("{FORMAT}{HASH}boundary-salt {SALT}\n{}", salt_flag("ro_compat"))
+        );
+        let p = ChunkProfile::new(16384, 65536, 262144).unwrap();
+        let text = marker_with_salt(DEFAULT_HASHER, p, Some(salt));
+        let h = parse(Path::new(STORE), &text).unwrap();
+        assert_eq!((h.chunk_profile(), h.boundary_salt()), (Some(p), Some(salt)));
+        assert_eq!(h.to_text(), text);
+    }
+
+    /// D-10, D-11: a rewrite of the header by a `--hash` change keeps the
+    /// salt line and its flag in their order.
+    #[test]
+    fn a_rewrite_keeps_the_boundary_salt_line() {
+        let d = tempfile::tempdir().unwrap();
+        let (line, ro) = (format!("boundary-salt {SALT}\n"), salt_flag("ro_compat"));
+        let old = format!("{FORMAT}{HASH}{line}{ro}");
+        std::fs::write(d.path().join(FORMAT_FILE), &old).unwrap();
+        crate::content::check_write_with(d.path(), Some("test-keyed-blake3"), None).unwrap();
+        assert_eq!(read(d.path()).unwrap().unwrap(), old.replace(HASH, "hash test-keyed-blake3\n"));
     }
 
     /// [Compat], [Parse order]: a rewrite by `select_hash` keeps every flag

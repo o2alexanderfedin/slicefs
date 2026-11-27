@@ -92,6 +92,57 @@ pub fn parse_chunk_profile(s: &str) -> Result<ChunkProfile, String> {
     ChunkProfile::new(min, avg, max).map_err(|reason| format!("chunk profile {s} KiB: {reason}"))
 }
 
+/// `--boundary-salt` of `seed`: the per-store key of the boundary hash of
+/// the metadata trees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaltOpt {
+    /// 32 new random bytes ([`random_salt`]).
+    Random,
+    /// This salt.
+    Value([u8; 32]),
+}
+
+impl std::fmt::Display for SaltOpt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaltOpt::Random => f.write_str("random"),
+            SaltOpt::Value(v) => f.write_str(&header::salt_hex(v)),
+        }
+    }
+}
+
+/// Parse `--boundary-salt`: `random`, or exactly 64 lowercase hex digits.
+pub fn parse_boundary_salt(s: &str) -> Result<SaltOpt, String> {
+    if s == "random" {
+        return Ok(SaltOpt::Random);
+    }
+    header::parse_salt_hex(s).map(SaltOpt::Value).ok_or_else(|| format!("invalid boundary salt {s:?}; use random or 64 lowercase hex digits"))
+}
+
+/// 32 random bytes from `/dev/urandom`. A short read or any error is an
+/// error: there is no fallback to a weaker source.
+pub fn random_salt() -> std::io::Result<[u8; 32]> {
+    let mut salt = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut salt))
+        .map_err(|e| std::io::Error::other(format!("cannot read 32 random bytes from /dev/urandom: {e}")))?;
+    Ok(salt)
+}
+
+/// Check `want` (`--boundary-salt`) against the parsed header `h` of
+/// `store` (`None`: no header yet, so any salt is allowed). The salt of a
+/// store is fixed when the store is made: `random` is never the salt of an
+/// existing store, and a value must equal the recorded salt. Never a
+/// rewrite.
+fn check_salt(store: &Path, h: Option<&Header>, want: SaltOpt) -> std::io::Result<()> {
+    let Some(h) = h else { return Ok(()) };
+    let have = h.boundary_salt();
+    match want {
+        SaltOpt::Value(v) if have == Some(v) => Ok(()),
+        _ => Err(std::io::Error::other(header::msg_salt_differs(store, have.is_some(), &want.to_string()))),
+    }
+}
+
 /// Parse `--hash`: the name of a known hasher.
 pub fn parse_hash(s: &str) -> Result<String, String> {
     hasher_by_name(s)
@@ -136,14 +187,42 @@ pub fn check_write(store: &Path, name: Option<&str>) -> std::io::Result<Option<S
 /// before the first object of that hash. The flag stays when the hash
 /// changes back.
 pub fn check_write_with(store: &Path, name: Option<&str>, profile: Option<ChunkProfile>) -> std::io::Result<Option<String>> {
+    check_write_with_salt(store, name, profile, None)
+}
+
+/// [`check_write_with`] with `salt`, the boundary salt of
+/// `--boundary-salt` (`None`: keep the recorded one, no salt for a new
+/// store). A new store records it in its first header write. On an existing
+/// store any salt option is checked first and refused unless it is the
+/// recorded value ([`check_salt`], M18); nothing is written before that
+/// check.
+pub fn check_write_with_salt(store: &Path, name: Option<&str>, profile: Option<ChunkProfile>, salt: Option<SaltOpt>) -> std::io::Result<Option<String>> {
     // The name first, so that an unknown name makes nothing; a new store
     // gets the new hash and profile in its first header write.
     let new = match name {
         Some(n) => Some(hasher_by_name(n).ok_or_else(|| std::io::Error::other(parse_hash(n).unwrap_err()))?),
         None => None,
     };
-    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER), profile.unwrap_or(ChunkProfile::DEFAULT))?;
+    // The salt next: an existing header refuses another salt before any
+    // write; a new store gets random bytes now, so a failed read of the
+    // random source makes nothing.
+    let new_salt = match salt {
+        None => None,
+        Some(want) => {
+            let existing = header::read(store)?.map(|text| header::parse(store, &text)).transpose()?;
+            check_salt(store, existing.as_ref(), want)?;
+            Some(match want {
+                SaltOpt::Random => random_salt()?,
+                SaltOpt::Value(v) => v,
+            })
+        }
+    };
+    let opened = header::check_with(store, Want::Write, new.unwrap_or(DEFAULT_HASHER), profile.unwrap_or(ChunkProfile::DEFAULT), new_salt)?;
     check_profile(store, opened.header.as_ref(), profile)?;
+    // A header that a parallel create installed after the read above.
+    if let Some(v) = new_salt {
+        check_salt(store, opened.header.as_ref(), SaltOpt::Value(v))?;
+    }
     let Some(new) = new else { return Ok(None) };
     let mut h = opened.header.ok_or_else(|| std::io::Error::other(format!("{}/FORMAT is missing after its write", store.display())))?;
     let current = hasher_of(store, Some(&h))?;
