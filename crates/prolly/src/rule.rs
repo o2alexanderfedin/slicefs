@@ -24,6 +24,17 @@ pub fn boundary_hash(level: u8, key: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
+/// Like `boundary_hash`, with BLAKE3 in keyed mode under `salt`: the same
+/// two updates (the byte `level + 1`, then the key), first 4 bytes LE.
+pub fn boundary_hash_keyed(salt: &[u8; 32], level: u8, key: &[u8]) -> u32 {
+    let mut h = blake3::Hasher::new_keyed(salt);
+    h.update(&[level.wrapping_add(1)]);
+    h.update(key);
+    let d = h.finalize();
+    let b = d.as_bytes();
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
 /// Largest node size that the threshold math takes as is. A node is at
 /// most `MAX_NODE_MAX` (32 KiB); above this value `delta` is far above 23
 /// for every config, so the clamp changes no result and keeps the fourth
@@ -107,13 +118,23 @@ impl Splitter {
         if self.size < cfg.node_min() {
             return false;
         }
-        (boundary_hash(level, key) as u64) < threshold(cfg, before, self.size)
+        let hash = match cfg.salt() {
+            Some(salt) => boundary_hash_keyed(salt, level, key),
+            None => boundary_hash(level, key),
+        };
+        (hash as u64) < threshold(cfg, before, self.size)
     }
 
     /// A node in progress of `size` bytes and `count` entries (tests only).
     #[cfg(test)]
     pub(crate) fn at(size: usize, count: usize) -> Self {
         Self { size, count }
+    }
+
+    /// True when the size is above `cfg.force_at()`: the last `push` ended
+    /// the node by the forced rule.
+    pub fn forced(&self, cfg: &Config) -> bool {
+        self.size > cfg.force_at()
     }
 
     /// Back to the state of an empty node.

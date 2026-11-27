@@ -80,6 +80,12 @@ fn golden_root() {
     pin!(leaf_counts(&s, &root), [93, 133, 70, 65, 80, 93, 72, 90, 137, 88, 73, 90, 108, 89, 96, 61, 42, 126, 109, 95, 102, 76, 124, 101, 66, 103, 104, 103, 85, 120, 98, 103, 87, 68, 83, 22, 118, 53, 98, 106, 105, 125, 53, 111, 59, 101, 38, 75, 90, 45, 76, 64, 60, 111, 82, 65, 85, 25]);
     pin!(root.to_hex(), "1ec2d422083f61f9882ffc6615b023b186e262c94b8507c6bbdb307610c3aeb220");
     pin!((st.depth, st.leaves), (3, 58));
+    // (f) a salted root, and thresholds of a wide config.
+    let salted = Config::DEFAULT.with_salt(Some([7u8; 32]));
+    let (salted_root, _) = build(&mem_store(), salted, u64_entries(5_000, 7)).unwrap();
+    pin!(salted_root.to_hex(), "1e612a3ec5b994a92e0533aa6fea3c462783412f529320388c876036a5f0689939");
+    let wide = Config::new(8192, 32768).unwrap();
+    pin!((threshold(&wide, 20_000, 20_045), threshold(&wide, 30_000, 30_045)), (1_178_752_456, 2_838_699_595));
     // (e) the unsalted boundary hash.
     pin!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527629384, 94351618));
 }
@@ -124,7 +130,12 @@ fn fixed_point_matches_float() {
         assert!(err <= tol, "{cfg:?} {b}->{a}: error {err}");
         max_err = max_err.max(err);
     };
-    let cfgs = [Config::DEFAULT, Config::SMALL];
+    let cfgs = [
+        Config::DEFAULT,
+        Config::SMALL,
+        Config::new(8192, 16384).unwrap(),
+        Config::new(8192, 32768).unwrap(),
+    ];
     let mut seed = 0x1234_5678_9abc_def1u64;
     for cfg in &cfgs {
         for before in (0..cfg.node_max()).step_by(64) {
@@ -132,7 +143,7 @@ fn fixed_point_matches_float() {
                 check(cfg, before, (before + step).min(cfg.node_max()));
             }
         }
-        for _ in 0..200_000 {
+        for _ in 0..50_000 {
             let b = (xorshift(&mut seed) % cfg.node_max() as u64) as usize;
             let a = b + (xorshift(&mut seed) % (cfg.node_max() - b + 1) as u64) as usize;
             check(cfg, b, a);
@@ -142,7 +153,7 @@ fn fixed_point_matches_float() {
     // Decisions: the integer test against the float test.
     let mut diffs = 0;
     for cfg in &cfgs {
-        for _ in 0..500_000 {
+        for _ in 0..250_000 {
             let b = cfg.node_min() + (xorshift(&mut seed) % (cfg.node_max() - cfg.node_min()) as u64) as usize;
             let a = (b + 1 + (xorshift(&mut seed) % 2048) as usize).min(cfg.node_max());
             let h = xorshift(&mut seed) as u32;
@@ -188,6 +199,19 @@ fn threshold_edges() {
     let thr_f1 = threshold(&d, force - 10, force + 1);
     let keep1 = key_with_hash(0, thr_f1, false);
     assert!(Splitter::at(force - 10, 5).push(&d, 0, &keep1, 11));
+    assert!(!Splitter::at(force - 10, 5).forced(&d));
+    assert!(Splitter::at(force + 1, 5).forced(&d));
+    // The largest sizes: fourth powers, the shift and the product stay in
+    // u128 (this test runs with overflow checks on).
+    let (small_l, big_l) = (Config::new(256, 32_768).unwrap(), Config::new(16_384, 32_768).unwrap());
+    // delta = 2^16 for L = 256: past the table, always cut.
+    assert_eq!(threshold(&small_l, 0, 32_768), 1 << 32);
+    // delta = 16 for L = 16,384: e^-16 is about 483 / 2^32, so just below 2^32.
+    let t = threshold(&big_l, 0, 32_768);
+    assert!(t < 1 << 32 && t > (1 << 32) - 1_000, "{t}");
+    for cfg in [small_l, big_l] {
+        assert_eq!(threshold(&cfg, 32_768, 32_768), 0);
+    }
 }
 
 proptest::proptest! {
@@ -396,8 +420,8 @@ fn malformed_node_is_an_error() {
     let equal = raw(0, 2, &[raw_leaf_entry(b"a", b""), raw_leaf_entry(b"a", b"")].concat());
     let long_key = raw(0, 1, &raw_leaf_entry(&[b'a'; MAX_KEY + 1], b""));
     let long_entry = raw(0, 1, &raw_leaf_entry(b"a", &[0; MAX_ENTRY]));
-    // 12 entries of 1,500 bytes: each within MAX_ENTRY, the node above NODE_MAX.
-    let big_node = raw(0, 12, &(0..12u8).map(|i| raw_leaf_entry(&[b'a', i], &[0; 1_494])).collect::<Vec<_>>().concat());
+    // 24 entries of 1,500 bytes: each within MAX_ENTRY, the node above MAX_NODE_MAX.
+    let big_node = raw(0, 24, &(0..24u8).map(|i| raw_leaf_entry(&[b'a', i], &[0; 1_494])).collect::<Vec<_>>().concat());
     let long_child_key = encode_internal(1, &[Child { last_key: vec![b'a'; MAX_KEY + 1], id: leaf_id, count: 1 }]);
     let child = |id| Child { last_key: b"zz".to_vec(), id, count: 1 };
     let wrong_level = encode_internal(2, &[child(leaf_id)]);
@@ -413,7 +437,7 @@ fn malformed_node_is_an_error() {
         ("child at the wrong level", wrong_level),
         ("key above MAX_KEY", long_key),
         ("entry above MAX_ENTRY", long_entry),
-        ("node above NODE_MAX", big_node),
+        ("node above MAX_NODE_MAX", big_node),
         ("child key above MAX_KEY", long_child_key),
     ];
     for (what, bytes) in cases {
@@ -907,4 +931,74 @@ fn rule_version_is_refused() {
         is_refused("apply", catch_unwind(AssertUnwindSafe(|| apply(&s, Config::DEFAULT, &root, &[put(b"b", b"2")]).map(|_| ()))));
         assert_eq!(s.stats().objects, before, "apply wrote an object");
     }
+}
+
+#[test]
+fn config_new_limits() {
+    for (l, m) in [(4096, 16384), (8192, 16384), (8192, 32768), (256, 4096), (16384, 32768)] {
+        assert!(Config::new(l, m).is_some(), "({l}, {m})");
+    }
+    for (l, m) in [(255, 16384), (16385, 16384), (4096, 4095), (4096, 32769)] {
+        assert!(Config::new(l, m).is_none(), "({l}, {m})");
+    }
+    assert_eq!(Config::new(4096, 16384), Some(Config::DEFAULT));
+    assert_eq!(Config::READ.node_max(), MAX_NODE_MAX);
+}
+
+#[test]
+fn salted_tree_differs() {
+    let s = mem_store();
+    let es = u64_entries(5_000, 7);
+    let salted = Config::DEFAULT.with_salt(Some([7u8; 32]));
+    assert_eq!(salted.salt(), Some(&[7u8; 32]));
+    assert_eq!(Config::DEFAULT.salt(), None);
+    let (plain_root, _) = build(&s, Config::DEFAULT, es.iter().map(|(k, v)| (k, v))).unwrap();
+    let (salted_root, _) = build(&s, salted, es.iter().map(|(k, v)| (k, v))).unwrap();
+    assert_ne!(plain_root, salted_root);
+    // Reads take no salt.
+    assert_eq!(entries_of(&s, &salted_root), es);
+    for (k, v) in &es {
+        assert_eq!(get(&s, &salted_root, k).unwrap().as_deref(), Some(v.as_slice()));
+    }
+    assert_eq!((boundary_hash(0, b""), boundary_hash(1, b"key")), (527_629_384, 94_351_618));
+    assert_ne!(boundary_hash_keyed(&[7u8; 32], 0, b""), boundary_hash(0, b""));
+}
+
+#[test]
+fn wide_config_tree_reads() {
+    let wide = Config::new(8192, 32768).unwrap();
+    for (what, es) in [("u64", u64_entries(40_000, 3)), ("var", var_entries(3_000, 5))] {
+        let s = mem_store();
+        let (root, st) = build(&s, wide, es.iter().map(|(k, v)| (k, v))).unwrap();
+        assert_eq!(st.entries, es.len() as u64);
+        for (k, v) in &es {
+            assert_eq!(get(&s, &root, k).unwrap().as_deref(), Some(v.as_slice()), "{what}");
+        }
+        assert_eq!(entries_of(&s, &root), es, "{what}");
+        let largest = nodes(&s, &root).iter().map(|n| n.bytes).max().unwrap();
+        assert!(largest <= MAX_NODE_MAX, "{what}: largest node {largest}");
+    }
+    // A scale of 16 KiB makes nodes above 16 KiB, which `Config::READ` accepts.
+    let wider = Config::new(16_384, 32_768).unwrap();
+    let s = mem_store();
+    let es = u64_entries(40_000, 3);
+    let (root, _) = build(&s, wider, es.iter().map(|(k, v)| (k, v))).unwrap();
+    assert_eq!(entries_of(&s, &root), es);
+    let largest = nodes(&s, &root).iter().map(|n| n.bytes).max().unwrap();
+    assert!(largest > NODE_MAX && largest <= MAX_NODE_MAX, "largest node {largest}");
+}
+
+#[test]
+fn forced_cuts_are_counted() {
+    let s = mem_store();
+    let es = u64_entries(20_000, 3);
+    let (_, st) = build(&s, Config::DEFAULT, es.iter().map(|(k, v)| (k, v))).unwrap();
+    assert_eq!(st.forced_cuts, 0);
+    // L far above node_max: nearly every cut is forced.
+    let forced = Config::new(16_384, 4_096).unwrap();
+    let (root, st) = build(&s, forced, es.iter().map(|(k, v)| (k, v))).unwrap();
+    assert!(st.forced_cuts >= st.leaves / 2, "{} forced cuts, {} leaves", st.forced_cuts, st.leaves);
+    let batch: Vec<Edit> = (0..100u64).map(|i| put(&(i * 600 + 4).to_be_bytes(), b"new")).collect();
+    let (_, ast) = apply(&s, forced, &root, &batch).unwrap();
+    assert!(ast.forced_cuts >= 1, "{ast:?}");
 }

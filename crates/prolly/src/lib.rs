@@ -29,7 +29,7 @@
 //! ascending in every node. A damaged or crafted node gives
 //! `Error::Corrupt`, never a panic. A node is also checked against the
 //! size limits of a config (node bytes, key and entry sizes): `apply`
-//! against its own config, the readers against `Config::DEFAULT`.
+//! against its own config, the readers against `Config::READ`.
 //!
 //! Each child is checked against its parent entry when `get`, the cursor,
 //! `walk` or `apply` loads it: its last key is the entry's key, its first
@@ -65,6 +65,14 @@
 //! (Dolt counts key and value bytes only), so `NODE_MAX` bounds the object.
 //! The decision reads only the entries since the last cut and the current
 //! key, with no look-ahead.
+//!
+//! # Salt
+//!
+//! An optional per-store salt (`Config::with_salt`) makes the boundary
+//! hash keyed BLAKE3 over the same bytes (`boundary_hash_keyed`). The
+//! default is no salt, so node IDs are equal across stores. A reader needs
+//! no salt; a writer must use the salt of the store. The salt enters only
+//! the hash, never the stored key bytes.
 //!
 //! # What the boundaries depend on
 //!
@@ -131,7 +139,7 @@ mod tree;
 mod tests;
 
 pub use apply::{apply, ApplyStats, Edit};
-pub use rule::{boundary_hash, threshold, Splitter};
+pub use rule::{boundary_hash, boundary_hash_keyed, threshold, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
 /// The version of the boundary rule (the threshold function, its table and
@@ -155,8 +163,13 @@ pub const WEIBULL_K: u32 = 4;
 /// Magic of a prolly node (`SPT1`), so it is never read as a manifest node (`SFM1`).
 pub const NODE_MAGIC: [u8; 4] = *b"SPT1";
 
-/// The size limits and the CDF scale of a tree. Only the two constants
-/// exist; no other config can be made.
+/// The largest node any config may write, so the largest node a reader
+/// accepts (32 KiB).
+pub const MAX_NODE_MAX: usize = 32_768;
+
+/// The size limits, the CDF scale and the optional salt of a tree.
+/// `DEFAULT` and `SMALL` are the configs of the store and of the tests;
+/// `Config::new` makes the configs of the bench sweep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     node_min: usize,
@@ -164,6 +177,7 @@ pub struct Config {
     max_entry: usize,
     max_key: usize,
     weibull_l: usize,
+    salt: Option<[u8; 32]>,
 }
 
 impl Config {
@@ -174,11 +188,41 @@ impl Config {
         max_entry: MAX_ENTRY,
         max_key: MAX_KEY,
         weibull_l: WEIBULL_L as usize,
+        salt: None,
     };
+
+    /// The limits that readers check every node against: the `DEFAULT`
+    /// limits with `node_max` = `MAX_NODE_MAX`, so a reader accepts every
+    /// config that `Config::new` makes.
+    pub const READ: Config = Config { node_max: MAX_NODE_MAX, ..Config::DEFAULT };
 
     /// Small nodes (min 32, max 1,024, entry 256, key 128, L 256): deep
     /// trees from a few hundred entries, for tests.
-    pub const SMALL: Config = Config { node_min: 32, node_max: 1_024, max_entry: 256, max_key: 128, weibull_l: 256 };
+    pub const SMALL: Config =
+        Config { node_min: 32, node_max: 1_024, max_entry: 256, max_key: 128, weibull_l: 256, salt: None };
+
+    /// A config of the bench sweep: scale `weibull_l` in 256..=16,384 and
+    /// `node_max` in 4,096..=`MAX_NODE_MAX`; the other limits are the crate
+    /// constants and there is no salt. `None` outside the ranges. A store
+    /// tree uses `Config::DEFAULT`.
+    pub fn new(weibull_l: usize, node_max: usize) -> Option<Config> {
+        if !(256..=16_384).contains(&weibull_l) || !(4_096..=MAX_NODE_MAX).contains(&node_max) {
+            return None;
+        }
+        Some(Config { node_max, weibull_l, ..Config::DEFAULT })
+    }
+
+    /// The same config with a salt (or none). The salt makes the boundary
+    /// hash keyed BLAKE3; a reader needs no salt, a writer must use the
+    /// salt of the store.
+    pub fn with_salt(self, salt: Option<[u8; 32]>) -> Config {
+        Config { salt, ..self }
+    }
+
+    /// The salt of the boundary hash, if any.
+    pub fn salt(&self) -> Option<&[u8; 32]> {
+        self.salt.as_ref()
+    }
 
     /// No cut below this node size.
     pub fn node_min(&self) -> usize {

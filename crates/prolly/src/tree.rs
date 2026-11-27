@@ -32,6 +32,8 @@ pub struct BuildStats {
     pub leaves: u64,
     /// Leaf entries in the tree.
     pub entries: u64,
+    /// Cuts made by the forced rule (size above `force_at`), at every level.
+    pub forced_cuts: u64,
 }
 
 /// The node in progress of one level. Every entry goes through the one
@@ -104,6 +106,7 @@ impl LevelWriter {
     ) -> Result<Option<NodeRef>> {
         self.check_ascending(key)?;
         let cut = self.splitter.push(cfg, self.level, key, leaf_entry_len(key.len(), value.len()));
+        stats.forced_cuts += (cut && self.splitter.forced(cfg)) as u64;
         self.leaf.push((key.to_vec(), value.to_vec()));
         self.count += 1;
         if cut {
@@ -122,6 +125,7 @@ impl LevelWriter {
     ) -> Result<Option<NodeRef>> {
         self.check_ascending(&child.last_key)?;
         let cut = self.splitter.push(cfg, self.level, &child.last_key, internal_entry_len(child.last_key.len()));
+        stats.forced_cuts += (cut && self.splitter.forced(cfg)) as u64;
         self.count += child.count;
         self.children.push(child);
         if cut {
@@ -300,10 +304,10 @@ impl<'s> Builder<'s> {
 }
 
 /// The limits that `get`, the cursor and `walk` check nodes against: the
-/// largest config (the crate constants), so they read a tree of any config.
-/// `apply` checks against its own config, because it writes the old entries
-/// again.
-const READ_CFG: Config = Config::DEFAULT;
+/// largest limits (`Config::READ`), so they read a tree of any config that
+/// `Config::new` makes. `apply` checks against its own config, because it
+/// writes the old entries again.
+const READ_CFG: Config = Config::READ;
 
 /// The root of the empty map: the empty leaf object.
 pub fn empty_root(store: &ChunkStore) -> Result<ObjectId> {
