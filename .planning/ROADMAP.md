@@ -289,6 +289,10 @@ Plans:
 **Wave 11** *(blocked on Wave 10 completion)*
 - [ ] 26-13-PLAN.md — PMAP-07 decision runs and verdict by the rule, insert/delete record, phase gate (wave 11)
 
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- `cargo test --workspace` and the lock-stats report test pass (gate log)
+- `cargo test --workspace` passes (gate log)
+
 ### Phase 27: Store migration
 
 **Goal**: A user can move an existing store to the new format with one documented procedure, and the procedure is tested between two real formats (#155)
