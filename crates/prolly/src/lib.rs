@@ -1,11 +1,14 @@
-//! A prototype prolly-tree map (a sorted map of byte keys to byte values)
-//! whose nodes are chunk-store objects, for issue #19.
+//! A prolly-tree map (a sorted map of byte keys to byte values) whose nodes
+//! are chunk-store objects: the metadata map format of store format 8
+//! (issue #215).
 //!
 //! # Status
 //!
-//! A prototype for the evaluation of #19. SliceFS does not use it: it is
-//! not wired into the root record, the commit path or a mount, and no
-//! product crate depends on it.
+//! The node format, the boundary rule (the integer threshold, its table and
+//! the rule version byte) and the constants are part of store format 8. They
+//! are defined in `docs/design/store-format.md`, section "Metadata maps
+//! (store format 8)". In this build the commit, read and GC paths of
+//! SliceFS do not use this crate; issue #215 wires them in.
 //!
 //! # Storage
 //!
@@ -18,8 +21,7 @@
 //!
 //! # Node format
 //!
-//! The node bytes are private to this crate; this is not a store format.
-//! Header (`NODE_HEADER` = 10 bytes): `NODE_MAGIC` (`SPT1`), rule version
+//! The node bytes are part of store format 8 (see "Status"). Header (`NODE_HEADER` = 10 bytes): `NODE_MAGIC` (`SPT1`), rule version
 //! `u8` (`RULE_VERSION`), level `u8`, entry count `u32` LE. A node of
 //! another rule version gives `Error::RuleVersion` in `get`, the cursor,
 //! `walk` and `apply`. A leaf entry (level 0) is klen `u16` LE, vlen
@@ -52,9 +54,9 @@
 //! - else it does not end when `after < NODE_MIN` (512 B);
 //! - else it ends when `boundary_hash(level, key)` (a 32-bit number) is below
 //!   `threshold(cfg, before, after)`, an integer that stands for
-//!   `1 - e^-((after^4 - before^4) / L^4)` with `L = WEIBULL_L` (4,096) and
+//!   `1 - e^-((after^4 - before^4) / L^4)` with `L = WEIBULL_L` (8,192) and
 //!   the shape `WEIBULL_K` = 4. That is the conditional Weibull CDF of
-//!   Dolt; the mean node is about 0.906 x L, about 3.7 KB.
+//!   Dolt; the mean node is about 0.906 x L, about 7.4 KB.
 //!
 //! `boundary_hash` is the first 4 bytes (LE) of BLAKE3 over the byte
 //! `level + 1` and the key: over the key only, with a salt per level.
@@ -126,8 +128,7 @@
 //! (`--check` compares the file with the generator). No floating point is
 //! used to decide a cut, so the cut points and node IDs are the same on
 //! every platform; `golden_root` pins the table hash, thresholds, cut
-//! points and a root. Whether this rule and its constants become part of a
-//! frozen store format is not decided here.
+//! points and roots, and it passes on macOS and on Linux.
 
 mod apply;
 mod node;
@@ -142,9 +143,11 @@ pub use apply::{apply, ApplyStats, Edit};
 pub use rule::{boundary_hash, boundary_hash_keyed, threshold, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
-/// The version of the boundary rule (the threshold function, its table and
-/// the constants of `Config::DEFAULT`) that wrote a node. Every node header
-/// carries it; a reader refuses another version.
+/// The version of the boundary rule that wrote a node. Every node header
+/// carries it; a reader refuses another version. Version 1 is the integer
+/// threshold of `rule_table.rs` with the constants of `Config::DEFAULT`
+/// (`WEIBULL_L` 8,192, `NODE_MAX` 16,384). No node of an older rule exists
+/// in any store, so the number stays 1.
 pub const RULE_VERSION: u8 = 1;
 /// Bytes of the node header: magic 4, rule version 1, level 1, entry count 4.
 pub const NODE_HEADER: usize = 10;
@@ -157,7 +160,7 @@ pub const MAX_ENTRY: usize = 2_048;
 /// Largest key, so that an internal entry is never above `MAX_ENTRY`.
 pub const MAX_KEY: usize = 1_024;
 /// Scale of the size CDF; the mean node is about 0.906 x L (Dolt `L`).
-pub const WEIBULL_L: u64 = 4_096;
+pub const WEIBULL_L: u64 = 8_192;
 /// Shape of the size CDF; the code writes x*x*x*x, never a power function.
 pub const WEIBULL_K: u32 = 4;
 /// Magic of a prolly node (`SPT1`), so it is never read as a manifest node (`SFM1`).

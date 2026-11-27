@@ -632,10 +632,8 @@ packed like a file chunk, and its ID comes from the store hasher (BLAKE3-256
 by default). Nodes are not cut again by FastCDC: the prolly rule already
 makes them content-defined and small. A child pointer is the child's
 `ObjectId`. The root of a map is one `ObjectId`, so a snapshot of the map is
-one ID. The node bytes (magic `SPT1`, level, entry count, length-prefixed
-entries) are private to `crates/prolly`. They are not a store format: no
-root record, segment record or header line refers to them, and
-`docs/design/store-format.md` does not change (D-03, D-14, D-15).
+one ID. The node format is part of store format 8 since Phase 25. It is defined in
+`docs/design/store-format.md`, section "Metadata maps (store format 8)".
 
 ## Rust crate survey
 
@@ -737,20 +735,22 @@ commit path. That is the work of a milestone, not of one phase.
 
 ## Owner questions
 
-These are one-way doors. This phase does not decide them (D-08).
+These are one-way doors. Phase 24 did not decide them (D-08). Phase 25
+answered Q-2 and Q-3.
 
 - **Q-1:** Adopt prolly maps for the store? It is a format change (a new
   format number and root record, GC and rehash changes). If yes, in which
-  milestone? Open. The recommendation below is "later".
+  milestone? Answered by the v2.3 milestone: adoption is issue #215. The
+  recommendation below is the Phase 24 text.
 - **Q-2:** If adopted: one prolly map per metadata map, or one combined
   namespace map (keys such as `(kind, inode, name)`)? This changes the root
-  record and the GC mark design. Open. Suggestion: decide it with Q-1, after
-  the redundant `inode_map` or `inode_data` is gone.
+  record and the GC mark design. **Answered in Phase 25: one prolly tree per
+  map, five trees** (layout a, L 8,192, `NODE_MAX` 16,384). See
+  `docs/design/store-format.md`, section "Metadata maps (store format 8)".
 - **Q-3:** If adopted: do the boundary rule and its constants become part of
   the frozen store format? They decide every node ID, so a later change
-  rewrites every map. Open. Suggestion: yes if adopted, but with a
-  fixed-point table in place of the float test, and with a version byte for
-  the rule.
+  rewrites every map. **Answered in Phase 25: yes**, with a fixed-point table
+  in place of the float test and a version byte for the rule. Same section.
 
 ## Recommendation
 
