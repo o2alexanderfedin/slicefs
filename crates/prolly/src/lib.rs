@@ -107,15 +107,22 @@
 //! `walk` hold one path of nodes: O(depth x node_max) bytes, never
 //! O(entries). Apply holds one path of nodes per level pass, one old node,
 //! one writer buffer and the sorted edits of the next level: O(changes x
-//! depth) plus the batch. There is no node cache (D-17).
+//! depth) plus the batch. The optional `NodeCache` (a `Ctx` carries it) has a
+//! fixed byte cap and holds decoded nodes by `ObjectId`; Phase 24 D-17
+//! forbids a cache that grows with the map, not a fixed one. A node is
+//! charged its encoded length, 64 bytes per entry and 128; the oldest node
+//! by use goes first. `range` holds one path, `count` and `height` read the
+//! root only, and `visit` holds one path.
 //!
 //! # Concurrency
 //!
 //! The design is a single writer per map: one `apply` per root at a time.
 //! Nodes are immutable content-addressed objects and no node is changed in
 //! place, so readers of an existing root (also an old root during an
-//! `apply`) are safe at any time, and no type of this crate holds shared
-//! mutable state.
+//! `apply`) are safe at any time, and the only shared state of this crate is
+//! the `NodeCache`, behind one lock (`Rank::Store`, held for map operations
+//! only, never across a read, a decode or a callback). It holds immutable
+//! content-addressed nodes, so a hit is always the node of its ID.
 //!
 //! # Integer rule
 //!
@@ -131,17 +138,23 @@
 //! points and roots, and it passes on macOS and on Linux.
 
 mod apply;
+mod cache;
 mod node;
+mod range;
 mod rule;
 mod rule_table;
 mod tree;
+mod visit;
 
 #[cfg(test)]
 mod tests;
 
-pub use apply::{apply, ApplyStats, Edit};
+pub use apply::{apply, apply_in, ApplyStats, Edit};
+pub use cache::{CacheStats, Ctx, NodeCache};
+pub use range::{count, height, range, Range};
 pub use rule::{boundary_hash, boundary_hash_keyed, threshold, Splitter};
-pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
+pub use tree::{build, empty_root, get, get_in, iter, iter_in, walk, BuildStats, Builder, Cursor, NodeInfo};
+pub use visit::{visit, NodeVisit};
 
 /// The version of the boundary rule that wrote a node. Every node header
 /// carries it; a reader refuses another version. Version 1 is the integer

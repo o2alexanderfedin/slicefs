@@ -8,6 +8,8 @@
 //!   `inode_alloc`, then one `inode_live` shard, then `inode_data`;
 //!   one `dir_live` shard, then `dir_data`. The other maps are taken alone.
 //!   No hot-path call holds the `io` lock; a commit takes it briefly.
+//!   The `prolly::NodeCache` lock (`Rank::Store`) is a leaf: no other lock, read,
+//!   decode or callback runs under it, so it may be taken under any lock above.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
