@@ -99,12 +99,12 @@ one map inside the real commit:
   `PreparedCommit` and `intern_u64_digest_map` are not `pub`. So the cost of
   one map inside the real commit cannot be timed from outside the crate,
   and this phase does not change `metadata`. `flat` is a copy of that code.
-- `inode_map` holds the same entries as `inode_data` (both get the same
-  `(ino, digest)` pair). The two serializations differ only by the 8-byte
-  count prefix of `inode_data`, so FastCDC cuts them into mostly the same
-  chunks. Inside the real commit, `inode_map` is interned first, so a stats
-  delta of `inode_data` there reads near 0 and makes the current design look
-  free. Each map-only mode thus has its own store with only that map.
+- Before store format 8 the commit stored `inode_map` too, a second map with
+  the same `(ino, digest)` entries as `inode_data`; format 8 removed it
+  (Phase 25), and the Phase 24 numbers were taken with it. In that commit
+  `inode_map` was interned first, so a stats delta of `inode_data` read near 0
+  and made the current design look free. Each map-only mode thus has its own
+  store with only that map.
 - A `prolly` process must not hold the metadata maps, else its peak RSS
   includes them. `flat` and `prolly` replay the batch files that `batches`
   made from the real `inode_data` change of each commit, so they see the
@@ -332,12 +332,88 @@ them:
 - The `scale` rows are synthetic entries, not Boost.
 - The prototype has no node cache (D-17): every `apply` reads its paths
   from the store.
-- The target map is `inode_data` only. It is one of the four maps with one
-  entry per inode or file (`inode_map`, `inode_data`, `dir_data`,
-  `manifest_data`) and about a third of the serialized bytes per commit. So
-  a map-only gain of `prolly` over `flat` is not the gain of the whole
-  commit.
+- The target map is `inode_data` only. It is one of the three maps with one
+  entry per inode or file (`inode_data`, `dir_data`, `manifest_data`; the
+  duplicate `inode_map` was removed in store format 8) and about a third of
+  the serialized bytes per commit. So a map-only gain of `prolly` over `flat`
+  is not the gain of the whole commit.
 - Memory of the script is bounded: it holds no data in RAM. The bench
   processes stream the trees and the map nodes in pieces (D-02); `flat`
   holds its map, as the current design does.
 - Run time of a full Boost run: plan 24-05 measures it.
+
+## Layout and constants benchmark (Phase 25)
+
+Phase 25 asks two questions of the prolly metadata format: how to lay the five
+metadata maps out in trees (Q-2), and which constants to use (L and NODE_MAX).
+`layout.sh` runs the whole matrix; `decide.py` holds the rules that read it.
+
+**Layouts** (`layout.rs`). The key of a per-inode record is the inode number;
+the key of a refcount record is the 33-byte content key.
+
+- `a`: five trees, one per map (inode, dir, manifest, xattr, refcounts), each
+  keyed by its native key.
+- `b`: one tree. Key of a per-inode record: `0x01`, the inode (8 bytes big
+  endian), a kind byte (0 inode, 1 dir, 2 manifest, 3 xattr), so the records
+  of one file share a leaf. Key of a refcount record: `0x02`, then the content
+  key.
+- `c`: the tree of `b` for the four per-inode maps, and a separate tree for
+  refcounts (refcounts have another key space and lifetime).
+
+**Configs.** The weight of the boundary rule `L` and `NODE_MAX`, as
+`L:NODE_MAX`: `4096:16384` (the Dolt values, the config of the layout
+decision), `8192:16384` and `8192:32768`.
+
+**Modes** of `prolly-bench` (each prints `key=value` lines with
+`mode=layout source=.. n=.. layout=.. l=.. node_max=..`):
+
+| Mode | What |
+|---|---|
+| `maps --store S --roots FILE --out DIR` | The change of all five maps of each real commit of `whole`, as batch files, and `plan.txt` (the commits and the real final maps) |
+| `layout --maps DIR --layout a\|b\|c --store P [--l L] [--node-max M]` | Builds the base maps into trees of the layout, replays each commit (one `apply` per tree, one `sync`), then checks every final tree against the real final map. Lines: `build`, `commit`, `tree` (phase `base` and `final`), `check` |
+| `synth --n N --layout a\|b\|c --store P [--seed S] [--l L] [--node-max M] [--commits C] [--ks "100 1000"] [--patterns "one mixed insdel"]` | The same for a synthetic source: N inodes (about 90% files with a manifest entry and 2 refcount keys each, about 10% directories, about 5% with an xattr entry), made from sorted streams on the fly (never a whole map in RAM), and the D-02 commit mix: `one` (k=1), `mixed` (k changed files) and `insdel` (k/2 creates at the right edge, k/2 deletes). The check covers the entry count of each map and every changed, inserted, created and deleted key |
+
+**The runner.** `layout.sh <data-dir>` seeds `x/boost_<V1>`, runs `whole` with
+the patterns `scatter` and `insdel` (the next tree `x/boost_<V2>` as the version
+step), runs `maps`, then one `layout` process per layout and config (the Boost
+rows), then one `synth` process per size in `SYNTH_NS`, layout and config. Each
+row process has its own store, a time limit (`ROW_TIMEOUT`) and its output in
+`rows/<source>-<n>-<layout>-<L>-<NODE_MAX>.txt`, ending with a line `rc=<code>`.
+With `RESUME=1` a finished row and a finished Boost step are not run again.
+`LAYOUT_SMOKE=1` (no data dir) runs a small generated matrix in minutes. Env:
+`WORK`, `BIN`, `CONFIGS`, `LAYOUTS`, `SYNTH_NS`, `BOOST_VERS`, `KS`,
+`SYNTH_KS`, `COMMITS`, `SEED`, `ROW_TIMEOUT`, `RESUME`, `LAYOUT_SMOKE` (the
+defaults are in the header of the script).
+
+**Output files** (in `WORK`, no path, host or user):
+
+| File | Columns |
+|---|---|
+| `layout.csv` | `source,n,layout,l,node_max,pattern,k,seq,edits,ms,cpu_ms,maxrss_bytes,new_objects,new_stored_bytes,nodes_read,nodes_written,bytes_written,forced_cuts`: one row per commit; `cpu_ms` is 1000 x (user + system CPU seconds) |
+| `shape.csv` | `source,n,layout,l,node_max,phase,map,entries,depth,levels,leaf_bytes,internal_bytes,internal_entries,forced_cuts`: one row per tree and phase; `levels` is the node count per level from the leaves up, joined by `/` |
+| `build.csv` | `source,n,layout,l,node_max,ms,cpu_ms,maxrss_bytes,nodes_written,bytes_written,forced_cuts`: the base build of each row (the time of a synthetic build includes making its streams) |
+| `checks.txt` | the `check` lines; every one must be `ok=1` |
+| `machine.txt` | machine and run parameters |
+
+**Docker.** `OUT=<result dir> DATA=<Boost data dir> scripts/docker-linux-test/run.sh prolly-layout`
+builds the bench in release and runs the runner in a container. `DATA` is
+mounted read only, `OUT` receives the files above and `rows/`, and the stores
+live on the disk-backed named volume `slicefs-prolly-work` (no tmpfs), removed
+at the end unless `RESUME=1`. `LAYOUT_SMOKE=1` needs no `DATA`. It mounts
+nothing and needs no FUSE device.
+
+**The decision script.** `python3 scripts/prolly-bench/decide.py [--expect-ns N1,N2] [--expect-ks K1,K2] DIR`
+reads `layout.csv`, `shape.csv` and `checks.txt` of `DIR` and prints the rows it
+used, one `rule` line per threshold, the 1B extrapolation of each tree, and a
+last line `verdict layout=<a|b|c> l=<L> node_max=<M>`. It exits 2 when a
+required row is missing or a check is not `ok=1`. `--self-test` checks the
+rules on small fixtures. The rules (the thresholds, the rows, the 1B
+extrapolation) are written in its docstring and are fixed before the real run:
+they are not changed after the data is seen.
+
+**Boost refcounts are empty.** The product never writes refcounts today, so
+the refcount map of every Boost store has no entry. In the Boost rows the
+refcounts tree of layouts a and c is empty, and layout b has no `0x02` keys. So
+the Boost rows say nothing about refcounts in a layout, and the signal about
+layout b (refcounts inside) against layout c (refcounts apart) comes only from
+the synthetic rows, which carry 2 refcount keys per file.
