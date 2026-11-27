@@ -62,10 +62,33 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| PMAP-01 | Phase 25 | Pending |
+| PMAP-02 | Phase 25 | Pending |
+| PMAP-03 | Phase 26 | Pending |
+| PMAP-04 | Phase 25 | Pending |
+| PMAP-05 | Phase 25 | Pending |
+| PMAP-06 | Phase 26 | Pending |
+| PMAP-07 | Phase 26 | Pending |
+| PMAP-08 | Phase 26 | Pending |
+| MIGR-01 | Phase 27 | Pending |
+| MIGR-02 | Phase 27 | Pending |
+| MIGR-03 | Phase 27 | Pending |
+| CRSH-01 | Phase 28 | Pending |
+| CRSH-02 | Phase 28 | Pending |
+| CRSH-03 | Phase 28 | Pending |
+| CRSH-04 | Phase 28 | Pending |
+| SCRB-01 | Phase 29 | Pending |
+| SCRB-02 | Phase 29 | Pending |
+| SCRB-03 | Phase 29 | Pending |
+| SCRB-04 | Phase 29 | Pending |
+| DOCS-01 | Phase 30 | Pending |
+| DOCS-02 | Phase 30 | Pending |
 
 **Coverage:**
 - v2.3 requirements: 21 total
-- Mapped to phases: 0 (filled by the roadmap)
+- Mapped to phases: 21
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-11-26*
+*Traceability updated: 2026-11-26 after roadmap creation*

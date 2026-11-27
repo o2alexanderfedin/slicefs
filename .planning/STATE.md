@@ -2,11 +2,14 @@
 gsd_state_version: "1.0"
 milestone: v2.3
 milestone_name: Prolly Metadata & Robustness
+current_phase: 25
+current_phase_name: Prolly format and layout
 status: planning
+stopped_at: Roadmap for v2.3 created (6 phases, 25-30); ready to plan Phase 25
 last_updated: "2026-11-27T00:56:14.117Z"
 last_activity: 2026-11-26
 progress:
-  total_phases: 0
+  total_phases: 6
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,86 +23,31 @@ progress:
 See: .planning/PROJECT.md (updated 2026-11-26)
 
 **Core value:** High-ratio data deduplication that works transparently as a real, daily-driver POSIX filesystem
-**Current focus:** Planning next milestone (v2.2 shipped; release tag `v2.3.0`)
+**Current focus:** Phase 25 — Prolly format and layout (milestone v2.3, release `v2.4.0`)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-11-26 — Milestone v2.3 started
+Phase: 25 of 30 (Prolly format and layout); first of 6 phases in milestone v2.3
+Plan: not planned yet
+Status: Ready to plan
+Last activity: 2026-11-26 — Roadmap for milestone v2.3 created; 21 of 21 requirements mapped
 
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 69 (v2.2)
+- Plans completed in v2.3: 0
+- Plans completed in v2.2: 69 (per-plan rows are in the v2.2 archive)
 
 *Updated after each plan completion*
-**Per-Plan Metrics:**
-
-| Plan | Duration | Tasks | Files |
-|------|----------|-------|-------|
-| Phase 18 P01 | 25min | 2 tasks | 6 files |
-| Phase 18 P04 | 45min | 2 tasks | 6 files |
-| Phase 18 P02 | 35min | 2 tasks | 7 files |
-| Phase 18 P03 | 45min | 3 tasks | 1 files |
-| Phase 18 P05 | 60min | 3 tasks | 7 files |
-| Phase 18 P06 | 75min | 3 tasks | 8 files |
-| Phase 18 P07 | 35 min | 2 tasks | 1 files |
-| Phase 19 P01 | 60min | 3 tasks | 23 files |
-| Phase 19 P02 | 52min | 3 tasks | 6 files |
-| Phase 19 P03 | 50min | 3 tasks | 7 files |
-| Phase 19 P04 | 45min | 3 tasks | 11 files |
-| Phase 19 P05 | 41min | 3 tasks | 5 files |
-| Phase 19 P06 | 25min | 2 tasks | 4 files |
-| Phase 19 P07 | 95min | 3 tasks | 4 files |
-| Phase 19 P08 | 45min | 3 tasks | 5 files |
-| Phase 19 P09 | 55min | 3 tasks | 11 files |
-| Phase 19 P10 | 55min | 3 tasks | 7 files |
-| Phase 19 P11 | 52min | 3 tasks | 4 files |
-| Phase 19 P12 | 70min | 3 tasks | 6 files |
-| Phase 19 P13 | 59min | 3 tasks | 10 files |
-| Phase 19 P14 | 320min | 2 tasks | 3 files |
-| Phase 19 P15 | 85 min | 4 tasks | 4 files |
-| Phase 19 P16 | 35 min | 3 tasks | 8 files |
-| Phase 20 P01 | 60min | 3 tasks | 7 files |
-| Phase 20 P02 | 50min | 2 tasks | 6 files |
-| Phase 20 P03 | 45 min | 2 tasks | 7 files |
-| Phase 20 P04 | 40 min | 2 tasks | 1 files |
-| Phase 20 P05 | 39 min | 2 tasks | 3 files |
-| Phase 20 P06 | 36 min | 2 tasks | 6 files |
-| Phase 20 P07 | 55 min | 3 tasks | 4 files |
-| Phase 20 P08 | 75min | 2 tasks | 7 files |
-| Phase 21 P01 | 70 min | 3 tasks | 10 files |
-| Phase 21 P02 | 55 min | 3 tasks | 5 files |
-| Phase 21 P03 | 66 min | 2 tasks | 7 files |
-| Phase 21 P04 | 46 min | 2 tasks | 3 files |
-| Phase 21 P05 | 40 min | 2 tasks | 11 files |
-| Phase 21 P06 | 45 min | 2 tasks | 2 files |
-| Phase 21 P07 | 75 min | 3 tasks | 10 files |
-| Phase 21 P08 | 50 min | 3 tasks | 12 files |
-| Phase 21 P09 | 60 min | 2 tasks | 8 files |
-| Phase 21.1 P01 | 74min | 3 tasks | 7 files |
-| Phase 21.1 P02 | 57min | 3 tasks | 16 files |
-| Phase 21.1 P03 | 50min | 3 tasks | 7 files |
-| Phase 21.1 P04 | 45min | 2 tasks | 6 files |
-| Phase 21.2 P01 | 11h (gates on a loaded host) | 3 tasks | 13 files |
-| Phase 21.2 P02 | about 2 h | 2 tasks | 5 files |
-| Phase 21.2 P03 | about 6 h | 3 tasks | 48 files |
-| Phase 21.2 P04 | about 3 h | 2 tasks | 5 files |
-| Phase 21.2 P05 | 3h35m | 3 tasks | 28 files |
-| Phase 21.2 P06 | about 2 h | 2 tasks | 6 files |
-| Phase 21.2 P07 | 25 min | 2 tasks | 6 files |
-| Phase 21.2 P09 | about 50 min | 2 tasks | 3 files |
-| Phase 21.2 P08 | about 2 h | 2 tasks | 7 files |
-| Phase 21.2 P10 | about 40 min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
 ### Decisions
 
-Full log: Key Decisions in .planning/PROJECT.md; per-phase detail in .planning/milestones/v2.2-phases/. Cleared at the v2.2 close.
+Full log: Key Decisions in .planning/PROJECT.md; per-phase detail in .planning/milestones/v2.2-phases/.
+Owner-approved order of work for v2.3: prolly maps (#215), migration (#155), crash and soak tests (#157), scrub report (#159), limits page (#158). Serial track; each phase depends on the one before it.
 
 ### Pending Todos
 
@@ -107,6 +55,10 @@ None.
 
 ### Blockers/Concerns
 
+- Phase 25: Q-2 (one prolly map per metadata map, or one combined namespace map) needs an owner choice before the layout work starts.
+- Phase 26: the flat-map store code goes away. The "1/5 of the flat time" check (PMAP-07) needs a flat baseline; measure it with release `v2.3.0`.
+- Phase 27: `rsync -aHAX` copies the live tree only. Snapshots of the old store are not carried over; `docs/user/upgrade.md` must say this.
+- Phase 29: with prolly maps, a bad metadata node can damage many files or a whole snapshot. The scrub report must handle a bad node, not only a bad chunk.
 - Idle index merge can rewrite GBs after a short pause and is not stopped by new writes (#141).
 - Writes do not scale past 2 workers (the single pack appender is the likely cause); see the Phase 21 deferred list.
 - Closeout of v2.2 was `override_closeout`: 22 deferred items acknowledged (table below); Phases 18-23 read as `stale` in the GSD tool because later phases changed covered source files (all reports say `passed`).
@@ -115,6 +67,7 @@ None.
 
 - Phase 21.1 inserted after Phase 21: Store header with compat, ro-compat and incompat feature flags, and a written format policy (#154); owner agreed #154 joins v2.2 after Phase 21
 - Phase 21.2 inserted after Phase 21.1: Thread-safety verification and CI gates (user asked for formal verification and static analysis on every build) (URGENT)
+- v2.3 roadmap: #215 is split into two phases (25 format and layout; 26 maps in the paths, GC, crash replay and the benchmark) instead of three, so the milestone has 6 phases and the benchmark (PMAP-07) is not a single-requirement phase
 
 ## Deferred Items
 
@@ -147,10 +100,10 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-11-26T17:19:43.607Z
-Stopped at: Milestone v2.2 complete and archived
+Last session: 2026-11-26
+Stopped at: Roadmap for v2.3 created; ready to plan Phase 25
 Resume file: None
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Plan Phase 25 with /gsd-plan-phase 25 (get the owner choice on Q-2 first)
