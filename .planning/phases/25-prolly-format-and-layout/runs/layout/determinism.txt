@@ -1,0 +1,2 @@
+source=synth n=1000000 layout=a l=8192 node_max=16384 compared_commits=50 equal=50 columns=edits,nodes_read,nodes_written,bytes_written,forced_cuts
+same=1
