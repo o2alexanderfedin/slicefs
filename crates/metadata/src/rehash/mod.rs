@@ -49,7 +49,6 @@ use chunk_store::file::{for_each_file_object, FileReader, FileWriter};
 use chunk_store::{ChunkStore, ObjectHasher};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 
-use crate::inode_map::RECORD;
 use crate::snapshot::SnapshotEntry;
 use crate::store::{root_rec, MAP_ENTRY};
 use crate::store_io::{to_id, to_key};
@@ -153,8 +152,6 @@ enum Blob {
     ValueMap(&'static str),
     /// The `u64 -> key` map of manifest lists.
     ManifestMap,
-    /// The inode map: `ino + key` records with no count.
-    InodeMap,
 }
 
 impl Blob {
@@ -163,7 +160,6 @@ impl Blob {
             Blob::ManifestList => Kind::ManifestList,
             Blob::ValueMap(_) => Kind::ValueMap,
             Blob::ManifestMap => Kind::ManifestMap,
-            Blob::InodeMap => Kind::InodeMap,
         }
     }
 
@@ -171,14 +167,13 @@ impl Blob {
         match self {
             Blob::ManifestList => "manifest list",
             Blob::ValueMap(_) | Blob::ManifestMap => "u64-key map",
-            Blob::InodeMap => "inode map",
         }
     }
 
     /// Bytes of the count before the records (0: no count).
     fn head(self) -> usize {
         match self {
-            Blob::ManifestList | Blob::InodeMap => 0,
+            Blob::ManifestList => 0,
             Blob::ValueMap(_) | Blob::ManifestMap => 8,
         }
     }
@@ -187,7 +182,6 @@ impl Blob {
         match self {
             Blob::ManifestList => KEY_BYTES,
             Blob::ValueMap(_) | Blob::ManifestMap => MAP_ENTRY,
-            Blob::InodeMap => RECORD,
         }
     }
 }
@@ -513,7 +507,6 @@ impl Walker<'_, '_> {
         drop(r);
         let at = |rec: &[u8], o: usize| ObjectKey::read(rec, o);
         let fields = [
-            (root_rec::INODE_MAP, Some(Blob::InodeMap)),
             (root_rec::INODE_DATA, Some(Blob::ValueMap("inode node"))),
             (root_rec::DIR_DATA, Some(Blob::ValueMap("directory node"))),
             (root_rec::XATTR_DATA, Some(Blob::ValueMap("xattr node"))),
