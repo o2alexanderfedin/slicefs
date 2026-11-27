@@ -108,4 +108,4 @@ Resume file: .planning/phases/25-prolly-format-and-layout/25-CONTEXT.md
 
 ## Operator Next Steps
 
-- Plan Phase 25 with /gsd-plan-phase 25 (get the owner choice on Q-2 first)
+- Plan Phase 25 with /gsd-plan-phase 25
