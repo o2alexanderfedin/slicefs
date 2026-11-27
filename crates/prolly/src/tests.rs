@@ -73,17 +73,17 @@ fn golden_root() {
         .into_iter()
         .chain([(Config::SMALL, 9, 30), (Config::SMALL, 200, 230)]);
     let ths: Vec<u64> = table.map(|(c, b, a)| threshold(&c, b, a)).collect();
-    pin!(ths, [128, 322667, 75177143, 187653637, 1207803102, 3558426651, 803046, 1045739182]);
+    pin!(ths, [7, 20166, 4737341, 11975333, 87726437, 448166577, 803046, 1045739182]);
     // (c) the cut points of a build, (d) its root.
     let s = mem_store();
     let (root, st) = build(&s, Config::DEFAULT, u64_entries(5_000, 7)).unwrap();
-    pin!(leaf_counts(&s, &root), [93, 133, 70, 65, 80, 93, 72, 90, 137, 88, 73, 90, 108, 89, 96, 61, 42, 126, 109, 95, 102, 76, 124, 101, 66, 103, 104, 103, 85, 120, 98, 103, 87, 68, 83, 22, 118, 53, 98, 106, 105, 125, 53, 111, 59, 101, 38, 75, 90, 45, 76, 64, 60, 111, 82, 65, 85, 25]);
-    pin!(root.to_hex(), "1ec2d422083f61f9882ffc6615b023b186e262c94b8507c6bbdb307610c3aeb220");
-    pin!((st.depth, st.leaves), (3, 58));
+    pin!(leaf_counts(&s, &root), [258, 103, 205, 132, 161, 210, 123, 185, 103, 235, 232, 177, 155, 154, 156, 251, 155, 155, 105, 162, 287, 209, 170, 139, 165, 45, 200, 215, 128, 25]);
+    pin!(root.to_hex(), "1e74a7eb632708b048b3d53a40d134148232c48802088f47a84250e92c192ded4f");
+    pin!((st.depth, st.leaves), (2, 30));
     // (f) a salted root, and thresholds of a wide config.
     let salted = Config::DEFAULT.with_salt(Some([7u8; 32]));
     let (salted_root, _) = build(&mem_store(), salted, u64_entries(5_000, 7)).unwrap();
-    pin!(salted_root.to_hex(), "1e612a3ec5b994a92e0533aa6fea3c462783412f529320388c876036a5f0689939");
+    pin!(salted_root.to_hex(), "1e018bcf4bdb6d818cb17bdf929bab475b6ce59a9f64fc565b3bdb85645c485e89");
     let wide = Config::new(8192, 32768).unwrap();
     pin!((threshold(&wide, 20_000, 20_045), threshold(&wide, 30_000, 30_045)), (1_178_752_456, 2_838_699_595));
     // (e) the unsalted boundary hash.
@@ -180,7 +180,9 @@ fn threshold_edges() {
     for b in [0, 9, 512, 16_000] {
         assert_eq!(threshold(&d, b, b), 0, "b={b}");
     }
-    assert_eq!(threshold(&d, 0, 16_384), 1 << 32);
+    // At node_max the rule is not 2^32 (e^-16 is about 483 units of 2^-32); the forced cut ends the node.
+    assert_eq!(threshold(&d, 0, 16_384), (1 << 32) - 483);
+    assert_eq!(threshold(&d, 0, 32_768), 1 << 32);
     assert!(threshold(&d, 0, 4_096) < 1 << 32);
     let (min, force) = (d.node_min(), d.force_at());
     let thr_min = threshold(&d, NODE_HEADER, min);
@@ -323,7 +325,7 @@ fn boundaries_ignore_value_bytes() {
 #[test]
 fn levels_use_their_own_salt() {
     let s = mem_store();
-    let (root, _) = build(&s, Config::DEFAULT, u64_entries(200_000, 3)).unwrap();
+    let (root, _) = build(&s, Config::DEFAULT, u64_entries(500_000, 3)).unwrap();
     let ns = nodes(&s, &root);
     let at = |level| ns.iter().filter(move |n| n.level == level);
     let mean = |level| at(level).map(|n| n.bytes).sum::<usize>() as f64 / at(level).count() as f64;
@@ -941,7 +943,7 @@ fn config_new_limits() {
     for (l, m) in [(255, 16384), (16385, 16384), (4096, 4095), (4096, 32769)] {
         assert!(Config::new(l, m).is_none(), "({l}, {m})");
     }
-    assert_eq!(Config::new(4096, 16384), Some(Config::DEFAULT));
+    assert_eq!(Config::new(8192, 16384), Some(Config::DEFAULT));
     assert_eq!(Config::READ.node_max(), MAX_NODE_MAX);
 }
 

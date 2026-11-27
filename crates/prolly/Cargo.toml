@@ -3,7 +3,7 @@ name = "prolly"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Prototype prolly-tree map with nodes in the chunk store (#19); not used by SliceFS"
+description = "Prolly-tree map with nodes in the chunk store: the metadata map format of store format 8 (#215)"
 
 [dependencies]
 chunk-store = { path = "../chunk-store" }

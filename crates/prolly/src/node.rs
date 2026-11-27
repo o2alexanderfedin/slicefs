@@ -1,4 +1,4 @@
-//! The node byte format (private to this crate, not a store format).
+//! The node byte format, part of store format 8 (`docs/design/store-format.md`).
 //!
 //! Header: `NODE_MAGIC` (4 bytes), rule version `u8` (`RULE_VERSION`),
 //! level `u8`, entry count `u32` LE.
