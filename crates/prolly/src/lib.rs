@@ -19,15 +19,17 @@
 //! # Node format
 //!
 //! The node bytes are private to this crate; this is not a store format.
-//! Header (`NODE_HEADER` = 9 bytes): `NODE_MAGIC` (`SPT1`), level `u8`,
-//! entry count `u32` LE. A leaf entry (level 0) is klen `u16` LE, vlen
+//! Header (`NODE_HEADER` = 10 bytes): `NODE_MAGIC` (`SPT1`), rule version
+//! `u8` (`RULE_VERSION`), level `u8`, entry count `u32` LE. A node of
+//! another rule version gives `Error::RuleVersion` in `get`, the cursor,
+//! `walk` and `apply`. A leaf entry (level 0) is klen `u16` LE, vlen
 //! `u16` LE, key, value. An internal entry (level 1 and up) is klen `u16`
 //! LE, the last key of the child, the child `ObjectId` (33 bytes) and the
 //! leaf entry count of the child's subtree `u64` LE. Keys are strictly
 //! ascending in every node. A damaged or crafted node gives
 //! `Error::Corrupt`, never a panic. A node is also checked against the
 //! size limits of a config (node bytes, key and entry sizes): `apply`
-//! against its own config, the readers against `Config::DEFAULT`.
+//! against its own config, the readers against `Config::READ`.
 //!
 //! Each child is checked against its parent entry when `get`, the cursor,
 //! `walk` or `apply` loads it: its last key is the entry's key, its first
@@ -48,7 +50,8 @@
 //! - an internal node never ends after its first entry;
 //! - the node ends when `after > NODE_MAX - MAX_ENTRY` (the forced cut);
 //! - else it does not end when `after < NODE_MIN` (512 B);
-//! - else it ends when `boundary_hash(level, key) / (2^32 - 1)` is below
+//! - else it ends when `boundary_hash(level, key)` (a 32-bit number) is below
+//!   `threshold(cfg, before, after)`, an integer that stands for
 //!   `1 - e^-((after^4 - before^4) / L^4)` with `L = WEIBULL_L` (4,096) and
 //!   the shape `WEIBULL_K` = 4. That is the conditional Weibull CDF of
 //!   Dolt; the mean node is about 0.906 x L, about 3.7 KB.
@@ -62,6 +65,14 @@
 //! (Dolt counts key and value bytes only), so `NODE_MAX` bounds the object.
 //! The decision reads only the entries since the last cut and the current
 //! key, with no look-ahead.
+//!
+//! # Salt
+//!
+//! An optional per-store salt (`Config::with_salt`) makes the boundary
+//! hash keyed BLAKE3 over the same bytes (`boundary_hash_keyed`). The
+//! default is no salt, so node IDs are equal across stores. A reader needs
+//! no salt; a writer must use the salt of the store. The salt enters only
+//! the hash, never the stored key bytes.
 //!
 //! # What the boundaries depend on
 //!
@@ -104,28 +115,39 @@
 //! `apply`) are safe at any time, and no type of this crate holds shared
 //! mutable state.
 //!
-//! # Floats
+//! # Integer rule
 //!
-//! The cut test uses only the four basic float operations (an exact u64
-//! difference and an own `e^-x`), so node IDs are the same on every
-//! platform; `golden_root` pins them. Whether this rule and its constants
-//! would become part of a frozen store format is owner question Q-3 of
-//! Phase 24 (a one-way door, not decided here).
+//! The cut test is an integer test: the node ends iff
+//! `boundary_hash as u64 < threshold(cfg, before, after)`, with
+//! `threshold = 2^32 - e^-delta` in units of 2^-32 and
+//! `delta = ((after^4 - before^4) << 32) / L^4` (u128). The `e^-x` part
+//! reads a committed table (`rule_table.rs`: 23 integer and 1,025 fraction
+//! entries, linear interpolation), made by `scripts/prolly-table/gen_table.py`
+//! (`--check` compares the file with the generator). No floating point is
+//! used to decide a cut, so the cut points and node IDs are the same on
+//! every platform; `golden_root` pins the table hash, thresholds, cut
+//! points and a root. Whether this rule and its constants become part of a
+//! frozen store format is not decided here.
 
 mod apply;
 mod node;
 mod rule;
+mod rule_table;
 mod tree;
 
 #[cfg(test)]
 mod tests;
 
 pub use apply::{apply, ApplyStats, Edit};
-pub use rule::{boundary_hash, cut_probability, Splitter};
+pub use rule::{boundary_hash, boundary_hash_keyed, threshold, Splitter};
 pub use tree::{build, empty_root, get, iter, walk, BuildStats, Builder, Cursor, NodeInfo};
 
-/// Bytes of the node header: magic 4, level 1, entry count 4.
-pub const NODE_HEADER: usize = 9;
+/// The version of the boundary rule (the threshold function, its table and
+/// the constants of `Config::DEFAULT`) that wrote a node. Every node header
+/// carries it; a reader refuses another version.
+pub const RULE_VERSION: u8 = 1;
+/// Bytes of the node header: magic 4, rule version 1, level 1, entry count 4.
+pub const NODE_HEADER: usize = 10;
 /// No cut below this node size (Dolt `minChunkSize`).
 pub const NODE_MIN: usize = 512;
 /// Hard bound of a node, header included (Dolt `maxChunkSize`).
@@ -141,8 +163,13 @@ pub const WEIBULL_K: u32 = 4;
 /// Magic of a prolly node (`SPT1`), so it is never read as a manifest node (`SFM1`).
 pub const NODE_MAGIC: [u8; 4] = *b"SPT1";
 
-/// The size limits and the CDF scale of a tree. Only the two constants
-/// exist; no other config can be made.
+/// The largest node any config may write, so the largest node a reader
+/// accepts (32 KiB).
+pub const MAX_NODE_MAX: usize = 32_768;
+
+/// The size limits, the CDF scale and the optional salt of a tree.
+/// `DEFAULT` and `SMALL` are the configs of the store and of the tests;
+/// `Config::new` makes the configs of the bench sweep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     node_min: usize,
@@ -150,6 +177,7 @@ pub struct Config {
     max_entry: usize,
     max_key: usize,
     weibull_l: usize,
+    salt: Option<[u8; 32]>,
 }
 
 impl Config {
@@ -160,11 +188,41 @@ impl Config {
         max_entry: MAX_ENTRY,
         max_key: MAX_KEY,
         weibull_l: WEIBULL_L as usize,
+        salt: None,
     };
+
+    /// The limits that readers check every node against: the `DEFAULT`
+    /// limits with `node_max` = `MAX_NODE_MAX`, so a reader accepts every
+    /// config that `Config::new` makes.
+    pub const READ: Config = Config { node_max: MAX_NODE_MAX, ..Config::DEFAULT };
 
     /// Small nodes (min 32, max 1,024, entry 256, key 128, L 256): deep
     /// trees from a few hundred entries, for tests.
-    pub const SMALL: Config = Config { node_min: 32, node_max: 1_024, max_entry: 256, max_key: 128, weibull_l: 256 };
+    pub const SMALL: Config =
+        Config { node_min: 32, node_max: 1_024, max_entry: 256, max_key: 128, weibull_l: 256, salt: None };
+
+    /// A config of the bench sweep: scale `weibull_l` in 256..=16,384 and
+    /// `node_max` in 4,096..=`MAX_NODE_MAX`; the other limits are the crate
+    /// constants and there is no salt. `None` outside the ranges. A store
+    /// tree uses `Config::DEFAULT`.
+    pub fn new(weibull_l: usize, node_max: usize) -> Option<Config> {
+        if !(256..=16_384).contains(&weibull_l) || !(4_096..=MAX_NODE_MAX).contains(&node_max) {
+            return None;
+        }
+        Some(Config { node_max, weibull_l, ..Config::DEFAULT })
+    }
+
+    /// The same config with a salt (or none). The salt makes the boundary
+    /// hash keyed BLAKE3; a reader needs no salt, a writer must use the
+    /// salt of the store.
+    pub fn with_salt(self, salt: Option<[u8; 32]>) -> Config {
+        Config { salt, ..self }
+    }
+
+    /// The salt of the boundary hash, if any.
+    pub fn salt(&self) -> Option<&[u8; 32]> {
+        self.salt.as_ref()
+    }
 
     /// No cut below this node size.
     pub fn node_min(&self) -> usize {
@@ -210,6 +268,8 @@ pub enum Error {
     KeyTooLarge { len: usize, max: usize },
     /// Keys are not strictly ascending.
     Unsorted,
+    /// A node was written under another boundary rule version.
+    RuleVersion { found: u8 },
 }
 
 impl std::fmt::Display for Error {
@@ -220,6 +280,9 @@ impl std::fmt::Display for Error {
             Error::EntryTooLarge { len, max } => write!(f, "prolly: entry of {len} bytes is above the limit {max}"),
             Error::KeyTooLarge { len, max } => write!(f, "prolly: key of {len} bytes is above the limit {max}"),
             Error::Unsorted => write!(f, "prolly: keys are not strictly ascending"),
+            Error::RuleVersion { found } => {
+                write!(f, "prolly: node of boundary rule version {found}; this build knows version {RULE_VERSION} only")
+            }
         }
     }
 }
