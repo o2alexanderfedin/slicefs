@@ -32,6 +32,7 @@ use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
 use metadata::store_io::{StoreIo, NODE_CACHE_BYTES};
 use metadata::wal::{WalConfig, create_wal};
+use slicefs_traits::metadata::MetaError;
 use crate::filesystem::{DirtyConfig, SliceFsFilesystem};
 use crate::header;
 use crate::util::ts;
@@ -148,7 +149,7 @@ pub fn load_store_with(
     node_io.set_node_cache_bytes(meta_cache_size);
     let io = Arc::new(Mutex::new(node_io));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
-        .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+        .map_err(|e| load_error(store_path, "failed to reconstruct metadata store", e))?;
 
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
@@ -214,9 +215,21 @@ pub fn load_store_read_only_with(
     node_io.set_node_cache_bytes(meta_cache_size);
     let io = Arc::new(Mutex::new(node_io));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
-        .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+        .map_err(|e| load_error(store_path, "failed to reconstruct metadata store", e))?;
     meta.set_snapshots(snapshots);
     Ok((meta, io))
+}
+
+/// The text of a failed `load_from_root` of the store `store_path`: M19
+/// for a root record whose maps are not prolly trees (a store of an interim
+/// build), else `what: <error>`.
+fn load_error(store_path: &Path, what: &str, e: MetaError) -> String {
+    match &e {
+        MetaError::Corrupted(s) if s.starts_with(metadata::store::FLAT_MAPS_REFUSED) => {
+            header::msg_interim_flat_maps(store_path)
+        }
+        _ => format!("{what}: {e}"),
+    }
 }
 
 /// Determine the next segment ID by scanning existing segment files.
@@ -496,7 +509,7 @@ pub fn start(
         println!("Mounting snapshot {} (read-only)", snap.version);
         let snap_io: Arc<Mutex<StoreIo>> = io.clone();
         let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+            .map_err(|e| -> Box<dyn std::error::Error> { load_error(store_path, "failed to load snapshot root", e).into() })?;
         let mut cfg = build_mount_options(args.noatime, args.allow_other, None);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, snap_io, cfg)

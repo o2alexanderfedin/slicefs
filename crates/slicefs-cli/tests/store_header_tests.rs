@@ -213,6 +213,58 @@ fn a_format_7_store_is_refused() {
     assert_eq!(tree(&store), before, "the store tree does not change");
 }
 
+/// [IN-02]: a format 8 store whose root record fields are flat maps (a
+/// store of an interim build) is refused by the writable mount, the
+/// read-only mount and `start` with M19, which names the store; no file of
+/// the store changes and no lock file is left.
+#[test]
+fn an_interim_flat_map_store_is_refused_with_m19() {
+    use metadata::store_io::put_value;
+    use metadata::wal::WalConfig;
+    use slicefs_cli::mount::{load_store, load_store_read_only};
+
+    let dir = seeded();
+    let store = dir.path().join("store");
+    {
+        // A 197-byte root record whose five map fields are plain values,
+        // logged as the last root.
+        let (meta, io, _locks) = load_store(&store, WalConfig::PerOp, None).unwrap();
+        let cs = std::sync::Arc::clone(io.lock().unwrap().store());
+        let mut root = Vec::new();
+        root.extend_from_slice(&1u64.to_le_bytes());
+        root.extend_from_slice(&3u64.to_le_bytes());
+        for i in 0..5 {
+            root.extend_from_slice(&put_value(&cs, format!("flat map {i}").as_bytes()).unwrap().0);
+        }
+        root.extend_from_slice(&5u64.to_le_bytes());
+        root.extend_from_slice(&2u64.to_le_bytes());
+        assert_eq!(root.len(), 197);
+        let key = put_value(&cs, &root).unwrap();
+        cs.sync().unwrap();
+        meta.commit_root(key).unwrap();
+        meta.shutdown_wal().unwrap();
+    }
+    assert!(!store.join("mount.lock").exists());
+    let before = tree(&store);
+    let m19 = header::msg_interim_flat_maps(&store);
+    assert!(m19.contains(&store.display().to_string()), "{m19}");
+
+    let flag = header::Flag {
+        class: header::Class::RoCompat,
+        name: "test-ro-feature".to_string(),
+        release: "r-test".to_string(),
+    };
+    let results = [
+        ("load_store", load_store(&store, WalConfig::PerOp, None).map(drop).map_err(|e| e.to_string())),
+        ("load_store_read_only", load_store_read_only(&store, &flag).map(drop).map_err(|e| e.to_string())),
+        ("mount", mount(&store, &StartArgs::default())),
+    ];
+    for (name, r) in &results {
+        assert_eq!(r.as_ref().err(), Some(&m19), "{name}");
+    }
+    assert_eq!(tree(&store), before, "the store tree does not change");
+}
+
 /// [Durable first]: seed into a new directory writes the header of a new
 /// store (format 8, the default hash, no flag line).
 #[test]

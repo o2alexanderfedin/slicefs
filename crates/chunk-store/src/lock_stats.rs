@@ -34,9 +34,11 @@ pub enum Site {
     WalQueue,
     /// `readers` of the file system core.
     Readers,
-    /// A shard of `dir_live`, the directory cache of the metadata store.
+    /// An overlay shard of the `dir_data` tree of the metadata store (the
+    /// pending directory entries of the directories of the shard).
     DirLive,
-    /// A shard of `inode_live`, the inode cache of the metadata store.
+    /// An overlay shard of the `inode_data` tree of the metadata store (the
+    /// pending inode records of the shard).
     InodeLive,
     /// The handle table of the file system core.
     Handles,
@@ -48,15 +50,21 @@ pub enum Site {
     Stripe,
     /// The inode number allocator of the metadata store.
     InodeAlloc,
-    /// `inode_data` of the metadata store (inode -> data key as of the last flush).
+    /// The root lock of the `inode_data` tree of the metadata store (inode
+    /// -> inline inode record); its overlay shards are [`Site::InodeLive`].
     InodeData,
-    /// `dir_data` of the metadata store (directory -> entry list key).
+    /// The root lock of the `dir_data` tree of the metadata store
+    /// (directory and name -> child and type); its overlay shards are
+    /// [`Site::DirLive`].
     DirData,
-    /// `manifest_data` of the metadata store (file -> manifest key).
+    /// The overlay shards and the root lock of the `manifest_data` tree of
+    /// the metadata store (file -> manifest key).
     ManifestData,
-    /// `xattr_data` of the metadata store (inode -> xattr set key).
+    /// The overlay shards and the root lock of the `xattr_data` tree of the
+    /// metadata store (inode and name -> inline or spilled value).
     XattrData,
-    /// `refcounts` of the metadata store (content key -> reference count).
+    /// The overlay shards and the root lock of the `refcounts` tree of the
+    /// metadata store (content key -> reference count).
     Refcounts,
 }
 

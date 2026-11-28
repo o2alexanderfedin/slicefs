@@ -4,10 +4,9 @@ This page lists the size and count limits of a SliceFS store and the code
 that sets each one. It is the design source for the user page
 `docs/user/limits.md` (milestone v2.3, issue #158).
 
-Status: the numbers are true for store format 8 with the work of milestone
-v2.3. Items marked **Phase 26** come with the prolly metadata maps (#215).
-Before Phase 26 the five metadata maps are held whole in RAM, so RAM is the
-real limit of a store.
+Status: the numbers are true for store format 8 with the prolly metadata
+maps of Phase 26 (#215). The five metadata maps are prolly trees; none is
+held whole in RAM.
 
 ## Summary
 
@@ -16,7 +15,7 @@ real limit of a store.
 | Size of one file | 1 TiB (2^40 bytes); a larger write or truncate fails with `EFBIG` | `MAX_FILE_SIZE` in `crates/slicefs-cli/src/filesystem.rs` |
 | Inodes created in one store | 2^64 (inode numbers are `u64`, only go up, never reused) | `InodeAlloc` in `crates/metadata/src/inode_alloc.rs` |
 | Files and directories in one store (design target) | 1,000,000,000 or more, no map whole in RAM | `docs/design/store-format.md`, "Metadata maps (store format 8)" |
-| Entries in one directory | no limit (one tree entry per name) — **Phase 26** | `dir_data` key grammar |
+| Entries in one directory | no limit (one tree entry per name) | `dir_data` key grammar |
 | Length of one name | 255 bytes | `NAME_MAX` in `crates/metadata/src/store.rs` |
 | Depth checked by a rename | 2^20 ancestor levels | `MAX_ANCESTOR_STEPS` in `crates/slicefs-cli/src/filesystem.rs` |
 | Live roots per store | 1 (one mount per store at a time) | mount lock |
@@ -27,7 +26,8 @@ real limit of a store.
 | Prolly node | 16 KiB when written; readers accept up to 32 KiB | `NODE_MAX`, `MAX_NODE_MAX` |
 | Root record | 197 bytes | `crates/metadata/src/store.rs` |
 | Store header (`FORMAT` file) | 64 KiB | `MAX_HEADER` in `crates/slicefs-cli/src/header.rs` |
-| Xattrs per file, and their total size | no limit; memory per call is bounded — **Phase 26** | "Xattrs" below |
+| Length of one xattr name | 1 to 255 bytes | `XATTR_NAME_MAX` in `crates/metadata/src/xattr.rs` |
+| Xattrs per file, and their total size | no limit; memory per call is bounded | "Xattrs" below |
 
 ## Files
 
@@ -54,13 +54,14 @@ real limit of a store.
 - At 1,000,000,000 entries the prolly trees are 4 to 5 levels high (layout a,
   L = 8,192, NODE_MAX = 16 KiB). A change of one entry reads and writes about
   one path of nodes per changed tree.
-- **Phase 26:** directory entries are stored by name: the key is the
-  directory inode number and the entry name. One directory can have any
-  number of entries, and one change in a directory touches one path of nodes.
-  `.` and `..` are stored as entries. Readdir is a range scan in name byte
-  order.
-- Before Phase 26 each directory is one list object, so one change in a large
-  directory writes the whole list again.
+- Directory entries are stored by name: the key is the directory inode
+  number and the entry name. One directory can have any number of entries,
+  and one change in a directory touches one path of nodes. `.` and `..` are
+  stored as entries. Readdir is a range scan in name byte order.
+- **Cost to note:** readdir offsets are entry indexes, so each readdir call
+  scans the directory from its start. A full listing of a directory of n
+  entries reads O(n^2 / page) entries; memory stays bounded. Paged readdir
+  by a name cookie is later work.
 
 ## Roots and snapshots
 
@@ -75,7 +76,7 @@ real limit of a store.
   prolly tree is later work.
 - GC walks every snapshot root in full. With N snapshots the GC mark visits
   up to N times the node count of one tree; shared subtrees are not skipped
-  yet (owner decision for Phase 26; skipping them is later work).
+  yet (owner decision of Phase 26; skipping them is later work).
 - One namespace over many stores (a global root) does not exist yet.
 
 ## Metadata entries
@@ -84,10 +85,10 @@ Store format 8 keeps five metadata maps, each a prolly tree (layout a):
 
 | Map | Key | Value |
 | --- | --- | --- |
-| `inode_data` | inode number (8 bytes, big endian) | the inode record, inline (about 100 bytes) — **Phase 26** |
-| `dir_data` | directory inode number + entry name | child inode number + file type — **Phase 26** |
+| `inode_data` | inode number (8 bytes, big endian) | the inode record, inline (56 or 72 bytes) |
+| `dir_data` | directory inode number + entry name | child inode number + file type (9 bytes) |
 | `manifest_data` | inode number | 33-byte `ObjectKey` of the file's manifest |
-| `xattr_data` | inode number + xattr name | tag byte + inline value or `ObjectKey` of a spilled value — **Phase 26** |
+| `xattr_data` | inode number + xattr name | tag byte + inline value or `ObjectKey` of a spilled value |
 | `refcounts` | 33-byte content key | 8-byte count |
 
 Every entry (key and value) is at most 2,048 bytes, and every key at most
@@ -96,8 +97,8 @@ the tree holds the key of an object that holds the value.
 
 ## Xattrs
 
-**Phase 26 design (owner decision, 2026-11-27).** Each xattr is its own entry
-in `xattr_data`:
+Each xattr is its own entry in `xattr_data` (owner decision of Phase 26,
+2026-11-27):
 
 - Key: the inode number (8 bytes, big endian) and then the xattr name.
 - Value: one tag byte, then either the value bytes (when key and value fit in
@@ -122,5 +123,6 @@ This replaces the earlier design, where all xattrs of a file were one
 serialized set, inline or spilled as one object. With that design a file with
 many or large xattrs had to be read and written whole in RAM.
 
-Before Phase 26 the xattr set of a file is still one object, held in memory
-when it is read or written.
+Known gap: setxattr ignores the flags `XATTR_CREATE` and `XATTR_REPLACE`. A
+set always writes the entry, so "create only" and "replace only" are not
+checked and not atomic.

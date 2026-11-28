@@ -1,8 +1,12 @@
 //! `DictMetadataStore` — MetadataStore whose nodes are in the chunk store.
 //!
-//! All state is held in-memory as `Mutex`-guarded maps; `commit()` stores the
-//! changed nodes, syncs the chunk store, then writes a `RootUpdate` to the WAL
-//! for crash-safe ordering.
+//! The five metadata maps (`inode_data`, `dir_data`, `manifest_data`,
+//! `xattr_data`, `refcounts`) are prolly trees (`pmap`): a read goes to the
+//! pending edits of the map's overlay, then to the tree through the node
+//! cache; no map is held whole in RAM. `commit()` applies the pending edits
+//! to each tree, stores the root record with the five new tree roots, syncs
+//! the chunk store, then writes a `RootUpdate` to the WAL for crash-safe
+//! ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
 //!   `inode_alloc`, then one `inodes` overlay shard, then the `inodes`
@@ -1190,7 +1194,7 @@ impl DictMetadataStore {
             put_digest(&mut root_bytes, d);
         }
         // logical_bytes + inode_count: without them, loading would read every
-        // inode object just to sum the sizes (O(files) reads).
+        // inode record just to sum the sizes (O(files) reads).
         root_bytes.extend_from_slice(&p.logical_bytes.to_le_bytes());
         root_bytes.extend_from_slice(&p.inode_count.to_le_bytes());
         assert_eq!(root_bytes.len(), root_rec::SIZE, "root record size");
@@ -2001,6 +2005,38 @@ fn for_each_manifest_key(
     for_each_window(cs, &mut r, WHAT, 0, KEY_BYTES, &mut |e| f(ObjectKey::read(e, 0)))
 }
 
+/// The start of the error that [`DictMetadataStore::load_from_root`] gives
+/// for a root record whose fields are not prolly tree roots. An interim
+/// build of store format 8 wrote flat maps there; no read path exists for
+/// them, and a mount refuses such a store (message M19).
+pub const FLAT_MAPS_REFUSED: &str = "root record: the metadata maps are not prolly trees";
+
+/// Error (starting with [`FLAT_MAPS_REFUSED`]) unless the root object of
+/// each of the five map fields of the root record `bytes` is a prolly node:
+/// one verified read of one object per field, nothing else.
+fn check_tree_fields(cs: &ChunkStore, bytes: &[u8]) -> Result<(), MetaError> {
+    let fields = [
+        ("inode_data", root_rec::INODE_DATA),
+        ("dir_data", root_rec::DIR_DATA),
+        ("manifest_data", root_rec::MANIFEST_DATA),
+        ("xattr_data", root_rec::XATTR_DATA),
+        ("refcounts", root_rec::REFCOUNTS),
+    ];
+    for (name, off) in fields {
+        let key = parse_key(&bytes[off..off + KEY_BYTES]);
+        let node = cs.read(&crate::store_io::to_id(&key))
+            .map_err(|e| crate::store_io::node_err(name, &key, e))?;
+        if !node.starts_with(&prolly::NODE_MAGIC) {
+            let head = &node[..node.len().min(prolly::NODE_MAGIC.len())];
+            let hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
+            return Err(MetaError::Corrupted(format!(
+                "{FLAT_MAPS_REFUSED}: field {name} starts with {hex:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Error unless `len` is the size of a root record.
 fn check_root_len(len: usize) -> Result<(), MetaError> {
     if len != root_rec::SIZE {
@@ -2026,6 +2062,11 @@ impl DictMetadataStore {
     /// subsequent operations continue seamlessly.
     /// The counts come from the root record; the root inode is checked with
     /// one tree read (no walk).
+    ///
+    /// Each of the five map fields must be the root of a prolly tree (one
+    /// read per field): else the error is `MetaError::Corrupted` that starts
+    /// with [`FLAT_MAPS_REFUSED`] (an interim build of store format 8 wrote
+    /// flat maps there; they are refused, never read).
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
 
@@ -2054,6 +2095,9 @@ impl DictMetadataStore {
         let cs = Arc::clone(io_guard.store());
         let trees = TreeIo::new(Arc::clone(&cs), io_guard.node_cache(), io_guard.tree_config());
         drop(io_guard);
+
+        // Each field must be a tree root before any tree is read.
+        check_tree_fields(&cs, &bytes)?;
 
         // The working root; only the root inode is read (sanity check).
         let inodes = MapTree::with_sites("inode_data", Site::InodeLive, Site::InodeData, crate::store_io::to_id(&inode_data_digest));
@@ -2892,7 +2936,8 @@ mod tests {
         assert!(next_ino > max_ino, "next_ino {} not > max_ino {}", next_ino, max_ino);
     }
 
-    /// The root record has one inode map and is 197 bytes; `next_ino` in it
+    /// The root record is 197 bytes, its five map fields are tree roots
+    /// (each object starts with the prolly node magic), and `next_ino` in it
     /// is the allocator value.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
@@ -2918,6 +2963,61 @@ mod tests {
         let next = u64::from_le_bytes(bytes[root_rec::NEXT_INO..root_rec::NEXT_INO + 8].try_into().unwrap());
         assert_eq!(next, store.inode_alloc.lock().next_ino());
         assert!(next > ino);
+        let cs = Arc::clone(store.io().lock().unwrap().store());
+        for off in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::MANIFEST_DATA,
+                    root_rec::XATTR_DATA, root_rec::REFCOUNTS] {
+            let node = cs.read(&crate::store_io::to_id(&parse_key(&bytes[off..off + KEY_BYTES]))).unwrap();
+            assert_eq!(node[..4], prolly::NODE_MAGIC, "field at {off}");
+        }
+    }
+
+    /// The root record of an interim build of format 8 (its five fields are
+    /// flat maps: plain values) is refused with `FLAT_MAPS_REFUSED`, also
+    /// when only one field is flat, and also for an empty flat map.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_interim_flat_map_root_is_refused() {
+        let (_dir, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.link(store.root_ino(), "f", ino).unwrap();
+        let good = store.commit().unwrap();
+        let cs = Arc::clone(store.io().lock().unwrap().store());
+        let tree_root = crate::store_io::get_value(&cs, &good).unwrap();
+        let fields = [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::MANIFEST_DATA,
+                      root_rec::XATTR_DATA, root_rec::REFCOUNTS];
+        let flat = |i: usize| crate::store_io::put_value(&cs, format!("flat map {i}: 8-byte rows").as_bytes()).unwrap();
+        let refused = |bytes: &[u8], field: &str| {
+            let root = crate::store_io::put_value(&cs, bytes).unwrap();
+            let r = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root);
+            assert!(
+                matches!(&r, Err(MetaError::Corrupted(m)) if m.starts_with(FLAT_MAPS_REFUSED) && m.contains(field)),
+                "{field}: {:?}", r.err()
+            );
+        };
+
+        // All five fields flat (the interim build).
+        let mut all = tree_root.clone();
+        for (i, off) in fields.iter().enumerate() {
+            all[*off..*off + KEY_BYTES].copy_from_slice(&flat(i).0);
+        }
+        assert_eq!(all.len(), root_rec::SIZE);
+        refused(&all, "inode_data");
+
+        // One flat field, four tree fields: each field is checked.
+        for (name, off) in ["inode_data", "dir_data", "manifest_data", "xattr_data", "refcounts"].iter().zip(fields) {
+            let mut one = tree_root.clone();
+            one[off..off + KEY_BYTES].copy_from_slice(&flat(9).0);
+            refused(&one, name);
+        }
+
+        // An empty flat map (no bytes) is refused the same way.
+        let mut empty = tree_root.clone();
+        empty[root_rec::DIR_DATA..root_rec::DIR_DATA + KEY_BYTES]
+            .copy_from_slice(&crate::store_io::put_value(&cs, &[]).unwrap().0);
+        refused(&empty, "dir_data");
+
+        // The real root still loads.
+        DictMetadataStore::load_from_root(Arc::clone(store.io()), &good).unwrap();
     }
 
     /// A root record of the old size (two inode maps) is refused, not misread.
