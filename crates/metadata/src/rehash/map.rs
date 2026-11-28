@@ -50,10 +50,12 @@ pub enum Kind {
     ValueMap = 3,
     // 4 is not used (it was the flat manifest map, now a tree).
     // 5 is not used (it was the inode map, removed in store format 8).
-    Refcounts = 6,
+    // 6 is not used (it was the flat refcount table, now a tree).
     Root = 7,
     /// The prolly tree of manifest lists (`manifest_data`).
     ManifestTree = 8,
+    /// The prolly tree of refcounts (`refcounts`).
+    RefcountTree = 9,
 }
 
 const EMPTY: [u8; SLOT] = [0; SLOT];

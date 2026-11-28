@@ -18,7 +18,8 @@
 //!   in flight). No node I/O under a shard lock.
 //! - **Read-modify-write.** `read_with_generation` gives the value and the tree
 //!   generation read before the tree read. The caller locks again, checks the
-//!   overlay and the generation, and retries on a change (no lost update).
+//!   overlay and the generation, and retries on a change (no lost update):
+//!   `modify` is that step.
 //! - **Flush** (hot path, with no shard lock held, when `dirty()` reaches
 //!   the store's limit). The caller holds the store's apply lock
 //!   (`try_lock`, skipped when busy or while a commit is prepared). Take the
@@ -99,6 +100,29 @@ impl TreeKey for u64 {
     }
 }
 
+/// A content key (`refcounts`): its 33 bytes (tag, then digest). The shard
+/// comes from the first digest bytes (the tag byte is the same for most keys).
+impl TreeKey for ObjectKey {
+    fn encode(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+
+    fn shard(&self) -> usize {
+        u16::from_le_bytes([self.0[1], self.0[2]]) as usize % SHARDS
+    }
+}
+
+/// A count (`refcounts`): 8 bytes little endian.
+impl TreeValue for u64 {
+    fn encode(&self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        bytes.try_into().map(u64::from_le_bytes).map_err(|_| format!("value of {} bytes, not an 8-byte count", bytes.len()))
+    }
+}
+
 /// An object key: its 33 bytes.
 impl TreeValue for ObjectKey {
     fn encode(&self) -> Vec<u8> {
@@ -176,6 +200,16 @@ impl<K: TreeKey, V: TreeValue> Overlay<K, V> {
             s.dirty.insert(k);
             s.flushing.remove(&k);
         });
+    }
+
+    /// A copy of every pending edit (dirty or in flight).
+    fn pending(&self) -> Vec<(K, Option<V>)> {
+        let mut out = Vec::new();
+        for sh in &self.shards {
+            let g = sh.lock();
+            out.extend(g.map.iter().map(|(k, v)| (*k, v.clone())));
+        }
+        out
     }
 
     /// The dirty entries, plus the entries in flight if `in_flight` (a
@@ -335,6 +369,57 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
         self.overlay.put(k, v);
     }
 
+    /// One step of a read-modify-write (see the module doc), under the
+    /// overlay shard lock of `k`. The current value is the pending edit of
+    /// `k`; with no pending edit it is `tree` (a value and the generation
+    /// that `read_with_generation` gave), but only while the generation is
+    /// still the same. `f` gets the current value (`None`: no entry) and
+    /// gives the new edit (`None`: change nothing) and a result. `None`
+    /// (and `f` is not called) if there is no current value: read again and
+    /// retry. `f` runs under the shard lock: no I/O and no other lock.
+    pub(crate) fn modify<R>(
+        &self,
+        k: K,
+        tree: Option<(Option<V>, u64)>,
+        f: impl FnOnce(Option<V>) -> (Option<Option<V>>, R),
+    ) -> Option<R> {
+        self.overlay.with(k.shard(), |s| {
+            let cur = match (s.map.get(&k), tree) {
+                (Some(edit), _) => edit.clone(),
+                (None, Some((v, generation))) if generation == self.generation() => v,
+                (None, _) => return None,
+            };
+            let (edit, r) = f(cur);
+            if let Some(v) = edit {
+                // As `Overlay::put`: dirty, and a ticket in flight is dropped
+                // (the settle of a take keeps this newer value).
+                s.map.insert(k, v);
+                s.dirty.insert(k);
+                s.flushing.remove(&k);
+            }
+            Some(r)
+        })
+    }
+
+    /// Call `f` with each value of the map: the tree at the working root
+    /// read with one cursor (one path of nodes, no cache), the keys with a
+    /// pending edit skipped, then the pending edits (a copy of the overlay,
+    /// which a flush bounds). O(map) time, bounded memory. Exact when no
+    /// write, flush or commit runs meanwhile.
+    pub(crate) fn for_each_value(&self, io: &TreeIo, mut f: impl FnMut(V)) -> Result<(), MetaError> {
+        let root = self.tree.root();
+        let pending: HashMap<Vec<u8>, Option<V>> = self.overlay.pending().into_iter().map(|(k, v)| (k.encode(), v)).collect();
+        let corrupt = |m: String| MetaError::Corrupted(format!("{} tree: {m}", self.name));
+        for e in prolly::iter_in(&prolly::Ctx::uncached(&io.cs), &root).map_err(|e| tree_err(self.name, e))? {
+            let (k, v) = e.map_err(|e| tree_err(self.name, e))?;
+            if !pending.contains_key(&k) {
+                f(V::decode(&v).map_err(corrupt)?);
+            }
+        }
+        pending.into_values().flatten().for_each(f);
+        Ok(())
+    }
+
     /// Dirty entries of the overlay.
     pub(crate) fn dirty(&self) -> usize {
         self.overlay.dirty()
@@ -469,7 +554,7 @@ mod tests {
         assert_eq!(m.read(&io, &2).unwrap(), None);
         assert_eq!(m.dirty(), 2);
         // The tree has the taken values.
-        assert_eq!(prolly::get_in(&io.ctx(), &new, &1u64.encode()).unwrap(), Some(ObjectKey::example(1).encode()));
+        assert_eq!(prolly::get_in(&io.ctx(), &new, &TreeKey::encode(&1u64)).unwrap(), Some(TreeValue::encode(&ObjectKey::example(1))));
         let (root, taken) = m.take_for_commit();
         let (new, _) = m.apply_batch(&io, &root, &taken).unwrap();
         m.install_and_settle(new, &taken, &apply.lock());
@@ -510,10 +595,42 @@ mod tests {
         assert_eq!(m.read_with_generation(&io, &3).unwrap(), (Some(ObjectKey::example(4)), 2));
     }
 
+    // A read-modify-write whose tree read is older than an install (a flush
+    // came between the read and the check) must retry, or the flushed
+    // change is lost. A pending edit answers without the tree.
+    #[test]
+    fn modify_retries_after_an_install() {
+        let io = io();
+        let m: MapTree<ObjectKey, u64> = MapTree::new("test", Site::Refcounts, prolly::empty_root(&io.cs).unwrap());
+        let apply = lock();
+        let k = ObjectKey::example(7);
+        let add = |c: Option<u64>| (Some(Some(c.unwrap_or(0) + 1)), ());
+        assert!(m.modify(k, None, add).is_none(), "no pending edit and no tree read");
+        m.write(k, Some(1));
+        m.flush(&io, &apply.lock()).unwrap();
+        let stale = m.read_with_generation(&io, &k).unwrap();
+        assert_eq!(stale.0, Some(1));
+        m.write(k, Some(5));
+        m.flush(&io, &apply.lock()).unwrap();
+        assert_eq!(m.dirty(), 0);
+        assert!(m.modify(k, Some(stale), add).is_none(), "an install came after the read");
+        let fresh = m.read_with_generation(&io, &k).unwrap();
+        assert_eq!(m.modify(k, Some(fresh), add), Some(()));
+        assert_eq!(m.read(&io, &k).unwrap(), Some(6));
+        // A pending edit: the tree value given is not used.
+        assert_eq!(m.modify(k, Some((Some(100), 0)), add), Some(()));
+        assert_eq!(m.read(&io, &k).unwrap(), Some(7));
+        // No change: nothing becomes dirty.
+        m.flush(&io, &apply.lock()).unwrap();
+        let fresh = m.read_with_generation(&io, &k).unwrap();
+        assert_eq!(m.modify(k, Some(fresh), |_| (None, ())), Some(()));
+        assert_eq!(m.dirty(), 0);
+    }
+
     #[test]
     fn a_bad_value_in_the_tree_is_corrupt() {
         let io = io();
-        let (root, _) = prolly::build(&io.cs, prolly::Config::DEFAULT, [(5u64.encode(), vec![1u8, 2, 3])]).unwrap();
+        let (root, _) = prolly::build(&io.cs, prolly::Config::DEFAULT, [(TreeKey::encode(&5u64), vec![1u8, 2, 3])]).unwrap();
         let m: MapTree<u64, ObjectKey> = MapTree::new("test", Site::ManifestData, root);
         let e = m.read(&io, &5).unwrap_err();
         assert!(e.to_string().contains("test tree"), "{e}");
