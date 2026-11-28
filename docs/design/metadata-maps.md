@@ -104,8 +104,22 @@ live set. The leaves give the values they refer to: the manifests of
 give is expanded once), and each sorted key is then expanded to its
 objects. The leaf keys of `refcounts` are not live references. Every snapshot root is walked in full:
 N snapshots cost up to N times the node count of one root. This cost is
-accepted; skipping shared subtrees is later work. Plan 26-11 records the
-measured cost.
+accepted; skipping shared subtrees is later work.
+
+Measured in plan 26-11 (debug build, macOS):
+
+| Measure | Value |
+|---------|-------|
+| Tree nodes the mark visits, 3,000 files, 1 root | 89 |
+| Same store, 1 root and 3 snapshots that share almost all nodes | 356 (95 distinct) |
+| Peak heap of a full mark, 50,000 files | 2,086,967 bytes |
+| Peak heap of a full mark, 200,000 files | 2,641,095 bytes |
+
+The walk of 4 roots visits 4 x the nodes of one root, although they have
+only 6 more distinct nodes (`snapshot_roots_cost_one_walk_each`). This
+full walk per root is the accepted limit. The peak heap is measured with
+sort chunks of 4,096 keys, so the keys of both stores spill to temp files
+(`gc_prolly_memory_tests`): 4 x the map adds about 0.55 MB, not the map.
 
 ## Rehash
 
