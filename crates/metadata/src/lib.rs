@@ -18,3 +18,4 @@ pub mod mount_lock;
 pub mod gc;
 pub mod snapshot;
 pub mod rehash;
+mod pmap;

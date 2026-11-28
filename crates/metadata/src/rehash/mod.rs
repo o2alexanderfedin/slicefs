@@ -15,14 +15,27 @@
 //!   (`is_cut`), so only the real writer gives the fresh-write key. A
 //!   directory entry holds the BLAKE3-256 of its name, not a content
 //!   address; it is inside the copied bytes and does not change.
-//! - **Translation of a key-carrying node.** The manifest lists, the four
-//!   `u64 -> key` maps, the inode map, the refcount table and the root
-//!   record are read in windows of whole records; each key is replaced by
-//!   its new key, and the node is written again through a `FileWriter`.
-//!   These nodes are always translated, also when their own key has the
-//!   target tag: they can list keys of another tag. The refcount rows are
-//!   sorted by their new keys with the external sorter of the chunk store,
-//!   and rows that get one new key are merged.
+//! - **Translation of a key-carrying node.** The manifest lists, the three
+//!   flat `u64 -> key` maps, the refcount table and the root record are
+//!   read in windows of whole records; each key is replaced by its new key,
+//!   and the node is written again through a `FileWriter`. These nodes are
+//!   always translated, also when their own key has the target tag: they
+//!   can list keys of another tag. The refcount rows are sorted by their
+//!   new keys with the external sorter of the chunk store, and rows that
+//!   get one new key are merged.
+//! - **Rebuild of a map tree** (the `manifest_data` prolly tree). A tree
+//!   node holds the IDs of its children, so every node ID changes with the
+//!   hash. The old tree is read in key order with a cursor (one path of
+//!   nodes, no cache; every object read is verified with the hasher of its
+//!   tag), each value is translated (a manifest key through the manifest
+//!   list translation), and the entries go into a `prolly::Builder` of the
+//!   target store with the store's boundary salt (`RehashOptions::tree_salt`).
+//!   The keys (inode numbers) do not change, so their order does not either.
+//!   A tree is always rebuilt, also when every node already has the target
+//!   tag (the build then gives the same IDs): to know that its values need
+//!   no translation, all of its leaves must be read anyway, and the rebuild
+//!   costs only the puts of nodes that dedup drops. A dry run reads and
+//!   translates the same way and writes no node.
 //!
 //! A value whose own key and every object of its tree already have the
 //! target tag is kept as it is: its nodes are read to check the tags, its
@@ -33,7 +46,8 @@
 //!
 //! RAM does not grow with the object count: per value one read window, one
 //! reader and one writer (one path of nested values at a time: root record,
-//! map, manifest list, content); the map cache of
+//! map, manifest list, content); per tree one path of the cursor and one
+//! node per level of the builder; the map cache of
 //! `map::CACHE_SLOTS * map::SLOT` bytes (about 1.1 MB); the fixed buffers
 //! of the sorter (a 4 MiB sort chunk, 32 merge inputs of 64 KiB). No value
 //! and no map is read into RAM whole (only the root record, which has a
@@ -92,6 +106,9 @@ pub struct RehashOptions<'a> {
     /// many rewritten values, with no sync and no cleanup.
     #[doc(hidden)]
     pub stop_after_values: Option<u64>,
+    /// The boundary salt of the store (`prolly::Config::with_salt`): the
+    /// rebuilt trees cut as the store's writers do.
+    pub tree_salt: Option<[u8; 32]>,
 }
 
 /// Counts of a run.
@@ -150,8 +167,6 @@ enum Blob {
     ManifestList,
     /// A `u64 -> key` map of inode, directory or xattr nodes.
     ValueMap(&'static str),
-    /// The `u64 -> key` map of manifest lists.
-    ManifestMap,
 }
 
 impl Blob {
@@ -159,14 +174,13 @@ impl Blob {
         match self {
             Blob::ManifestList => Kind::ManifestList,
             Blob::ValueMap(_) => Kind::ValueMap,
-            Blob::ManifestMap => Kind::ManifestMap,
         }
     }
 
     fn what(self) -> &'static str {
         match self {
             Blob::ManifestList => "manifest list",
-            Blob::ValueMap(_) | Blob::ManifestMap => "u64-key map",
+            Blob::ValueMap(_) => "u64-key map",
         }
     }
 
@@ -174,14 +188,14 @@ impl Blob {
     fn head(self) -> usize {
         match self {
             Blob::ManifestList => 0,
-            Blob::ValueMap(_) | Blob::ManifestMap => 8,
+            Blob::ValueMap(_) => 8,
         }
     }
 
     fn record(self) -> usize {
         match self {
             Blob::ManifestList => KEY_BYTES,
-            Blob::ValueMap(_) | Blob::ManifestMap => MAP_ENTRY,
+            Blob::ValueMap(_) => MAP_ENTRY,
         }
     }
 }
@@ -198,6 +212,7 @@ struct Walker<'c, 'a> {
     every: Duration,
     last: Instant,
     stop_after: Option<u64>,
+    tree_salt: Option<[u8; 32]>,
 }
 
 impl Walker<'_, '_> {
@@ -256,6 +271,12 @@ impl Walker<'_, '_> {
                 old
             }
         };
+        self.mapped(kind, old, new)
+    }
+
+    /// Record `old -> new` and end the value (the stop of crash tests, the
+    /// progress call).
+    fn mapped(&mut self, kind: Kind, old: ObjectKey, new: ObjectKey) -> Result<ObjectKey, RehashError> {
         self.map.insert(kind, &old, &new)?;
         if let Some(n) = self.stop_after
             && self.stats.values_rewritten == n
@@ -265,6 +286,61 @@ impl Walker<'_, '_> {
         }
         self.tick(false);
         Ok(new)
+    }
+
+    /// The new root of the manifest tree `old`: rebuilt under the target
+    /// hash with each manifest list translated (see the module doc). In a
+    /// dry run the old root, with the tree nodes of another tag counted.
+    fn manifest_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::ManifestTree;
+        if let Some(new) = self.hit(kind, &old)? {
+            return Ok(new);
+        }
+        let cs = self.cs;
+        let what = "manifest tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
+        let cfg = prolly::Config::DEFAULT.with_salt(self.tree_salt);
+        let mut b = (!self.dry()).then(|| prolly::Builder::new(cs, cfg));
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if k.len() != 8 || v.len() != KEY_BYTES {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
+            }
+            let new = self.blob(Blob::ManifestList, ObjectKey::read(&v, 0))?;
+            if let Some(b) = b.as_mut() {
+                b.push(&k, &new.0).map_err(werr)?;
+            }
+        }
+        self.stats.values_read += 1;
+        let new = match b {
+            Some(b) => {
+                let (root, _) = b.finish().map_err(werr)?;
+                self.stats.values_rewritten += 1;
+                to_key(root)
+            }
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                    other += u64::from(n.id.tag() != tag);
+                    true
+                })
+                .map_err(err)?;
+                self.stats.other_tag_objects += other;
+                old
+            }
+        };
+        self.mapped(kind, old, new)
     }
 
     /// The new key of the value `old` (file content or an inode, directory
@@ -360,8 +436,7 @@ impl Walker<'_, '_> {
                         let key = ObjectKey::read(one, 8);
                         match b {
                             Blob::ValueMap(node) => self.value(node, key)?,
-                            Blob::ManifestMap => self.blob(Blob::ManifestList, key)?,
-                            _ => self.value("inode node", key)?,
+                            Blob::ManifestList => self.value("inode node", key)?,
                         }
                     }
                 };
@@ -506,18 +581,26 @@ impl Walker<'_, '_> {
         }
         drop(r);
         let at = |rec: &[u8], o: usize| ObjectKey::read(rec, o);
+        enum Field {
+            Map(Blob),
+            ManifestTree,
+            Refcounts,
+        }
+        // The manifests before the refcounts: a refcount row that no
+        // manifest uses is stale.
         let fields = [
-            (root_rec::INODE_DATA, Some(Blob::ValueMap("inode node"))),
-            (root_rec::DIR_DATA, Some(Blob::ValueMap("directory node"))),
-            (root_rec::XATTR_DATA, Some(Blob::ValueMap("xattr node"))),
-            (root_rec::MANIFEST_DATA, Some(Blob::ManifestMap)),
-            (root_rec::REFCOUNTS, None),
+            (root_rec::INODE_DATA, Field::Map(Blob::ValueMap("inode node"))),
+            (root_rec::DIR_DATA, Field::Map(Blob::ValueMap("directory node"))),
+            (root_rec::XATTR_DATA, Field::Map(Blob::ValueMap("xattr node"))),
+            (root_rec::MANIFEST_DATA, Field::ManifestTree),
+            (root_rec::REFCOUNTS, Field::Refcounts),
         ];
-        for (o, b) in fields {
+        for (o, f) in fields {
             let key = at(&rec, o);
-            let new = match b {
-                Some(b) => self.blob(b, key)?,
-                None => self.refcounts(key)?,
+            let new = match f {
+                Field::Map(b) => self.blob(b, key)?,
+                Field::ManifestTree => self.manifest_tree(key)?,
+                Field::Refcounts => self.refcounts(key)?,
             };
             rec[o..o + KEY_BYTES].copy_from_slice(&new.0);
         }
@@ -562,6 +645,7 @@ pub fn rehash_roots(cs: &ChunkStore, roots: &RootSet, opts: RehashOptions<'_>) -
         every: opts.progress_every,
         last: Instant::now(),
         stop_after: opts.stop_after_values,
+        tree_salt: opts.tree_salt,
     };
     let mut new = Vec::with_capacity(1 + roots.snapshots.len());
     for root in std::iter::once(roots.current).chain(roots.snapshots.iter().map(|s| s.root)) {
@@ -597,7 +681,7 @@ mod tests {
     use chunk_store::{Blake3_256, Options};
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
-    use crate::store::{content_keys, referenced_roots, DictMetadataStore};
+    use crate::store::{content_keys, referenced_roots, tree_nodes, DictMetadataStore};
     use crate::store_io::{get_value, put_value, to_id, NodeReader, StoreIo};
 
     const KEYED: &dyn ObjectHasher = &TestKeyedBlake3;
@@ -635,6 +719,7 @@ mod tests {
             progress_every: Duration::from_secs(3600),
             progress: None,
             stop_after_values: None,
+            tree_salt: None,
         }
     }
 
@@ -724,6 +809,12 @@ mod tests {
                 assert_eq!(id.tag(), tag, "object {id:?} of {k:?}");
             }
         }
+        // A tree node is one object (not a file value).
+        let nodes = tree_nodes(&mut nr, root).unwrap();
+        assert!(!nodes.is_empty());
+        for k in &nodes {
+            assert_eq!(k.tag(), tag, "tree node {k:?}");
+        }
     }
 
     #[test]
@@ -754,6 +845,38 @@ mod tests {
         let objects = cs.stats().objects;
         assert_eq!(load(&cs, &new.current).commit().unwrap(), new.current);
         assert_eq!(cs.stats().objects, objects);
+    }
+
+    /// A manifest tree of more than one level is rebuilt under the target
+    /// tag: every node has it, the new tree has the same entries (with
+    /// the new manifest keys), and a store loaded from the new root reads
+    /// every manifest.
+    #[test]
+    fn a_manifest_tree_rehashes_under_the_target_tag() {
+        let mem = MemIo::new();
+        let (files, root) = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let files: Vec<u64> = (0..1_500).map(|i| add_file(&m, &cs, m.root_ino(), &format!("f{i}"), format!("{i}").as_bytes()).0).collect();
+            (files, m.commit().unwrap())
+        };
+        let cs = open(&mem, KEYED);
+        let height = |root: &ObjectKey| {
+            let rec = get_value(&cs, root).unwrap();
+            let tree = to_id(&ObjectKey::read(&rec, root_rec::MANIFEST_DATA));
+            prolly::height(&prolly::Ctx::uncached(&cs), &tree).unwrap()
+        };
+        assert!(height(&root) >= 2, "a tree of more than one level");
+        let dir = tempfile::tempdir().unwrap();
+        let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+        assert_eq!(height(&new.current), height(&root));
+        assert_one_tag(&cs, &new.current, KEYED.tag());
+        let m = load(&cs, &new.current);
+        for (i, f) in files.iter().enumerate() {
+            let keys = m.get_manifest(*f).unwrap();
+            assert_eq!(keys[0].tag(), KEYED.tag());
+            assert_eq!(get_value(&cs, &keys[0]).unwrap(), format!("{i}").into_bytes());
+        }
     }
 
     #[test]
@@ -902,6 +1025,7 @@ mod tests {
             progress_every: Duration::from_secs(3600),
             progress: None,
             stop_after_values: None,
+            tree_salt: None,
         }
     }
 

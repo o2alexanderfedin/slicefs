@@ -17,8 +17,8 @@ use slicefs_traits::key::ObjectKey;
 use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
 use crate::{
-    hex, map_len, ms, print_disk, root_record, run_fail, rusage, segment_root, serialized_bytes, stats_delta,
-    usage, usage_fields, Args, Fail, Res, Rng, CONTENT_BYTES, S_IFDIR, S_IFMT, S_IFREG,
+    hex, is_tree, map_len, ms, print_disk, root_record, run_fail, rusage, segment_root, serialized_bytes, stats_delta,
+    usage, usage_fields, Args, Fail, Res, Rng, CONTENT_BYTES, MAP_NAMES, S_IFDIR, S_IFMT, S_IFREG,
 };
 
 /// Most draws of one scatter pick before the bench gives up.
@@ -99,17 +99,29 @@ pub(crate) fn run(argv: &[String]) -> Res<()> {
     let meta = DictMetadataStore::load_from_root(Arc::new(Mutex::new(io)), &root)?;
     let sync = Arc::clone(&cs);
     meta.set_pre_root_sync(Arc::new(move || sync.sync().map_err(std::io::Error::other)));
-    let entries = {
+    // A tree field gives its entry count from its root node; no field that
+    // is a tree is opened as a file value.
+    let tree_count = |k: &ObjectKey| prolly::count(&prolly::Ctx::uncached(&cs), &metadata::store_io::to_id(k));
+    let entries = if is_tree(&cs, &rr.inode_data())? {
+        tree_count(&rr.inode_data())?
+    } else {
         let mut r = chunk_store::file::FileReader::open(&cs, metadata::store_io::to_id(&rr.inode_data()))?;
         let b = r.read(&cs, 0, 8)?;
         u64::from_le_bytes(b.as_slice().try_into().map_err(|_| Fail::Run("short inode_data node".into()))?)
     };
     let mut map_bytes = 0;
-    for k in &rr.maps {
-        map_bytes += map_len(&cs, k)?;
+    let mut tree_fields = String::new();
+    for (k, name) in rr.maps.iter().zip(MAP_NAMES) {
+        if is_tree(&cs, k)? {
+            if name != "inode_data" {
+                tree_fields.push_str(&format!(" {name}_entries={}", tree_count(k)?));
+            }
+        } else {
+            map_bytes += map_len(&cs, k)?;
+        }
     }
     println!(
-        "info inode_data_entries={entries} inode_count_field={} next_ino={} map_bytes={map_bytes} maxrss_after_load={}",
+        "info inode_data_entries={entries} inode_count_field={} next_ino={} map_bytes={map_bytes}{tree_fields} maxrss_after_load={}",
         rr.inode_count,
         rr.next_ino,
         rusage().maxrss_bytes

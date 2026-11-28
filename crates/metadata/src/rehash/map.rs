@@ -48,11 +48,12 @@ pub enum Kind {
     ManifestList = 2,
     /// A `u64 -> key` map of inode, directory or xattr nodes.
     ValueMap = 3,
-    /// The `u64 -> key` map of manifest lists.
-    ManifestMap = 4,
+    // 4 is not used (it was the flat manifest map, now a tree).
     // 5 is not used (it was the inode map, removed in store format 8).
     Refcounts = 6,
     Root = 7,
+    /// The prolly tree of manifest lists (`manifest_data`).
+    ManifestTree = 8,
 }
 
 const EMPTY: [u8; SLOT] = [0; SLOT];
