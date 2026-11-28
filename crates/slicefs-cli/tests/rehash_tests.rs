@@ -14,7 +14,7 @@ use std::time::Duration;
 use chunk_store::file::file_objects;
 use chunk_store::{ChunkProfile, ObjectId};
 use metadata::segment::{load_store_from_segments, scan_store_with_log};
-use metadata::store::{content_keys, referenced_roots, DictMetadataStore};
+use metadata::store::{content_keys, referenced_roots, tree_nodes, DictMetadataStore};
 use metadata::wal::{create_wal, WalConfig};
 use slicefs_cli::content::{self, FORMAT, FORMAT_FILE, REHASH_TMP_DIR};
 use slicefs_cli::filesystem::SliceFsFilesystem;
@@ -148,6 +148,8 @@ fn live_ids(store: &Path) -> BTreeSet<ObjectId> {
         for k in keys.iter().filter(|k| **k != ObjectKey::ZERO) {
             ids.extend(file_objects(&cs, content::to_id(k)).unwrap());
         }
+        // A tree node is one object, not a file value.
+        ids.extend(tree_nodes(&mut io, &r).unwrap().iter().map(content::to_id));
     }
     ids
 }

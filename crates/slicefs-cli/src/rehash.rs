@@ -215,6 +215,8 @@ fn rewrite_and_switch(
         progress_every: args.progress_every,
         progress: Some(&mut on_stats),
         stop_after_values: args.stop_after_values,
+        // The store's boundary salt: plan 26-06 passes the header value.
+        tree_salt: None,
     };
     let (new, stats) = rehash_roots(&cs, old, opts).map_err(|e| -> Error {
         match e {
@@ -300,6 +302,8 @@ fn dry_run(
         progress_every: args.progress_every,
         progress: Some(&mut on_stats),
         stop_after_values: None,
+        // The store's boundary salt: plan 26-06 passes the header value.
+        tree_salt: None,
     };
     let (_, stats) = rehash_roots(&cs, old, opts)?;
     Ok([

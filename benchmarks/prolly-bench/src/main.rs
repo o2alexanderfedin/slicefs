@@ -350,11 +350,26 @@ pub(crate) fn map_len(cs: &ChunkStore, key: &ObjectKey) -> Res<u64> {
     Ok(FileReader::open(cs, to_id(key))?.len())
 }
 
-/// The serialized bytes of a commit: the five maps and the root record.
+/// The names of the root-record map fields, in the order of `RootRec::maps`.
+pub(crate) const MAP_NAMES: [&str; 5] = ["inode_data", "dir_data", "manifest_data", "xattr_data", "refcounts"];
+
+/// True when the map field `key` is a prolly tree: its object starts with
+/// `prolly::NODE_MAGIC` (one verified read). A flat map is a file value,
+/// which `map_len` opens; a tree root is one node.
+pub(crate) fn is_tree(cs: &ChunkStore, key: &ObjectKey) -> Res<bool> {
+    Ok(cs.read(&to_id(key))?.starts_with(&prolly::NODE_MAGIC))
+}
+
+/// The serialized bytes of a commit: the root record and the flat map
+/// fields. A tree field is not counted here: its new nodes are in the
+/// `new_*` fields of the commit line (the stats delta), and plan 26-14
+/// adds the tree bytes that the commit writes (`last_commit_stats`).
 pub(crate) fn serialized_bytes(cs: &ChunkStore, rr: &RootRec) -> Res<u64> {
     let mut n = ROOT_REC_SIZE as u64;
     for k in &rr.maps {
-        n += map_len(cs, k)?;
+        if !is_tree(cs, k)? {
+            n += map_len(cs, k)?;
+        }
     }
     Ok(n)
 }

@@ -10,9 +10,14 @@
 //!   No hot-path call holds the `io` lock; a commit takes it briefly.
 //!   The `prolly::NodeCache` lock (`Rank::Store`) is a leaf: no other lock, read,
 //!   decode or callback runs under it, so it may be taken under any lock above.
+//!   Map trees (`pmap`): `commit_lock`, then `apply_lock`, then one overlay or
+//!   live shard, then a tree root lock. `begin_commit` holds `apply_lock` only
+//!   briefly: never across the write-log cut or a return to the file system.
+//!   A flush is never called with a shard lock held; it holds `apply_lock`
+//!   (`try_lock`) across its node reads and puts.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
 
 use chunk_store::lock_stats::{self, Site};
 use chunk_store::sync::{self, Rank};
@@ -23,6 +28,7 @@ use slicefs_traits::metadata::{DirEntry, InodeId, InodeMeta, MetaError, Metadata
 
 use crate::snapshot::SnapshotEntry;
 use crate::store_io::StoreIo;
+use crate::pmap::{MapTree, Taken, TreeIo};
 use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode::{intern_inode, load_inode};
@@ -75,6 +81,12 @@ const INODE_CACHE_MAX: usize = 16;
 const DIRTY_FLUSH: usize = 1024;
 #[cfg(test)]
 const DIRTY_FLUSH: usize = 8;
+/// A map tree is flushed (its overlay applied to the working root) once
+/// this many of its entries are dirty.
+#[cfg(not(test))]
+const TREE_FLUSH: usize = 16_384;
+#[cfg(test)]
+const TREE_FLUSH: usize = 8;
 
 /// Cached decoded objects plus the set of those changed since the last flush.
 struct Live<T> {
@@ -281,6 +293,10 @@ pub struct PreparedCommit<'a> {
     /// The root is logged. Else (an error, or dropped unfinished) the inodes
     /// and directories it took are dirty again.
     done: bool,
+    /// The map trees have their new roots (`finish_inner`). Else (an error
+    /// before that, or dropped) their overlays are requeued and the
+    /// prepared state ends.
+    installed: bool,
     changes: u64,
     /// `wal_fail_seq` at the cut: failures up to it end with this root.
     fail_seq: u64,
@@ -290,7 +306,9 @@ pub struct PreparedCommit<'a> {
     next_ino: u64,
     inode_data: BTreeMap<u64, ObjectKey>,
     dir_data: BTreeMap<u64, ObjectKey>,
-    manifest_data: BTreeMap<u64, ObjectKey>,
+    /// The manifest tree at the cut and the edits taken from its overlay.
+    manifest_root: chunk_store::ObjectId,
+    manifest: Taken<u64, ObjectKey>,
     xattr_data: BTreeMap<u64, ObjectKey>,
     refcounts: BTreeMap<ObjectKey, u64>,
     logical_bytes: u64,
@@ -303,6 +321,10 @@ pub struct PreparedCommit<'a> {
 impl Drop for PreparedCommit<'_> {
     fn drop(&mut self) {
         if !self.done {
+            if !self.installed {
+                self.store.manifest.requeue();
+                self.store.end_prepared();
+            }
             self.store.inode_live.requeue();
             self.store.dir_live.requeue();
         }
@@ -364,8 +386,22 @@ pub struct DictMetadataStore {
     /// commit timer commits only when they differ.
     changes: AtomicU64,
     committed_changes: AtomicU64,
-    /// Maps file inode number → current manifest `ObjectKey`.
-    manifest_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
+    /// Maps file inode number → current manifest `ObjectKey`: a prolly tree
+    /// (key: the ino, 8 bytes big endian; value: the 33-byte key) and an
+    /// overlay of the changes not in the tree yet (see `pmap`). Its locks
+    /// are timed as `Site::ManifestData`.
+    manifest: MapTree<u64, ObjectKey>,
+    /// The chunk store, node cache and config of the map trees.
+    trees: TreeIo,
+    /// One tree apply at a time: a hot-path flush holds it (`try_lock`)
+    /// across its node reads and puts; `begin_commit` takes it briefly to
+    /// wait out a flush and set `prepared`; `finish_commit` takes it to
+    /// install the new roots. Rank::Store, untimed.
+    apply_lock: sync::Mutex<()>,
+    /// A commit is between its cut and the install of its roots: flushes
+    /// skip, so no edit after the cut reaches the committed roots. Read and
+    /// written under `apply_lock`.
+    prepared: AtomicBool,
     /// Maps inode number → xattr set `ObjectKey` (only for inodes with xattrs).
     xattr_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
     /// Called in `commit()` after the metadata objects are synced and before
@@ -417,7 +453,16 @@ impl DictMetadataStore {
     /// Create a new store with a root directory at inode 1.
     pub fn new(io: Arc<Mutex<StoreIo>>) -> Self {
         // Build root inode + dir entries via put_node, then flush
-        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let (cs, trees) = {
+            let g = lock_stats::lock(&io, Site::Io);
+            (Arc::clone(g.store()), TreeIo::new(Arc::clone(g.store()), g.node_cache(), g.tree_config()))
+        };
+        // The empty manifest tree; a put error fails the next commit (as a
+        // hot-path put error does).
+        let (empty, put_error) = match prolly::empty_root(&cs) {
+            Ok(r) => (r, None),
+            Err(e) => (chunk_store::ObjectId(ObjectKey::ZERO.0), Some(std::io::Error::other(e))),
+        };
         let (root_inode_digest, root_dir_digest) = {
             let mut io_guard = lock_stats::lock(&io, Site::Io);
             let mut fsa = &mut *io_guard;
@@ -453,7 +498,7 @@ impl DictMetadataStore {
             io,
             cs,
             unsynced_puts: AtomicU64::new(0),
-            put_error: lk(None),
+            put_error: lk(put_error),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
             dir_data: lk(dir_data).timed(Site::DirData),
@@ -461,7 +506,10 @@ impl DictMetadataStore {
             inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: lk(BTreeMap::new()).timed(Site::ManifestData),
+            manifest: MapTree::new("manifest_data", Site::ManifestData, empty),
+            trees,
+            apply_lock: lk(()),
+            prepared: AtomicBool::new(false),
             xattr_data: lk(BTreeMap::new()).timed(Site::XattrData),
             pre_root_sync: lk(None),
             refcounts: lk(BTreeMap::new()).timed(Site::Refcounts),
@@ -1033,6 +1081,38 @@ impl DictMetadataStore {
         drop(self.commit_lock.lock());
     }
 
+    /// End the prepared state of a commit (flushes may run again).
+    fn end_prepared(&self) {
+        let _apply = self.apply_lock.lock();
+        self.prepared.store(false, Ordering::Relaxed);
+    }
+
+    /// Hot path, with no store lock held: flush the manifest tree when
+    /// enough of its entries are dirty. Skipped while another flush runs
+    /// or a commit is prepared (the commit takes the entries). A failed
+    /// apply leaves the entries dirty and fails the next commit.
+    fn flush_trees(&self) {
+        if self.manifest.dirty() < TREE_FLUSH {
+            return;
+        }
+        let Some(apply) = self.apply_lock.try_lock() else { return };
+        if self.prepared.load(Ordering::Relaxed) {
+            return;
+        }
+        match self.manifest.flush(&self.trees, &apply) {
+            Ok(Some(stats)) => {
+                self.unsynced_puts.fetch_add(stats.nodes_written, Ordering::Relaxed);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let mut k = self.put_error.lock();
+                if k.is_none() {
+                    *k = Some(std::io::Error::other(e.to_string()));
+                }
+            }
+        }
+    }
+
     /// First half of a commit (#108), run while no request changes the store
     /// (the file system holds its commit gate exclusively): take the dirty
     /// inodes and directories and a copy of every map, and cut the write log
@@ -1041,10 +1121,23 @@ impl DictMetadataStore {
     /// a commit still in `finish_commit`.
     pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
         let serial = self.commit_lock.lock();
+        // Wait out a running tree flush, and stop new ones until the roots of
+        // this commit are installed. The lock is not held across the cut: the
+        // cut takes locks of the file system that rank below it.
+        {
+            let _apply = self.apply_lock.lock();
+            self.prepared.store(true, Ordering::Relaxed);
+        }
         let wal = self.wal_handle();
         // The log first: if it cannot cut, nothing has changed.
         let cut = match &wal {
-            Some(w) => w.cut().map_err(|e| MetaError::Corrupted(format!("commit: write-log cut failed: {e}")))?,
+            Some(w) => match w.cut() {
+                Ok(c) => c,
+                Err(e) => {
+                    self.end_prepared();
+                    return Err(MetaError::Corrupted(format!("commit: write-log cut failed: {e}")));
+                }
+            },
             None => None,
         };
         if cut.is_some_and(|c| c.old_failed) {
@@ -1055,17 +1148,19 @@ impl DictMetadataStore {
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
         let dirs = self.dir_live.take_all();
-        let next_ino = self.inode_alloc.lock().next_ino();
         let inodes = self.inode_live.take_all();
+        let (manifest_root, manifest) = self.manifest.take_for_commit();
+        // After the takes (IN-01).
+        let next_ino = self.inode_alloc.lock().next_ino();
         let inode_data = self.inode_data.lock().clone();
         let dir_data = self.dir_data.lock().clone();
-        let manifest_data = self.manifest_data.lock().clone();
         let xattr_data = self.xattr_data.lock().clone();
         let refcounts = self.refcounts.lock().clone();
         Ok(PreparedCommit {
             _serial: serial,
             store: self,
             done: false,
+            installed: false,
             changes,
             fail_seq,
             inodes,
@@ -1073,7 +1168,8 @@ impl DictMetadataStore {
             next_ino,
             inode_data,
             dir_data,
-            manifest_data,
+            manifest_root,
+            manifest,
             xattr_data,
             refcounts,
             logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
@@ -1119,7 +1215,10 @@ impl DictMetadataStore {
         let next_ino = p.next_ino;
         let inode_data_digest = intern_u64_digest_map(&mut w, &p.inode_data);
         let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
-        let manifest_data_digest = intern_u64_digest_map(&mut w, &p.manifest_data);
+        // The manifest tree: the taken edits on the cut root (no flush ran
+        // since the cut, so the cut root is still the working root).
+        let (manifest_root, _) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
+        let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
         let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
 
@@ -1139,6 +1238,14 @@ impl DictMetadataStore {
         let root_digest = w.put_node(&root_bytes);
         w.result().map_err(|e| MetaError::Corrupted(format!("commit: node write failed: {e}")))?;
         self.injected_fault(CommitFault::BeforeSync)?;
+
+        // The trees get their new roots, and flushes may run again.
+        {
+            let apply = self.apply_lock.lock();
+            self.manifest.install_and_settle(manifest_root, &p.manifest, &apply);
+            p.installed = true;
+            self.prepared.store(false, Ordering::Relaxed);
+        }
 
         // The nodes are stored: the caches may forget the entries that were
         // not changed again since the cut.
@@ -1340,10 +1447,19 @@ impl DictMetadataStore {
         Ok(digest)
     }
 
-    /// The manifest digest of `ino`, if it has one: memory only, under the
-    /// short manifest map lock.
+    /// The manifest digest of `ino`, if it has one: the overlay, else a
+    /// read of the manifest tree (often a cached node). Callers may hold
+    /// namespace stripes across it. A read error is logged and gives
+    /// `None` (a release that is lost so only leaks a refcount; GC is
+    /// mark-based).
     pub fn manifest_digest(&self, ino: InodeId) -> Option<ObjectKey> {
-        self.manifest_data.lock().get(&ino).copied()
+        match self.manifest.read(&self.trees, &ino) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("manifest of inode {ino}: {e}");
+                None
+            }
+        }
     }
 
     /// The entries of the manifest node `digest` (a node read, no lock of
@@ -1352,11 +1468,12 @@ impl DictMetadataStore {
         load_manifest(&mut self.reader(), digest)
     }
 
-    /// Make `digest` (from `prepare_manifest`) the manifest of `ino`: memory
-    /// only, under the short manifest map lock.
+    /// Make `digest` (from `prepare_manifest`) the manifest of `ino`: in the
+    /// overlay of the manifest tree (a flush may follow, see `flush_trees`).
     pub fn set_manifest_digest(&self, ino: InodeId, digest: ObjectKey) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        self.manifest_data.lock().insert(ino, digest);
+        self.manifest.write(ino, Some(digest));
+        self.flush_trees();
         Ok(())
     }
 
@@ -1424,7 +1541,7 @@ impl MetadataStore for DictMetadataStore {
         }
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
-        self.manifest_data.lock().remove(&ino);
+        self.manifest.write(ino, None);
         self.xattr_data.lock().remove(&ino);
         {
             let mut live = self.dir_live.lock(ino);
@@ -1443,6 +1560,7 @@ impl MetadataStore for DictMetadataStore {
         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
+        self.flush_trees();
 
         Ok(())
     }
@@ -1493,9 +1611,7 @@ impl MetadataStore for DictMetadataStore {
     }
 
     fn get_manifest(&self, ino: InodeId) -> Result<Vec<ObjectKey>, MetaError> {
-        let manifest_data = self.manifest_data.lock();
-        let digest = manifest_data.get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
-        drop(manifest_data);
+        let digest = self.manifest.read(&self.trees, &ino)?.ok_or(MetaError::NotFound(ino))?;
         load_manifest(&mut self.reader(), &digest)
     }
 
@@ -1547,9 +1663,11 @@ impl MetadataStore for DictMetadataStore {
 /// root record, its maps, each inode, directory list and xattr set, each file
 /// manifest, and each file root in the manifests. The GC mark phase (#25)
 /// walks the object tree of each of them.
-/// The metadata nodes that the root record `root` refers to:
-/// the record itself and its maps, the inode, directory and xattr nodes, and
-/// the manifest nodes. File content keys are not here; see [`content_keys`].
+/// The metadata nodes that the root record `root` refers to, each a file
+/// value: the record itself and its flat maps, the inode, directory and
+/// xattr nodes, and the manifest nodes. The nodes of the map trees are not
+/// file values and are not here (see [`tree_nodes`]); nor are file content
+/// keys (see [`content_keys`]).
 pub fn referenced_roots(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
@@ -1572,6 +1690,8 @@ pub(crate) fn referenced(
         match r {
             Ref::Node => nodes.push(k),
             Ref::Content => content.push(k),
+            // Not a file value: see `tree_nodes`.
+            Ref::Tree => {}
         }
         Ok(())
     })?;
@@ -1585,6 +1705,70 @@ pub(crate) enum Ref {
     Node,
     /// A file content key (see [`content_keys`]).
     Content,
+    /// A node of a map tree (see [`tree_nodes`]): one chunk-store object,
+    /// not a file value.
+    Tree,
+}
+
+/// The node IDs of the map trees of the root record `root` (each node once
+/// per parent that refers to it), as keys. [`referenced_roots`] has only
+/// file values; a tree node is one object (never open it as a file).
+pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
+    let cs = io.chunk_store();
+    let bytes = read_root(cs, root)?;
+    let manifests = parse_key(&bytes[root_rec::MANIFEST_DATA..root_rec::MANIFEST_DATA + KEY_BYTES]);
+    let mut out = Vec::new();
+    walk_tree(cs, "manifest_data", &manifests, &mut |id| {
+        out.push(id);
+        Ok(())
+    }, &mut |_, _| Ok(()))?;
+    Ok(out)
+}
+
+/// A callback of [`walk_tree`] for each leaf entry (key, value).
+type LeafFn<'a> = dyn FnMut(&[u8], &[u8]) -> Result<(), MetaError> + 'a;
+
+/// Walk the tree `root` (map `name`) with one path of nodes and no cache
+/// (the GC mark must not fill the node cache): `node` gets each node ID,
+/// parent first; `leaf` each entry of each leaf. An error of a callback
+/// stops the walk and is returned.
+fn walk_tree(
+    cs: &ChunkStore,
+    name: &str,
+    root: &ObjectKey,
+    node: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
+    leaf: &mut LeafFn<'_>,
+) -> Result<(), MetaError> {
+    let mut failed = None;
+    let ctx = prolly::Ctx::uncached(cs);
+    let done = prolly::visit(&ctx, &crate::store_io::to_id(root), &mut |v| {
+        let r = node(crate::store_io::to_key(v.id))
+            .and_then(|()| v.entries.iter().try_for_each(|(k, val)| leaf(k, val)));
+        match r {
+            Ok(()) => true,
+            Err(e) => {
+                failed = Some(e);
+                false
+            }
+        }
+    })
+    .map_err(|e| crate::pmap::tree_err(name, e))?;
+    match failed {
+        Some(e) => Err(e),
+        None if done => Ok(()),
+        None => Err(MetaError::Corrupted(format!("{name} tree: walk stopped"))),
+    }
+}
+
+/// The manifest key of a leaf entry of the manifest tree (an 8-byte ino
+/// and a 33-byte key, else corrupt).
+fn manifest_leaf(k: &[u8], v: &[u8]) -> Result<ObjectKey, MetaError> {
+    if k.len() != 8 || v.len() != KEY_BYTES {
+        return Err(MetaError::Corrupted(format!(
+            "manifest_data tree: entry of a {}-byte key and a {}-byte value", k.len(), v.len()
+        )));
+    }
+    Ok(parse_key(v))
 }
 
 /// Call `f` with each key that the root record `root` refers to, without a
@@ -1603,35 +1787,44 @@ pub(crate) fn for_each_referenced(
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
         at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
     );
-    for k in [*root, inodes, dirs, manifests, xattrs, at(root_rec::REFCOUNTS)] {
+    for k in [*root, inodes, dirs, xattrs, at(root_rec::REFCOUNTS)] {
         f(Ref::Node, k)?;
     }
     for map in [inodes, dirs, xattrs] {
         for_each_map_value(cs, &map, &mut |k| f(Ref::Node, k))?;
     }
-    for_each_map_value(cs, &manifests, &mut |manifest| {
+    // The manifest tree: its nodes, and per leaf entry the manifest node and
+    // its content keys. `f` is used by both callbacks, one at a time.
+    let f = std::cell::RefCell::new(f);
+    walk_tree(cs, "manifest_data", &manifests, &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut |k, v| {
+        let manifest = manifest_leaf(k, v)?;
+        let mut f = f.borrow_mut();
         f(Ref::Node, manifest)?;
         for_each_manifest_key(cs, &manifest, &mut |k| f(Ref::Content, k))
     })
 }
 
-/// About how many keys [`for_each_referenced`] gives for `root`, from the
-/// sizes of its four maps (no map is read): the 6 nodes of the root, one
-/// key per map entry, and one content key per manifest (a file with more
+/// About how many keys [`for_each_referenced`] gives to the sorter for
+/// `root` (tree nodes go straight to the live set), from the sizes of its
+/// maps (no map is read whole): the 5 nodes of the root, one key per map
+/// entry, and for each entry of the manifest tree (`prolly::count`, the
+/// root node only) its manifest and one content key (a file with more
 /// extents gives more). For the temp space check of the GC mark.
 pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
     const WHAT: &str = "u64-digest map node";
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 6u64;
-    for (off, per) in [(root_rec::INODE_DATA, 1), (root_rec::DIR_DATA, 1), (root_rec::XATTR_DATA, 1), (root_rec::MANIFEST_DATA, 2)] {
+    let mut keys = 5u64;
+    for off in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
         let key = at(off);
         let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
             .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
-        keys = keys.saturating_add((r.len().saturating_sub(8) / MAP_ENTRY as u64).saturating_mul(per));
+        keys = keys.saturating_add(r.len().saturating_sub(8) / MAP_ENTRY as u64);
     }
-    Ok(keys)
+    let manifests = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::MANIFEST_DATA)))
+        .map_err(|e| crate::pmap::tree_err("manifest_data", e))?;
+    Ok(keys.saturating_add(manifests.saturating_mul(2)))
 }
 
 /// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
@@ -1796,7 +1989,8 @@ impl DictMetadataStore {
     /// Reconstruct a `DictMetadataStore` from the node store and a root key
     /// previously returned by `commit()`.
     ///
-    /// Restores all in-memory maps (inode_data, dir_data, manifest_data, xattr_data)
+    /// Restores the in-memory maps (inode_data, dir_data, xattr_data) and the
+    /// working root of the manifest tree
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
@@ -1825,7 +2019,6 @@ impl DictMetadataStore {
 
         let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
-        let manifest_data = load_u64_digest_map(&mut *io_guard, &manifest_data_digest)?;
         let xattr_data = load_u64_digest_map(&mut *io_guard, &xattr_data_digest)?;
         let refcounts = load_key_u64_map(&mut *io_guard, &refcount_data_digest)?;
 
@@ -1838,6 +2031,7 @@ impl DictMetadataStore {
         }
 
         let cs = Arc::clone(io_guard.store());
+        let trees = TreeIo::new(Arc::clone(&cs), io_guard.node_cache(), io_guard.tree_config());
         drop(io_guard);
 
         Ok(DictMetadataStore {
@@ -1852,7 +2046,11 @@ impl DictMetadataStore {
             inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
-            manifest_data: lk(manifest_data).timed(Site::ManifestData),
+            // The working root; no manifest is read here.
+            manifest: MapTree::new("manifest_data", Site::ManifestData, crate::store_io::to_id(&manifest_data_digest)),
+            trees,
+            apply_lock: lk(()),
+            prepared: AtomicBool::new(false),
             xattr_data: lk(xattr_data).timed(Site::XattrData),
             pre_root_sync: lk(None),
             refcounts: lk(refcounts).timed(Site::Refcounts),
@@ -3295,12 +3493,16 @@ mod tests {
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
         let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
-                            at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
+                            at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
         for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
             want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
         }
+        // The manifests: the values of the manifest tree, in key order.
         let mut want_content = Vec::new();
-        for m in load_u64_digest_map(&mut io, &at(root_rec::MANIFEST_DATA)).unwrap().into_values() {
+        let tree = crate::store_io::to_id(&at(root_rec::MANIFEST_DATA));
+        let cs = Arc::clone(&io.0);
+        for e in prolly::iter(&cs, &tree).unwrap() {
+            let m = parse_key(&e.unwrap().1);
             want.push(m);
             want_content.extend(load_manifest(&mut io, &m).unwrap());
         }
@@ -3308,6 +3510,16 @@ mod tests {
         assert_eq!(nodes, want);
         assert_eq!(content, want_content);
         assert!(want.len() > 3 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
+        // The tree nodes come apart from the file values (`Ref::Tree`).
+        let mut trees = Vec::new();
+        for_each_referenced(&mut io, &root, &mut |r, k| {
+            if r == Ref::Tree {
+                trees.push(k);
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(trees, tree_nodes(&mut io, &root).unwrap());
+        assert_eq!(trees[0], at(root_rec::MANIFEST_DATA), "the tree root first");
 
         // A map node whose count does not fit its length is refused.
         let mut bad = 3u64.to_le_bytes().to_vec();
@@ -3318,5 +3530,82 @@ mod tests {
         let short = crate::store_io::put_value(io.chunk_store(), &[1, 2, 3]).unwrap();
         assert!(for_each_map_value(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
         assert!(for_each_manifest_key(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
+    }
+
+    /// A manifest read answers from the overlay while the change is dirty,
+    /// from the tree after a flush and after a commit, and a delete hides
+    /// the manifest at each of these steps.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn manifest_read_sees_the_overlay_then_the_tree() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let files: Vec<u64> = (0..TREE_FLUSH as u32 + 3).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        let empty = store.manifest.root();
+        // Dirty: below the flush limit, the tree is still empty.
+        for (i, f) in files.iter().take(TREE_FLUSH - 1).enumerate() {
+            store.set_manifest(*f, &[ObjectKey::example(i as u32)]).unwrap();
+        }
+        assert_eq!(store.manifest.root(), empty);
+        assert_eq!(store.get_manifest(files[0]).unwrap(), vec![ObjectKey::example(0)]);
+        // The next write reaches the limit: a flush moves the entries to the tree.
+        for (i, f) in files.iter().enumerate().skip(TREE_FLUSH - 1) {
+            store.set_manifest(*f, &[ObjectKey::example(i as u32)]).unwrap();
+        }
+        assert_ne!(store.manifest.root(), empty);
+        assert!(store.manifest.dirty() < TREE_FLUSH);
+        assert_eq!(store.get_manifest(files[0]).unwrap(), vec![ObjectKey::example(0)], "from the tree");
+        let root = store.commit().unwrap();
+        assert_eq!(store.manifest.dirty(), 0);
+        for (i, f) in files.iter().enumerate() {
+            assert_eq!(store.get_manifest(*f).unwrap(), vec![ObjectKey::example(i as u32)]);
+            assert_eq!(store.manifest_digest(*f), store.manifest.read(&store.trees, f).unwrap());
+        }
+        // A delete: hidden while dirty, and after the commit.
+        store.delete_inode(files[1]).unwrap();
+        assert!(store.get_manifest(files[1]).is_err());
+        assert_eq!(store.manifest_digest(files[1]), None);
+        let root2 = store.commit().unwrap();
+        assert!(store.get_manifest(files[1]).is_err());
+        let old = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(old.get_manifest(files[1]).unwrap(), vec![ObjectKey::example(1)], "the old root keeps it");
+        let new = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root2).unwrap();
+        assert!(new.get_manifest(files[1]).is_err());
+        assert_eq!(new.get_manifest(files[2]).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    /// While a commit is prepared (between `begin_commit` and the install),
+    /// writes past the flush limit do not move the working root; the
+    /// commit holds the state at its cut and the later writes go to the
+    /// next commit.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_flush_does_not_run_while_a_commit_is_prepared() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let files: Vec<u64> = (0..3 * TREE_FLUSH).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        store.set_manifest(files[0], &[ObjectKey::example(1)]).unwrap();
+        let p = store.begin_commit().unwrap();
+        let at_cut = store.manifest.root();
+        for f in &files[1..] {
+            store.set_manifest(*f, &[ObjectKey::example(2)]).unwrap();
+        }
+        assert_eq!(store.manifest.root(), at_cut, "no flush while prepared");
+        assert_eq!(store.manifest.dirty(), files.len() - 1);
+        let root = store.finish_commit(p).unwrap();
+        let cut = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(cut.get_manifest(files[0]).unwrap(), vec![ObjectKey::example(1)]);
+        assert!(cut.get_manifest(files[1]).is_err(), "a write after the cut is not in the root");
+        // After the install, flushes run again.
+        store.set_manifest(files[1], &[ObjectKey::example(3)]).unwrap();
+        assert!(store.manifest.dirty() < TREE_FLUSH);
+        assert_eq!(store.get_manifest(files[1]).unwrap(), vec![ObjectKey::example(3)]);
+        // A dropped (unfinished) commit requeues and ends the prepared state.
+        store.set_manifest(files[2], &[ObjectKey::example(4)]).unwrap();
+        drop(store.begin_commit().unwrap());
+        let root = store.commit().unwrap();
+        let again = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(again.get_manifest(files[2]).unwrap(), vec![ObjectKey::example(4)]);
+        assert_eq!(again.get_manifest(files[1]).unwrap(), vec![ObjectKey::example(3)]);
     }
 }
