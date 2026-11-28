@@ -1,0 +1,268 @@
+== cargo test -p metadata
+$ timeout 1800 cargo test -p metadata --no-fail-fast
+     Running tests/write_log_tests.rs (target/debug/deps/write_log_tests-626a1136af6553aa)
+
+running 9 tests
+test a_commit_cuts_the_log ... ok
+test a_torn_record_at_the_scan_ends_both_passes ... ok
+test records_added_after_the_scan_are_not_read ... ok
+test an_op_after_an_unknown_last_record_is_not_read ... ok
+test a_record_cut_after_the_scan_is_an_error ... ok
+test the_log_continues_into_later_segments ... ok
+test a_commit_makes_its_objects_durable_before_the_root ... ok
+test records_after_the_last_root_come_back_in_order ... ok
+test each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.90s
+
+     Running tests/xattr_memory_tests.rs (target/debug/deps/xattr_memory_tests-06ebc07f55452cc6)
+
+running 1 test
+test xattr_calls_do_not_grow_with_the_set ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.17s
+
+     Running tests/xattr_prolly_tests.rs (target/debug/deps/xattr_prolly_tests-daa9dc5ec2d7fe1e)
+
+running 6 tests
+test remove_reports_a_missing_name ... ok
+test list_order_is_name_byte_order ... ok
+test a_reused_inode_number_has_no_xattrs ... ok
+test one_large_spilled_value ... ok
+test xattrs_from_threads_lose_nothing ... ok
+test many_xattrs_on_one_file ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.40s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
+== slicefs-cli suites
+$ timeout 2400 cargo test -p slicefs-cli --no-fail-fast --lib --test rehash_tests --test hash_change_tests --test gc_online_tests --test write_log_replay_tests --test posix_compliance_tests --test dir_link_tests --test coverage_boost_tests --test e2e_filesystem_tests
+running 36 tests
+test reverse_order_creates_replay ... ok
+test a_failed_write_appends_no_record ... ok
+test a_failed_namespace_op_appends_no_record ... ok
+test a_create_in_a_new_directory_waits_for_its_mkdir_record ... ok
+test an_explicit_mtime_after_a_write_is_kept_at_close_and_replay ... ok
+test a_file_created_with_o_append_replays_its_overwrites ... ok
+test a_utimens_during_the_close_io_is_kept ... ok
+test a_failed_create_or_mkdir_does_not_break_replay ... ok
+test directories_renames_links_and_unlinks_replay ... ok
+test a_torn_segment_before_a_cut_ends_the_log_there ... ok
+test an_o_trunc_open_beside_a_write_handle_replays ... ok
+test parallel_namespace_ops_replay ... ok
+test a_setattr_of_an_open_orphan_replays ... ok
+test a_file_still_open_at_the_crash_keeps_its_fsynced_bytes ... ok
+test an_xattr_change_of_an_open_orphan_replays ... ok
+test attributes_xattrs_truncate_and_overwrite_replay ... ok
+test stat_of_an_open_file_shows_the_time_of_the_last_write ... ok
+test fsynced_buffered_bytes_survive_a_commit_and_a_crash ... ok
+test files_written_and_fsynced_survive_a_crash ... ok
+test a_rename_survives_a_crash_after_fsync_of_the_directory ... ok
+test a_commit_keeps_the_times_of_a_buffered_file ... ok
+test a_rename_with_no_sync_after_it_is_lost_with_a_buffered_log ... ok
+test a_size_change_of_a_new_file_comes_after_its_create_record ... ok
+test two_write_handles_on_one_file_share_their_writes ... ok
+test the_log_of_a_mount_after_a_torn_cut_replays ... ok
+test two_write_handles_release_replays ... ok
+test a_torn_last_record_does_not_stop_the_mount ... ok
+test a_commit_with_open_files_is_a_clean_cut ... ok
+test a_commit_keeps_out_of_order_bytes_pending_and_the_handle_streaming ... ok
+test parallel_overlapping_writes_replay_to_the_same_content ... ok
+test an_overlay_with_more_than_64_mib_of_relog_replays ... ok
+test a_commit_relogs_only_the_bytes_changed_since_the_last_rebase ... ok
+test an_overlay_replays_after_a_crash_with_each_log_mode ... ok
+test cross_file_budget_steps_with_commits_replay_after_a_crash ... ok
+test rebase_steps_with_commits_between_them_replay_after_a_crash ... ok
+test a_crash_between_the_cut_and_the_root_replays ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 49.15s
+
+rc=0
+
+== lock_stats_report (lock-stats)
+$ timeout 1200 cargo test -p slicefs-cli --features lock-stats --test lock_stats_report
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+   Compiling chunk-store v0.1.0 (<repo>/crates/chunk-store)
+   Compiling prolly v0.1.0 (<repo>/crates/prolly)
+   Compiling metadata v0.1.0 (<repo>/crates/metadata)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.25s
+     Running tests/lock_stats_report.rs (target/debug/deps/lock_stats_report-85f0b7386a981d6c)
+
+running 1 test
+test lock_stats_report ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+rc=0
+
+== prolly-bench
+$ timeout 1200 cargo test -p prolly-bench
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+   Compiling chunk-store v0.1.0 (<repo>/crates/chunk-store)
+   Compiling prolly v0.1.0 (<repo>/crates/prolly)
+   Compiling metadata v0.1.0 (<repo>/crates/metadata)
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+   Compiling prolly-bench v0.1.0 (<repo>/benchmarks/prolly-bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.46s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-c8a4df0a353695ba)
+
+running 5 tests
+test layout::tests::a_combined_key_sorts_by_ino_then_kind_and_refcounts_last ... ok
+test synth::tests::an_inserted_refcount_key_sorts_next_to_its_slot ... ok
+test synth::tests::the_streams_are_sorted_and_their_counts_match ... ok
+test synth::tests::the_permutation_is_a_bijection_with_an_inverse ... ok
+test layout::tests::every_layout_replay_matches_the_model ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/smoke.rs (target/debug/deps/smoke-cc1a30239575f3b4)
+
+running 3 tests
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test synth_smoke ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.08s
+
+rc=0
+
+== clippy metadata
+$ timeout 1800 cargo +stable clippy --locked -p metadata --all-targets -- -D warnings
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:37:1
+   |
+37 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:26:1
+   |
+26 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:28:1
+   |
+28 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:33:1
+   |
+33 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:35:1
+   |
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.77s
+rc=0
+
+== unsafe count
+$ bash scripts/safety/unsafe-count.sh
+UNSAFE files=34 tokens=144 result=ok
+rc=0
+
+== cargo test --workspace
+$ timeout 3000 cargo test --workspace --no-fail-fast
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
