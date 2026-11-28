@@ -15,6 +15,9 @@
 //!   briefly: never across the write-log cut or a return to the file system.
 //!   A flush is never called with a shard lock held; it holds `apply_lock`
 //!   (`try_lock`) across its node reads and puts.
+//!   The commit stats lock (`last_stats`, `Rank::Store`, untimed) is a leaf: it
+//!   is set once at the end of a successful commit and cloned by
+//!   `last_commit_stats`; no other store-rank lock and no I/O runs under it.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
@@ -282,6 +285,40 @@ pub enum CommitFault {
     BeforeRoot = 2,
 }
 
+/// The work one commit did on one map tree (see [`CommitStats`]).
+#[derive(Clone, Debug, Default)]
+pub struct TreeStats {
+    /// The map name (`manifest_data`, ...).
+    pub name: &'static str,
+    /// Levels of the tree after the commit (1 for a leaf root).
+    pub height: u8,
+    /// Entries of the tree after the commit.
+    pub entries: u64,
+    /// Counts of the apply of the commit's edits (all zero if there were none).
+    pub apply: prolly::ApplyStats,
+}
+
+/// The work of the last successful commit (`DictMetadataStore::last_commit_stats`).
+/// It counts the commit's own tree applies and the root record. Edits that a
+/// flush wrote to a tree before the commit are not in it.
+#[derive(Clone, Debug, Default)]
+pub struct CommitStats {
+    /// Tree nodes loaded by the commit's applies (cache hits included).
+    pub nodes_read: u64,
+    /// Nodes written: the tree applies plus the root record.
+    pub nodes_written: u64,
+    /// Bytes written: the tree applies plus the 197-byte root record.
+    pub bytes_written: u64,
+    /// Of `nodes_read`, the nodes the cache gave.
+    pub cache_hits: u64,
+    /// Wall time of `begin_commit` plus the time of `finish_commit` up to the
+    /// chunk store sync, in milliseconds (the time between the two calls is
+    /// not in it).
+    pub presync_ms: f64,
+    /// One entry per map tree.
+    pub trees: Vec<TreeStats>,
+}
+
 /// What a commit took at its cut (`DictMetadataStore::begin_commit`): the
 /// whole state that its root record holds. `finish_commit` writes it with the
 /// gate released and reads no live map, so the root never has half of an
@@ -316,6 +353,8 @@ pub struct PreparedCommit<'a> {
     snapshots: Vec<SnapshotEntry>,
     wal: Option<Arc<dyn WalStrategy>>,
     cut: Option<WalCut>,
+    /// Wall time of `begin_commit`, in milliseconds (for `CommitStats::presync_ms`).
+    begin_ms: f64,
 }
 
 impl Drop for PreparedCommit<'_> {
@@ -443,6 +482,8 @@ pub struct DictMetadataStore {
     commit_fault: std::sync::atomic::AtomicU8,
     /// Last committed root digest — updated by `commit()`, used by GC to determine live roots.
     last_root: sync::Mutex<Option<ObjectKey>>,
+    /// The work of the last successful commit. A leaf lock (see the lock-order comment).
+    last_stats: sync::Mutex<CommitStats>,
     /// Snapshot index by version number — O(1) lookup (FIX-03).
     snapshots_by_version: sync::Mutex<HashMap<u64, SnapshotEntry>>,
     /// Snapshot name → version mapping — O(1) name lookup (FIX-04).
@@ -521,6 +562,7 @@ impl DictMetadataStore {
             commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: lk(None),
+            last_stats: lk(CommitStats::default()),
             snapshots_by_version: lk(HashMap::new()),
             snapshots_by_name: lk(HashMap::new()),
         }
@@ -1120,6 +1162,7 @@ impl DictMetadataStore {
     /// generation. Fast: no node is written and nothing is synced. Waits for
     /// a commit still in `finish_commit`.
     pub fn begin_commit(&self) -> Result<PreparedCommit<'_>, MetaError> {
+        let started = std::time::Instant::now();
         let serial = self.commit_lock.lock();
         // Wait out a running tree flush, and stop new ones until the roots of
         // this commit are installed. The lock is not held across the cut: the
@@ -1177,6 +1220,7 @@ impl DictMetadataStore {
             snapshots: self.list_snapshots(),
             wal,
             cut,
+            begin_ms: started.elapsed().as_secs_f64() * 1000.0,
         })
     }
 
@@ -1192,6 +1236,7 @@ impl DictMetadataStore {
     }
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
+        let finish_started = std::time::Instant::now();
         let cs = Arc::clone(&self.cs);
         let mut w = NodeWriter::new(Arc::clone(&cs));
         // Write the changed directories and inodes, so the digest maps are current.
@@ -1217,7 +1262,17 @@ impl DictMetadataStore {
         let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
         // The manifest tree: the taken edits on the cut root (no flush ran
         // since the cut, so the cut root is still the working root).
-        let (manifest_root, _) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
+        let (manifest_root, manifest_apply) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
+        let manifest_stats = {
+            let ctx = self.trees.ctx();
+            let tree_err = |e| crate::pmap::tree_err("manifest_data", e);
+            TreeStats {
+                name: "manifest_data",
+                height: prolly::height(&ctx, &manifest_root).map_err(tree_err)?,
+                entries: prolly::count(&ctx, &manifest_root).map_err(tree_err)?,
+                apply: manifest_apply,
+            }
+        };
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
         let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
@@ -1264,6 +1319,7 @@ impl DictMetadataStore {
             }
         }
 
+        let presync_ms = p.begin_ms + finish_started.elapsed().as_secs_f64() * 1000.0;
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
         // the segments whose records hold the same data (#20). A put error of
@@ -1309,7 +1365,22 @@ impl DictMetadataStore {
         // Update last_root so background GC can use it
         *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
+        let trees = vec![manifest_stats];
+        let stats = CommitStats {
+            nodes_read: trees.iter().map(|t| t.apply.nodes_read).sum(),
+            nodes_written: trees.iter().map(|t| t.apply.nodes_written).sum::<u64>() + 1,
+            bytes_written: trees.iter().map(|t| t.apply.bytes_written).sum::<u64>() + root_rec::SIZE as u64,
+            cache_hits: trees.iter().map(|t| t.apply.cache_hits).sum(),
+            presync_ms,
+            trees,
+        };
+        *self.last_stats.lock() = stats;
         Ok(root_digest)
+    }
+
+    /// The work of the last successful commit (all zero before the first).
+    pub fn last_commit_stats(&self) -> CommitStats {
+        self.last_stats.lock().clone()
     }
 
     /// True if a mutation happened after the last `commit()`.
@@ -2062,6 +2133,7 @@ impl DictMetadataStore {
             commit_lock: sync::Mutex::new(Rank::Rename, ()),
             commit_fault: std::sync::atomic::AtomicU8::new(0),
             last_root: lk(Some(*root)),
+            last_stats: lk(CommitStats::default()),
             snapshots_by_version: lk(HashMap::new()),
             snapshots_by_name: lk(HashMap::new()),
         })

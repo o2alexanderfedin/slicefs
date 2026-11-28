@@ -360,12 +360,11 @@ pub(crate) fn is_tree(cs: &ChunkStore, key: &ObjectKey) -> Res<bool> {
     Ok(cs.read(&to_id(key))?.starts_with(&prolly::NODE_MAGIC))
 }
 
-/// The serialized bytes of a commit: the root record and the flat map
-/// fields. A tree field is not counted here: its new nodes are in the
-/// `new_*` fields of the commit line (the stats delta), and plan 26-14
-/// adds the tree bytes that the commit writes (`last_commit_stats`).
+/// The serialized bytes of the flat map fields of a commit. A tree field is
+/// not counted here: the bytes that a commit writes to its trees and the root
+/// record come from `DictMetadataStore::last_commit_stats().bytes_written`.
 pub(crate) fn serialized_bytes(cs: &ChunkStore, rr: &RootRec) -> Res<u64> {
-    let mut n = ROOT_REC_SIZE as u64;
+    let mut n = 0;
     for k in &rr.maps {
         if !is_tree(cs, k)? {
             n += map_len(cs, k)?;
