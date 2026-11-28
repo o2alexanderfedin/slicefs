@@ -23,8 +23,24 @@ jobs:
     # without the Workers line of that value.
     env:
       SLICEFS_WORKERS: "4"
+      # Build output and the cargo registry live in host folders, not in
+      # Docker volumes, so actions/cache keeps them between runs. No
+      # incremental data: it is most of a debug target and a cache gains
+      # little from it.
+      SLICEFS_TARGET_VOL: /home/runner/ci-cache/target
+      SLICEFS_CARGO_VOL: /home/runner/ci-cache/registry
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore the build cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/ci-cache
+          key: linux-docker-${{ hashFiles('Cargo.lock', 'scripts/docker-linux-test/Dockerfile') }}-${{ github.sha }}
+          restore-keys: |
+            linux-docker-${{ hashFiles('Cargo.lock', 'scripts/docker-linux-test/Dockerfile') }}-
+            linux-docker-
 
       # The harness runs in a container with /dev/fuse, so a hung mount dies
       # with the container (see scripts/docker-linux-test/run.sh).
@@ -46,6 +62,15 @@ jobs:
           scripts/docker-linux-test/run.sh pjdfstest 2>&1 | tee "$RUNNER_TEMP/pjdfstest.log"
           grep -q 'Workers: 4 (set)' "$RUNNER_TEMP/pjdfstest.log" || { echo "no 'Workers: 4 (set)' line in the output"; exit 1; }
 
+      # The containers write the cache folders as root; the cache step saves
+      # them as the runner user. Drop incremental data before the save.
+      - name: Prepare the build cache for saving
+        if: always()
+        run: |
+          sudo rm -rf /home/runner/ci-cache/target/*/incremental
+          sudo chown -R "$(id -u):$(id -g)" /home/runner/ci-cache 2>/dev/null || true
+          du -sh /home/runner/ci-cache/* 2>/dev/null || true
+
   macos:
     name: macOS (cargo test, FUSE-T build)
     runs-on: macos-latest
@@ -54,6 +79,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore the build cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Install pkg-config and FUSE-T
         run: |
