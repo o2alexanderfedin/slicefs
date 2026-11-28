@@ -58,10 +58,16 @@ held whole in RAM.
   number and the entry name. One directory can have any number of entries,
   and one change in a directory touches one path of nodes. `.` and `..` are
   stored as entries. Readdir is a range scan in name byte order.
-- **Cost to note:** readdir offsets are entry indexes, so each readdir call
-  scans the directory from its start. A full listing of a directory of n
-  entries reads O(n^2 / page) entries; memory stays bounded. Paged readdir
-  by a name cookie is later work.
+- **Readdir paging:** each open directory handle keeps a resume cursor: the
+  offset and the name of each entry of its last reply. The next readdir at
+  one of those offsets resumes the range scan after that name. So a full
+  listing reads each entry once, and a name that is created or removed
+  between two replies does not make another entry come twice or not at all.
+- **Cost to note:** an offset other than 0 that is not in the last reply of
+  the handle (for example a seekdir to an older offset) is an entry index:
+  the scan starts at the directory start and skips that many entries. If the
+  directory changed since that offset was given, an entry can be skipped or
+  repeated. Memory stays bounded: one reply of names per open handle.
 
 ## Roots and snapshots
 

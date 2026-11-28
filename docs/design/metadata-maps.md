@@ -77,11 +77,17 @@ Readdir is a range scan of the directory prefix in name byte order, merged
 with the pending edits of the directory, and streamed into the reply: the
 whole directory is never listed into RAM.
 
-Known cost: readdir offsets are entry indexes. Each readdir call scans the
-directory from its start and skips the entries before its offset, so a full
-listing of a directory of n entries through the kernel reads O(n^2 / page)
-entries (memory stays bounded). Paged readdir that resumes at a name cookie
-is a later item.
+Each open directory handle keeps a resume cursor: the offset and the name of
+each entry of its last reply. The kernel asks for the next reply at the
+offset of the last entry it used, so the scan resumes just after that name
+(the name followed by a 0 byte, which need not exist any more). A full
+listing reads each entry once, and a name that is created or removed
+between two replies does not move the other entries.
+
+Known cost: any other offset above 0 (for example a seekdir to an older
+offset) is an entry index: the scan starts at the directory start and skips
+that many entries. If the directory changed since that offset was given, an entry can
+be skipped or repeated. Memory per open handle is one reply of names.
 
 ## Xattrs
 

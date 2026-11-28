@@ -253,6 +253,11 @@ pub struct DictMetadataStore {
     /// (`TREE_FLUSH`; tests lower it with `test_set_tree_flush`).
     tree_flush: AtomicUsize,
     put_error: sync::Mutex<Option<std::io::Error>>,
+    /// The first refcount change that a tree read error dropped (never
+    /// cleared): every later commit of this store fails before its install,
+    /// so no root holds the wrong count. A reload replays the write log on
+    /// the last good root, which applies the change again.
+    refcount_error: sync::Mutex<Option<String>>,
     /// Inode-number allocator.
     inode_alloc: sync::Mutex<InodeAlloc>,
     /// The inodes: a prolly tree (key: the ino, 8 bytes big endian; value:
@@ -389,6 +394,7 @@ impl DictMetadataStore {
             unsynced_puts: AtomicU64::new(0),
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(put_error),
+            refcount_error: lk(None),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inodes,
             dirs,
@@ -461,8 +467,9 @@ impl DictMetadataStore {
     /// The read-modify-write of a count (the `pmap` protocol): `step` gets
     /// the count of `digest` (0: no entry) and gives the new count, or
     /// `None` to change nothing. A count of 0 is deleted. Gives the new
-    /// count if it changed. A tree read error is logged and kept for the
-    /// next commit (as a hot-path put error); the count does not change.
+    /// count if it changed. A tree read error is logged and the count does
+    /// not change; the error is kept in `refcount_error`, so no later
+    /// commit of this store succeeds.
     fn change_refcount(&self, digest: &ObjectKey, step: impl Fn(u64) -> Option<u64>) -> Option<u64> {
         let mut tree = None;
         loop {
@@ -483,9 +490,9 @@ impl DictMetadataStore {
                 Ok(t) => tree = Some(t),
                 Err(e) => {
                     tracing::warn!("refcount of {digest:?}: {e}");
-                    let mut k = self.put_error.lock();
+                    let mut k = self.refcount_error.lock();
                     if k.is_none() {
-                        *k = Some(std::io::Error::other(e.to_string()));
+                        *k = Some(format!("refcount of {digest:?}: {e}"));
                     }
                     return None;
                 }
@@ -513,7 +520,8 @@ impl DictMetadataStore {
     ///
     /// A scrub-time scan: one cursor over the whole refcount tree plus the
     /// pending edits (`MapTree::for_each_value`), O(map) time and bounded
-    /// memory. Exact when no request changes the store meanwhile.
+    /// memory. Exact when no refcount changes meanwhile (a flush or a
+    /// commit during the scan does not change the result).
     pub fn saturated_refcount_count(&self) -> Result<usize, MetaError> {
         let mut n = 0;
         self.refcounts.for_each_value(&self.trees, |c| n += usize::from(c == u64::MAX))?;
@@ -729,8 +737,25 @@ impl DictMetadataStore {
         ino: InodeId,
         f: &mut dyn FnMut(&str, InodeId, u8) -> ControlFlow<()>,
     ) -> Result<(), MetaError> {
+        self.for_each_dir_entry_after(ino, None, f)
+    }
+
+    /// `for_each_dir_entry` from the first name after `after` in name byte
+    /// order (`None`: from the start). `after` need not be an entry any
+    /// more: a resumed readdir goes on after the last name it gave.
+    pub fn for_each_dir_entry_after(
+        &self,
+        ino: InodeId,
+        after: Option<&str>,
+        f: &mut dyn FnMut(&str, InodeId, u8) -> ControlFlow<()>,
+    ) -> Result<(), MetaError> {
         self.check_dir(ino)?;
-        let (start, end) = dir_range(ino);
+        let (mut start, end) = dir_range(ino);
+        if let Some(name) = after {
+            // The smallest key after the name (a name has no 0 byte).
+            start = crate::pmap::TreeKey::encode(&entry_key(ino, name));
+            start.push(0);
+        }
         let mut bad = None;
         self.dirs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &start, end.as_deref(), &mut |k| {
             let got = crate::dirent::name_of(k).and_then(|name| {
@@ -789,7 +814,7 @@ impl DictMetadataStore {
 
     /// Current metadata of `ino`: the overlay, else the inode tree.
     fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        self.inodes.read(&self.trees, &ino)?.ok_or(MetaError::NotFound(ino))
+        checked_inode(ino, self.inodes.read(&self.trees, &ino)?)?.ok_or(MetaError::NotFound(ino))
     }
 
     /// Change inode `ino` in one hold of its overlay shard lock (D-05): `f`
@@ -801,9 +826,10 @@ impl DictMetadataStore {
     /// or take a lock. `NotFound` if there is no such inode.
     pub fn modify_inode<R>(&self, ino: InodeId, f: impl FnOnce(&mut InodeMeta) -> R) -> Result<R, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let r = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
-            None => (None, Err(MetaError::NotFound(ino))),
-            Some(mut m) => {
+        let r = self.inodes.read_modify_write(&self.trees, &ino, |cur| match checked_inode(ino, cur) {
+            Err(e) => (None, Err(e)),
+            Ok(None) => (None, Err(MetaError::NotFound(ino))),
+            Ok(Some(mut m)) => {
                 let old_size = m.size;
                 let r = f(&mut m);
                 debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
@@ -912,7 +938,9 @@ impl DictMetadataStore {
         self.dirs.write(entry_key(ino, "."), Some(DirValue { ino, kind: KIND_DIR }));
         self.dirs.write(entry_key(ino, ".."), Some(DirValue { ino: parent_ino, kind: KIND_DIR }));
         if let Err(e) = self.add_entry(parent_ino, name, DirValue { ino, kind: KIND_DIR }) {
-            let _ = self.delete_inode(ino);
+            if let Err(d) = self.delete_inode(ino) {
+                tracing::warn!("undo of directory {ino}: delete failed: {d}");
+            }
             return Err(e);
         }
         // The parent gains a link (the ".." of the new directory).
@@ -1186,6 +1214,11 @@ impl DictMetadataStore {
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
         let finish_started = std::time::Instant::now();
+        // A dropped refcount change: the trees lack it, so no root may be
+        // installed (the edits of `p` are dirty again).
+        if let Some(e) = self.refcount_error.lock().clone() {
+            return Err(MetaError::Corrupted(format!("commit: a refcount change was lost ({e}); reload the store")));
+        }
         let cs = Arc::clone(&self.cs);
         let mut w = NodeWriter::new(Arc::clone(&cs));
 
@@ -1580,34 +1613,28 @@ impl MetadataStore for DictMetadataStore {
         // A pending delete, written with the size it had in the same hold of
         // the overlay shard lock (read-modify-write): of two deletes, one
         // counts and the other gets `NotFound`.
-        let (size, mode) = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
-            None => (None, Err(MetaError::NotFound(ino))),
-            Some(m) => (Some(None), Ok((m.size, m.mode))),
+        let (size, mode) = self.inodes.read_modify_write(&self.trees, &ino, |cur| match checked_inode(ino, cur) {
+            Err(e) => (None, Err(e)),
+            Ok(None) => (None, Err(MetaError::NotFound(ino))),
+            Ok(Some(m)) => (Some(None), Ok((m.size, m.mode))),
         })??;
-        // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
-        // would keep the deleted content reachable (never garbage-collected).
-        self.manifest.write(ino, None);
-        self.delete_xattrs(ino)?;
-        // The entries of a directory (`.` and `..` of an empty one); a file
-        // has none, so its range is not scanned.
-        if mode & S_IFMT == S_IFDIR {
-            self.delete_dir_entries(ino)?;
-        }
-
-        // Decrement logical_bytes by the deleted inode's size.
-        if size > 0 {
-            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(size))
-            }).ok();
-        }
-
-        // Decrement inode count (saturating to avoid underflow).
+        // The counts follow the delete at once: the scans below can fail,
+        // and a retry gets `NotFound`.
+        self.add_size(size, 0);
         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
+        // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
+        // would keep the deleted content reachable (never garbage-collected).
+        // Both scans run, also when the first fails; an error leaves only
+        // leftover entries of a deleted inode.
+        self.manifest.write(ino, None);
+        let xattrs = self.delete_xattrs(ino);
+        // The entries of a directory (`.` and `..` of an empty one); a file
+        // has none, so its range is not scanned.
+        let entries = if mode & S_IFMT == S_IFDIR { self.delete_dir_entries(ino) } else { Ok(()) };
         self.flush_trees();
-
-        Ok(())
+        xattrs.and(entries)
     }
 
     fn create_directory(
@@ -1665,7 +1692,7 @@ impl MetadataStore for DictMetadataStore {
             return Err(MetaError::InvalidName(name.to_string()));
         }
         self.check_dir(parent_ino)?;
-        let kind = self.inodes.read(&self.trees, &ino)?.map_or(0, |m| kind_of(m.mode));
+        let kind = checked_inode(ino, self.inodes.read(&self.trees, &ino)?)?.map_or(0, |m| kind_of(m.mode));
         self.add_entry(parent_ino, name, DirValue { ino, kind })
     }
 
@@ -1804,6 +1831,11 @@ pub(crate) enum Ref {
 /// The node IDs of the map trees of the root record `root` (each node once
 /// per parent that refers to it), as keys. [`referenced_roots`] has only
 /// file values; a tree node is one object (never open it as a file).
+///
+/// For tests only (unit and integration tests of the workspace): the list
+/// has every node of every tree, O(nodes) in RAM. Product code walks the
+/// trees with a callback (`for_each_referenced`).
+#[doc(hidden)]
 pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
@@ -2155,6 +2187,7 @@ impl DictMetadataStore {
             unsynced_puts: AtomicU64::new(0),
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(None),
+            refcount_error: lk(None),
             inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inodes,
             dirs,
@@ -2181,6 +2214,18 @@ impl DictMetadataStore {
             snapshots_by_version: lk(HashMap::new()),
             snapshots_by_name: lk(HashMap::new()),
         })
+    }
+}
+
+/// The inode record `m` read under key `ino`: a record that carries
+/// another inode number is corrupt (a caller that writes it back would
+/// change that other inode).
+fn checked_inode(ino: InodeId, m: Option<InodeMeta>) -> Result<Option<InodeMeta>, MetaError> {
+    match m {
+        Some(m) if m.ino != ino => Err(MetaError::Corrupted(format!(
+            "inode_data tree: record of ino {} under key {ino}", m.ino
+        ))),
+        m => Ok(m),
     }
 }
 
@@ -2288,6 +2333,59 @@ mod tests {
         store.unlink(1, "d").unwrap();
         store.delete_inode(d).unwrap();
         assert!(store.list_directory(d).is_err());
+    }
+
+    // Review 26 A-WR-01: a tree read error in the scans of `delete_inode`
+    // (after the inode is gone) is returned, and the inode and logical-byte
+    // counts still follow the delete.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_failed_delete_scan_still_counts_the_delete() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let mut m = new_file_meta();
+        m.size = 4096;
+        let f = store.create_inode(&m).unwrap();
+        store.set_xattr(f, "user.a", b"x").unwrap();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        store.unlink(1, "d").unwrap();
+        let root = store.commit().unwrap();
+        // A new store from the root, with an empty node cache.
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", cs)));
+        let store = DictMetadataStore::load_from_root(io, &root).unwrap();
+        let (count, bytes) = (store.inode_count(), store.logical_bytes());
+        for ino in [f, d] {
+            // The inode path is cached; the xattr and dir scans read the disk.
+            store.get_inode(ino).unwrap();
+            mem.set_fail_reads(true);
+            let r = store.delete_inode(ino);
+            mem.set_fail_reads(false);
+            assert!(r.is_err(), "the scan of {ino} failed");
+            assert!(matches!(store.get_inode(ino), Err(MetaError::NotFound(_))), "{ino} is gone");
+        }
+        assert_eq!(store.inode_count(), count - 2);
+        assert_eq!(store.logical_bytes(), bytes - 4096);
+    }
+
+    // Review 26 A-IN-01: an inode record that carries another inode number
+    // than its key is corrupt: an error, not a panic, and never written
+    // back under the other number.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_inode_record_under_another_key_is_corrupt() {
+        let (_d, store) = make_store();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        let mut m = store.get_inode(f).unwrap();
+        m.ino = f + 100;
+        // As a tree read gives it: the overlay answers first.
+        store.inodes.write(f, Some(m));
+        let corrupt = |r: Result<(), MetaError>| matches!(r, Err(MetaError::Corrupted(_)));
+        assert!(corrupt(store.get_inode(f).map(drop)));
+        assert!(corrupt(store.modify_inode(f, |m| m.nlinks += 1)));
+        assert!(corrupt(store.link(1, "x", f)));
+        assert!(corrupt(store.delete_inode(f)));
     }
 
     /// The stored form of the xattr `name` of `ino` (overlay, then tree).
@@ -4073,6 +4171,34 @@ mod tests {
         let io = Arc::new(Mutex::new(StoreIo::new("mem", Arc::new(cs))));
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
         assert_eq!(reloaded.get_manifest(f).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    // Review 26 A-WR-02: a refcount change that a tree read error dropped
+    // is never saved as a wrong count: no later commit of this store
+    // succeeds (a reload replays the write log on the last good root).
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_dropped_refcount_change_is_never_committed() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let k = ObjectKey::example(5);
+        store.increment_refcount(&k);
+        let root = store.commit().unwrap();
+        // A new store from the root, with an empty node cache.
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", cs)));
+        let store = DictMetadataStore::load_from_root(Arc::clone(&io), &root).unwrap();
+        mem.set_fail_reads(true);
+        store.increment_refcount(&k);
+        mem.set_fail_reads(false);
+        for i in 0..3 {
+            if let Ok(r) = store.commit() {
+                let saved = DictMetadataStore::load_from_root(Arc::clone(&io), &r).unwrap().get_refcount(&k);
+                panic!("commit {i} after the dropped change saved the count {saved}");
+            }
+        }
+        assert_eq!(store.get_refcount(&k), 1, "the dropped change is not in the store");
     }
 
     #[test]

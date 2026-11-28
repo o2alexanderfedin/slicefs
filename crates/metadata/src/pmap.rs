@@ -475,14 +475,19 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
         }
     }
 
-    /// Call `f` with each value of the map: the tree at the working root
-    /// read with one cursor (one path of nodes, no cache), the keys with a
-    /// pending edit skipped, then the pending edits (a copy of the overlay,
-    /// which a flush bounds). O(map) time, bounded memory. Exact when no
-    /// write, flush or commit runs meanwhile.
+    /// Call `f` with each value of the map: the pending edits copied (a
+    /// copy of the overlay, which a flush bounds), then the tree at the
+    /// working root read with one cursor (one path of nodes, no cache), the
+    /// keys with a pending edit skipped, then the copied edits. The read
+    /// rule (overlay first, then root): a key settled by a flush after the
+    /// copy is still in the copy. O(map) time, bounded memory. Exact when
+    /// no write runs meanwhile; a flush or a commit during the scan does
+    /// not change the result.
     pub(crate) fn for_each_value(&self, io: &TreeIo, mut f: impl FnMut(V)) -> Result<(), MetaError> {
-        let root = self.tree.root();
         let pending: HashMap<Vec<u8>, Option<V>> = self.overlay.pending().into_iter().map(|(k, v)| (k.encode(), v)).collect();
+        #[cfg(test)]
+        self.run_read_hook();
+        let root = self.tree.root();
         let corrupt = |m: String| MetaError::Corrupted(format!("{} tree: {m}", self.name));
         for e in prolly::iter_in(&prolly::Ctx::uncached(&io.cs), &root).map_err(|e| tree_err(self.name, e))? {
             let (k, v) = e.map_err(|e| tree_err(self.name, e))?;
@@ -803,6 +808,28 @@ mod tests {
         })
         .unwrap();
         assert_eq!(n, 1);
+    }
+
+    // Review 26 A-WR-03: a flush between the two reads of `for_each_value`
+    // (the read hook) gives each key once, with its newest value.
+    #[test]
+    fn for_each_value_sees_each_key_once_across_a_flush() {
+        let io = Arc::new(io());
+        let m = Arc::new(map(&io));
+        let apply = Arc::new(lock());
+        m.write(1, Some(ObjectKey::example(1)));
+        m.flush(&io, &apply.lock()).unwrap();
+        m.write(1, Some(ObjectKey::example(10)));
+        m.write(2, Some(ObjectKey::example(2)));
+        let (hio, hm, ha) = (Arc::clone(&io), Arc::clone(&m), Arc::clone(&apply));
+        m.set_read_hook(Arc::new(move || {
+            hm.flush(&hio, &ha.lock()).unwrap();
+        }));
+        let mut got = Vec::new();
+        m.for_each_value(&io, |v| got.push(v)).unwrap();
+        assert_eq!(m.dirty(), 0, "the hook flushed");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.contains(&ObjectKey::example(10)) && got.contains(&ObjectKey::example(2)), "{got:?}");
     }
 
     #[test]

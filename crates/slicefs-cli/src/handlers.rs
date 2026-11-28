@@ -38,6 +38,10 @@ pub enum EntryResult {
 }
 
 /// Result for `readdir` — on success, a list of `(ino, FileType, name)` tuples.
+///
+/// For tests only (a whole listing in RAM): the FUSE callback streams
+/// through `SliceFsFilesystem::readdir_handle`.
+#[doc(hidden)]
 #[derive(Debug)]
 pub enum ReaddirResult {
     Ok(Vec<(u64, fuser::FileType, String)>),
@@ -155,6 +159,10 @@ pub fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EntryRe
 }
 
 /// Handle `readdir`: list entries in directory `ino` starting at `offset`.
+///
+/// For tests only (a whole listing in RAM): the FUSE callback streams
+/// through `SliceFsFilesystem::readdir_handle`.
+#[doc(hidden)]
 pub fn handle_readdir(
     fs: &SliceFsFilesystem,
     ino: u64,
@@ -1046,6 +1054,9 @@ mod tests {
         let long = format!("user.{}", "n".repeat(300));
         assert!(matches!(handle_getxattr(&fs, ino, &long, 16, 0), XattrResult::Error(e) if e == libc::ERANGE));
         assert!(matches!(handle_getxattr(&fs, ino, "", 16, 0), XattrResult::Error(e) if e == libc::EINVAL));
+        // The same errno on set and remove (Linux: ERANGE on all three).
+        assert!(matches!(handle_setxattr(&fs, ino, &long, b"v"), EmptyResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_removexattr(&fs, ino, &long), EmptyResult::Error(e) if e == libc::ERANGE));
     }
 
     #[test]
