@@ -41,9 +41,9 @@ metrics:
 actuals:
   tokens: 6440
   tasks: 2
-  commits: 2
+  commits: 5
 plan_head_before: a3494e8ad417544f6bf4a532592dbe0bd7a6e040
-plan_head_after: 56531a0666c921edd38deb195f9764ae9e19beb3
+plan_head_after: 7fb0a35
 ---
 
 # Phase 26 Plan 07: refcounts as a prolly tree Summary
@@ -78,12 +78,24 @@ The `refcounts` map is now a prolly tree with an overlay. Increments and decreme
 ## Commits
 
 - `cc06f0a` feat(26-07): refcounts as a prolly tree (Task 1)
-- `56531a0` chore(26-07): gate log (Task 2)
+- `56531a0` chore(26-07): gate log (Task 2, first run)
+- `8825293` docs(26-07): summary
+- `168ffe1` fix(26-07): read the generation before the overlay lookup in read_with_generation
+- `7fb0a35` chore(26-07): gate log after the generation fix (all gates run again on this tree)
+
+`commits: 5` counts all five commits. This SUMMARY update is not in the count.
 
 ## Deviations from Plan
 
 **1. [Rule 3 - Blocking] `crates/metadata/src/pmap.rs` changed (not in `files_modified`)**
 - The overlay shard locks are private to `pmap`, so the recheck under the shard lock (`modify`), the overlay copy for the scan (`for_each_value`) and the key and value impls for `ObjectKey -> u64` must be there. Two pmap tests now call `TreeKey::encode` and `TreeValue::encode` by trait name, because `u64` and `ObjectKey` now implement both traits.
+
+**1b. [Rule 1 - Bug] Lost update in `read_with_generation` (26-04 code)**
+- **Found during:** review after Task 2.
+- **Issue:** on an overlay hit, the function read the generation after the overlay lookup. Take this order: thread A gets the pending value v; thread C changes it to v+1; a flush installs and settles (generation + 1); then A reads the new generation. A's `modify` then sees no pending edit and a matching generation. It takes the stale v as current, so C's change is lost.
+- **Fix:** read the generation before the overlay lookup. An older generation only causes a retry.
+- **Test gap:** no deterministic test covers this window, because it needs a hook between the two reads. 26-12 widens the test hooks.
+- **Re-run:** all gates and `cargo test --workspace` ran again on the fixed tree. The gate log was rebuilt (commit `168ffe1`, log `7fb0a35`).
 
 **2. [Rule 3 - Blocking] `crates/metadata/tests/gc_prolly_tests.rs`**
 - `manifest_tree_end_to_end` expected `tree_nodes` to be the manifest tree only. It now expects the manifest tree plus the refcount tree (one offset constant and a set union).
@@ -99,7 +111,7 @@ The `refcounts` map is now a prolly tree with an overlay. Increments and decreme
 
 ## Verification
 
-`runs/gate-26-07.log` has 6 sections, all `rc=0`: metadata, the five slicefs-cli suites, `lock_stats_report` with `--features lock-stats`, prolly-bench, clippy `-D warnings`, and `cargo test --workspace`. All gates ran on the committed tree. `retry_tests` did not fail.
+`runs/gate-26-07.log` has 6 sections, all `rc=0`: metadata, the five slicefs-cli suites, `lock_stats_report` with `--features lock-stats`, prolly-bench, clippy `-D warnings`, and `cargo test --workspace`. All gates ran on the tree of `168ffe1`, which has the generation fix. `retry_tests` did not fail.
 
 Acceptance greps: `refcounts: sync::Mutex<BTreeMap<ObjectKey, u64>>` 0; `MapTree<ObjectKey, u64>` at least 1; `fn refcounts_from_threads_lose_nothing` 1.
 
@@ -122,4 +134,4 @@ None beyond the plan's register. T-26-21: covered by the RMW with the generation
 
 ## Self-Check: PASSED
 
-`gate-26-07.log` exists with 6 `rc=0` lines and no `rc=[1-9]`; commits `cc06f0a` and `56531a0` are ancestors of HEAD.
+`gate-26-07.log` exists with 6 `rc=0` lines and no `rc=[1-9]`; commits `cc06f0a`, `56531a0`, `8825293`, `168ffe1` and `7fb0a35` are ancestors of HEAD.
