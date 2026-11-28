@@ -1,7 +1,7 @@
 ---
 phase: 26
 depth: standard
-status: fixed
+status: issues_found
 findings:
   critical: 0
   warning: 4
@@ -12,7 +12,7 @@ findings:
 
 Two parts: A (store.rs, pmap.rs) and B (other product code). IDs are prefixed A- and B-.
 
-Fix status (2026-11-28): all 11 findings are fixed, on branch `exec/26-fix`. Each finding has a "Fix status" line.
+Fix status (2026-11-28): all 11 findings are fixed, on branch `exec/26-fix`. Each finding has a "Fix status" line. (The front-matter `status` keeps the review result.)
 
 # Part A
 
@@ -259,7 +259,7 @@ returned, or put the cookie in a stable 63-bit hash of the name. Then start
 `scan_keys` just after that name (`name` + `\0`). Until that is done, record
 the behavior with the known limits.
 
-**Fix status:** fixed in `cadb30f`. Each open directory handle keeps a resume cursor: the offset and name of each entry of its last reply (the whole reply, because the kernel can use part of it). A readdir at one of those offsets resumes the scan after that name; offset 0 starts at the start, and any other offset uses the old skip. `releasedir` drops the cursor. Docs updated (`limits.md`, `metadata-maps.md`). Tests: `readdir_pages_give_each_unchanged_name_once_across_changes` (failed before the fix), `readdir_resumes_inside_the_last_reply`, and the new `mt-linux.sh` step `readdir-unlink` (passed in Docker).
+**Fix status:** fixed in `cadb30f`. Each open directory handle keeps a resume cursor: the offset and name of each entry of its last reply (the whole reply, because the kernel can use part of it). A readdir at one of those offsets resumes the scan after that name; offset 0 starts at the start, and any other offset uses the old skip. `releasedir` drops the cursor. Docs updated (`limits.md`, `metadata-maps.md`). Tests: `readdir_pages_give_each_unchanged_name_once_across_changes` (failed before the fix), `readdir_resumes_inside_the_last_reply`, and the new `mt-linux.sh` step `readdir-unlink` (made stronger in the next commit: it fails in Docker on the code before the fix and passes on the fix).
 
 ## Info
 
