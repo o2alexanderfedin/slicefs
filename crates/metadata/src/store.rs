@@ -116,6 +116,18 @@ pub enum CommitFault {
     BeforePreRootSync = 5,
 }
 
+/// A map tree, for the test hooks `test_fail_next_flush_of` and
+/// `test_set_flush_hook_of`.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestTree {
+    Inode,
+    Dir,
+    Manifest,
+    Xattr,
+    Refcount,
+}
+
 /// The work one commit did on one map tree (see [`CommitStats`]).
 #[derive(Clone, Debug, Default)]
 pub struct TreeStats {
@@ -839,6 +851,8 @@ impl DictMetadataStore {
                 let mut m = Some(m);
                 loop {
                     let probe = self.inodes.read_with_generation(&self.trees, &ino)?;
+                    #[cfg(test)]
+                    self.inodes.run_read_hook();
                     let mut alloc = self.inode_alloc.lock();
                     let done = self.inodes.modify(ino, Some(probe), |cur| match cur {
                         Some(_) => (None, Err(MetaError::AlreadyExists(ino))),
@@ -959,24 +973,48 @@ impl DictMetadataStore {
         self.tree_flush.store(n.max(1), Ordering::Relaxed);
     }
 
-    /// Make the next hot-path flush of a map tree fail (its entries are
-    /// requeued and the next commit fails with the error).
+    /// Make the next hot-path flush of the manifest tree fail (its entries
+    /// are requeued and the next commit fails with the error).
     #[doc(hidden)]
     pub fn test_fail_next_flush(&self) {
-        self.manifest.fail_next_flush();
+        self.test_fail_next_flush_of(TestTree::Manifest);
     }
 
-    /// Run `f` in every flush of a map tree, between the install of the new
-    /// root and the settle of the overlay (with the apply lock held).
+    /// `test_fail_next_flush` for the map tree `tree`.
+    #[doc(hidden)]
+    pub fn test_fail_next_flush_of(&self, tree: TestTree) {
+        match tree {
+            TestTree::Inode => self.inodes.fail_next_flush(),
+            TestTree::Dir => self.dirs.fail_next_flush(),
+            TestTree::Manifest => self.manifest.fail_next_flush(),
+            TestTree::Xattr => self.xattrs.fail_next_flush(),
+            TestTree::Refcount => self.refcounts.fail_next_flush(),
+        }
+    }
+
+    /// Run `f` in every flush of the manifest tree, between the install of
+    /// the new root and the settle of the overlay (with the apply lock held).
     #[doc(hidden)]
     pub fn test_set_flush_hook(&self, f: impl Fn() + Send + Sync + 'static) {
-        self.manifest.set_flush_hook(Some(Arc::new(f)));
+        self.test_set_flush_hook_of(TestTree::Manifest, Some(Arc::new(f)));
     }
 
     /// Remove the hook of `test_set_flush_hook`.
     #[doc(hidden)]
     pub fn test_clear_flush_hook(&self) {
-        self.manifest.set_flush_hook(None);
+        self.test_set_flush_hook_of(TestTree::Manifest, None);
+    }
+
+    /// `test_set_flush_hook` for the map tree `tree`; `None` removes it.
+    #[doc(hidden)]
+    pub fn test_set_flush_hook_of(&self, tree: TestTree, f: Option<Arc<dyn Fn() + Send + Sync>>) {
+        match tree {
+            TestTree::Inode => self.inodes.set_flush_hook(f),
+            TestTree::Dir => self.dirs.set_flush_hook(f),
+            TestTree::Manifest => self.manifest.set_flush_hook(f),
+            TestTree::Xattr => self.xattrs.set_flush_hook(f),
+            TestTree::Refcount => self.refcounts.set_flush_hook(f),
+        }
     }
 
     fn injected_fault(&self, at: CommitFault) -> Result<(), MetaError> {
@@ -3880,6 +3918,45 @@ mod tests {
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert_eq!(reloaded.get_inode(x).unwrap().nlinks, start + 11);
+    }
+
+    // `create_inode_at` probes the tree with no lock held. A rival that takes
+    // the same number and is flushed between the probe and the check (the
+    // read hook) moves the tree: the check sees an older generation, probes
+    // again and finds the number taken. With the stale probe ("absent") the
+    // second create would overwrite the rival's inode.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn create_inode_at_probes_again_when_the_tree_moves() {
+        let (_d, store) = make_store();
+        let store = Arc::new(store);
+        let x = store.create_inode(&new_file_meta()).unwrap() + 100;
+        let count = store.inode_count();
+        let ran = Arc::new(AtomicBool::new(false));
+        {
+            let weak = Arc::downgrade(&store);
+            let ran = Arc::clone(&ran);
+            store.inodes.set_read_hook(Arc::new(move || {
+                let st = weak.upgrade().unwrap();
+                let mut rival = new_file_meta();
+                rival.size = 7;
+                assert_eq!(st.create_inode_at(x, &rival).unwrap(), x);
+                flush_inode_tree(&st);
+                assert_eq!(st.inodes.dirty(), 0, "the rival is only in the tree");
+                ran.store(true, Ordering::SeqCst);
+            }));
+        }
+        let generation = store.inodes.generation();
+        assert!(matches!(store.create_inode_at(x, &new_file_meta()), Err(MetaError::AlreadyExists(n)) if n == x));
+        assert!(ran.load(Ordering::SeqCst), "the hook ran between the probe and the check");
+        assert!(store.inodes.generation() > generation, "a flush ran in the window");
+        assert_eq!(store.get_inode(x).unwrap().size, 7, "the rival's inode is kept");
+        assert_eq!(store.inode_count(), count + 1);
+        assert_eq!(store.logical_bytes(), 7);
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(reloaded.get_inode(x).unwrap().size, 7);
+        assert_eq!(reloaded.inode_count(), count + 1);
     }
 
     // `create_inode_at` probes the tree: an inode that is only in the tree
