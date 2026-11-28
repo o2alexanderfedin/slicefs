@@ -7,8 +7,9 @@
 //! The node format, the boundary rule (the integer threshold, its table and
 //! the rule version byte) and the constants are part of store format 8. They
 //! are defined in `docs/design/store-format.md`, section "Metadata maps
-//! (store format 8)". In this build the commit, read and GC paths of
-//! SliceFS do not use this crate; issue #215 wires them in.
+//! (store format 8)". SliceFS keeps its five metadata maps in this crate's
+//! trees: the commit, read, GC and rehash paths use them (issue #215,
+//! `crates/metadata/src/pmap.rs`).
 //!
 //! # Storage
 //!
