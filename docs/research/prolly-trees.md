@@ -924,21 +924,31 @@ layout"):
   more per commit than flat (1.36 x and 1.39 x). Scatter K = 1,000 costs
   1.8 CPU ms and 5.8 ms more (1.03 x and 1.07 x). In both rows prolly
   stores fewer new bytes (0.55 x and 0.38 x).
-- Why such a commit is rare here: the product never uses a freed inode
-  number again, so new files go to the right edge of `inode_data`. The
-  `insdel` rows put each insert back at a freed number on purpose, so that
-  boundaries move. A commit runs on fsync or on a timer, and in a normal
-  workload few files change between two commits. A commit with 1,000 real
-  inserts and deletes in the middle of the map is a bulk operation, not
-  the common case.
-- Cost against gain: the extra cost is tens of milliseconds on a rare
-  commit at 84,104 inodes. The gain is on every small commit, and it grows
-  with the store: at 1,000,000 files one change takes 6.8 ms in place of
-  528.6 ms. The flat cost at K = 1,000 is mostly the full serialization of
-  every map (10.4 MB per commit at the Boost size), which grows with the
-  inode count. The prolly cost grows with K and the tree height, not with
-  the inode count. So at a larger store the break-even K should move up
-  (an inference, not measured here).
+- What the insdel row is: 1,000 changes in one commit, at random places in
+  the tree, and each change inserts or deletes a key in the middle of
+  `inode_data`. The product never uses a freed inode number again, so in
+  the product new files go to the right edge of `inode_data` (and of
+  `manifest_data` and `xattr_data`). Keys in the middle are normal in
+  `dir_data` (a new name in an existing directory) and in `refcounts`
+  (content keys). The insdel row stands for those maps.
+- How often it happens: a commit runs on a timer (by default every 30 s,
+  `--commit-interval`). So a K = 1,000 commit means about 1,000 files
+  changed at random places in one interval. That is a bulk operation, for
+  example an unpack, a copy or a remove of a tree. Such an operation also
+  writes or removes the file data. The extra commit time is 45.6 ms per
+  commit, about 0.05 ms per changed file.
+- Scatter K = 1,000 is near parity (1.03 x CPU, 1.07 x wall, 0.38 x
+  bytes). In `scatter` most creates and deletes cancel inside the commit,
+  so this row is about 500 value changes at random places.
+- Cost against gain: in the flat rows, insdel K = 1 costs 31.2 CPU ms and
+  K = 1,000 costs 113.2 CPU ms, with the same 10.4 MB serialized per
+  commit. So about 31 ms of the flat cost grows with the inode count and
+  about 82 ms grows with K. At 1,000,000 files the flat one-change commit
+  costs 515.1 CPU ms, so that part is about 16 times larger there. The
+  prolly cost grows with K and the tree height, not with the inode count.
+  So at a larger store the break-even K should move up (an inference, not
+  measured here). The gain is on every small commit: at 1,000,000 files
+  one change takes 6.8 ms in place of 528.6 ms.
 
 Possible mitigations, as follow-ups only (a code change after the decision
 runs would void the pre-registration, and the owner asked for no early
