@@ -797,7 +797,7 @@ impl DictMetadataStore {
 
     /// Current metadata of `ino`: the overlay, else the inode tree.
     fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        self.inodes.read(&self.trees, &ino)?.ok_or(MetaError::NotFound(ino))
+        checked_inode(ino, self.inodes.read(&self.trees, &ino)?)?.ok_or(MetaError::NotFound(ino))
     }
 
     /// Change inode `ino` in one hold of its overlay shard lock (D-05): `f`
@@ -809,9 +809,10 @@ impl DictMetadataStore {
     /// or take a lock. `NotFound` if there is no such inode.
     pub fn modify_inode<R>(&self, ino: InodeId, f: impl FnOnce(&mut InodeMeta) -> R) -> Result<R, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let r = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
-            None => (None, Err(MetaError::NotFound(ino))),
-            Some(mut m) => {
+        let r = self.inodes.read_modify_write(&self.trees, &ino, |cur| match checked_inode(ino, cur) {
+            Err(e) => (None, Err(e)),
+            Ok(None) => (None, Err(MetaError::NotFound(ino))),
+            Ok(Some(mut m)) => {
                 let old_size = m.size;
                 let r = f(&mut m);
                 debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
@@ -1595,9 +1596,10 @@ impl MetadataStore for DictMetadataStore {
         // A pending delete, written with the size it had in the same hold of
         // the overlay shard lock (read-modify-write): of two deletes, one
         // counts and the other gets `NotFound`.
-        let (size, mode) = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
-            None => (None, Err(MetaError::NotFound(ino))),
-            Some(m) => (Some(None), Ok((m.size, m.mode))),
+        let (size, mode) = self.inodes.read_modify_write(&self.trees, &ino, |cur| match checked_inode(ino, cur) {
+            Err(e) => (None, Err(e)),
+            Ok(None) => (None, Err(MetaError::NotFound(ino))),
+            Ok(Some(m)) => (Some(None), Ok((m.size, m.mode))),
         })??;
         // The counts follow the delete at once: the scans below can fail,
         // and a retry gets `NotFound`.
@@ -1673,7 +1675,7 @@ impl MetadataStore for DictMetadataStore {
             return Err(MetaError::InvalidName(name.to_string()));
         }
         self.check_dir(parent_ino)?;
-        let kind = self.inodes.read(&self.trees, &ino)?.map_or(0, |m| kind_of(m.mode));
+        let kind = checked_inode(ino, self.inodes.read(&self.trees, &ino)?)?.map_or(0, |m| kind_of(m.mode));
         self.add_entry(parent_ino, name, DirValue { ino, kind })
     }
 
@@ -1812,6 +1814,11 @@ pub(crate) enum Ref {
 /// The node IDs of the map trees of the root record `root` (each node once
 /// per parent that refers to it), as keys. [`referenced_roots`] has only
 /// file values; a tree node is one object (never open it as a file).
+///
+/// For tests only (unit and integration tests of the workspace): the list
+/// has every node of every tree, O(nodes) in RAM. Product code walks the
+/// trees with a callback (`for_each_referenced`).
+#[doc(hidden)]
 pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
@@ -2193,6 +2200,18 @@ impl DictMetadataStore {
     }
 }
 
+/// The inode record `m` read under key `ino`: a record that carries
+/// another inode number is corrupt (a caller that writes it back would
+/// change that other inode).
+fn checked_inode(ino: InodeId, m: Option<InodeMeta>) -> Result<Option<InodeMeta>, MetaError> {
+    match m {
+        Some(m) if m.ino != ino => Err(MetaError::Corrupted(format!(
+            "inode_data tree: record of ino {} under key {ino}", m.ino
+        ))),
+        m => Ok(m),
+    }
+}
+
 /// Parse an `ObjectKey` from a `KEY_BYTES`-byte slice.
 fn parse_key(bytes: &[u8]) -> ObjectKey {
     ObjectKey(bytes.try_into().expect("a KEY_BYTES slice"))
@@ -2331,6 +2350,25 @@ mod tests {
         }
         assert_eq!(store.inode_count(), count - 2);
         assert_eq!(store.logical_bytes(), bytes - 4096);
+    }
+
+    // Review 26 A-IN-01: an inode record that carries another inode number
+    // than its key is corrupt: an error, not a panic, and never written
+    // back under the other number.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_inode_record_under_another_key_is_corrupt() {
+        let (_d, store) = make_store();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        let mut m = store.get_inode(f).unwrap();
+        m.ino = f + 100;
+        // As a tree read gives it: the overlay answers first.
+        store.inodes.write(f, Some(m));
+        let corrupt = |r: Result<(), MetaError>| matches!(r, Err(MetaError::Corrupted(_)));
+        assert!(corrupt(store.get_inode(f).map(drop)));
+        assert!(corrupt(store.modify_inode(f, |m| m.nlinks += 1)));
+        assert!(corrupt(store.link(1, "x", f)));
+        assert!(corrupt(store.delete_inode(f)));
     }
 
     /// The stored form of the xattr `name` of `ino` (overlay, then tree).
