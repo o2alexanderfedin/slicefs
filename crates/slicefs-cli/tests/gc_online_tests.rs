@@ -548,7 +548,9 @@ fn low_space_starts_a_gc_without_the_interval() {
 /// as the callbacks do; each commit holds it exclusively, as the commit
 /// timer does (a GC start takes it itself). A low dirty limit makes the
 /// rewrites publish new roots while the GCs run. The model keeps the
-/// versions of each 64 KiB block, not a copy of the file.
+/// versions of each 64 KiB block, not a copy of the file. All three run
+/// for at least 1.5 s and until a GC has deleted objects (at most 30 s):
+/// under load one GC can end its window with nothing to delete yet.
 #[test]
 fn reads_during_rewrite_and_gc_never_fail() {
     use std::time::{Duration, Instant};
@@ -568,6 +570,10 @@ fn reads_during_rewrite_and_gc_never_fail() {
     let gate = fs.commit_gate();
     let stop = no_stop();
     let deadline = Instant::now() + Duration::from_millis(1500);
+    let cap = Instant::now() + Duration::from_secs(30);
+    // Set by the GC thread when it stops; the writer and the reader run
+    // until then.
+    let done = AtomicBool::new(false);
     let next = |x: &mut u64| {
         *x ^= *x << 13;
         *x ^= *x >> 7;
@@ -581,7 +587,7 @@ fn reads_during_rewrite_and_gc_never_fail() {
                 fs.test_open(ino, libc::O_RDWR).unwrap()
             };
             let (mut x, mut v) = (0x2545_F491_4F6C_DD1Du64, 0u64);
-            while Instant::now() < deadline {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 let b = next(&mut x);
                 v += 1;
                 versions[b].lock().unwrap().push(v);
@@ -597,7 +603,7 @@ fn reads_during_rewrite_and_gc_never_fail() {
         });
         let reader = s.spawn(|| {
             let (mut x, mut n) = (0x9E37_79B9_7F4A_7C15u64, 0u64);
-            while Instant::now() < deadline {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 let b = next(&mut x);
                 let got = {
                     let _op = gate.read().unwrap();
@@ -612,7 +618,7 @@ fn reads_during_rewrite_and_gc_never_fail() {
         });
         let gc = s.spawn(|| {
             let (mut n, mut removed) = (0u64, 0u64);
-            while Instant::now() < deadline {
+            while (Instant::now() < deadline || removed == 0) && Instant::now() < cap {
                 {
                     let _commit = gate.write().unwrap();
                     fs.commit_cut().unwrap();
@@ -620,6 +626,7 @@ fn reads_during_rewrite_and_gc_never_fail() {
                 removed += fs.gc_online(&stop).unwrap().expect("not stopped").removed_objects;
                 n += 1;
             }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
             (n, removed)
         });
         (writer.join().unwrap(), reader.join().unwrap(), gc.join().unwrap())

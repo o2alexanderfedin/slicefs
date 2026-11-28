@@ -6,13 +6,12 @@
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
 //!   `inode_alloc`, then one `inodes` overlay shard, then the `inodes`
-//!   tree root lock; one `dir_live` shard, then `dir_data`. The other maps
-//!   are taken alone.
+//!   tree root lock. The other maps are taken alone.
 //!   No hot-path call holds the `io` lock; a commit takes it briefly.
 //!   The `prolly::NodeCache` lock (`Rank::Store`) is a leaf: no other lock, read,
 //!   decode or callback runs under it, so it may be taken under any lock above.
-//!   Map trees (`pmap`): `commit_lock`, then `apply_lock`, then one overlay or
-//!   live shard, then a tree root lock. `begin_commit` holds `apply_lock` only
+//!   Map trees (`pmap`): `commit_lock`, then `apply_lock`, then one overlay
+//!   shard, then a tree root lock. `begin_commit` holds `apply_lock` only
 //!   briefly: never across the write-log cut or a return to the file system.
 //!   A flush is never called with a shard lock held; it holds `apply_lock`
 //!   (`try_lock`) across its node reads and puts.
@@ -28,6 +27,11 @@
 //!   inode) only to read or write one edit, or to copy the pending keys of
 //!   the inode for a scan (`MapTree::scan_keys`); the tree reads, the spill
 //!   of a large value and its ranged reads run with no lock held.
+//!   A directory call holds one `dirs` overlay shard (the shard of the
+//!   directory; timed as `Site::DirLive`, the root lock as `Site::DirData`)
+//!   only for one check and edit (`MapTree::modify`) or to copy the pending
+//!   keys of the directory for a scan; the tree reads and the reads of the
+//!   scanned entries run with no lock held.
 //!   The test flush hook and the unit-test read hook of a tree (`pmap`,
 //!   `Rank::Store`) are leaves: each is cloned or taken out and called with
 //!   no tree lock held.
@@ -35,7 +39,7 @@
 //!   is set once at the end of a successful commit and cloned by
 //!   `last_commit_stats`; no other store-rank lock and no I/O runs under it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
 
@@ -52,7 +56,7 @@ use crate::pmap::{MapTree, Taken, TreeIo};
 use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
 use crate::inode_alloc::InodeAlloc;
-use crate::directory::{create_dir_entries, DirList};
+use crate::dirent::{dir_range, entry_key, kind_of, DirKey, DirValue, KIND_DIR};
 use crate::manifest::{intern_manifest, load_manifest};
 use crate::xattr::{fits_inline, xattr_range, XattrKey, XattrValue};
 
@@ -60,8 +64,8 @@ use crate::xattr::{fits_inline, xattr_range, XattrKey, XattrValue};
 const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
-/// little-endian. Each `*_DATA` field (and `REFCOUNTS`) is the key of a map:
-/// the root of a prolly tree, or (`DIR_DATA`) a serialized flat map.
+/// little-endian. Each `*_DATA` field (and `REFCOUNTS`) is the root of the
+/// prolly tree of a map.
 pub(crate) mod root_rec {
     use super::KEY_BYTES as D;
     pub const ROOT_DIR_INO: usize = 0;
@@ -77,214 +81,15 @@ pub(crate) mod root_rec {
     pub const SIZE: usize = INODE_COUNT + 8;
 }
 
-/// One entry of a `u64` <-> digest map: a `u64` and a digest.
-pub(crate) const MAP_ENTRY: usize = 8 + KEY_BYTES;
-
 /// Longest directory entry name in bytes (statfs reports namelen 255).
 const NAME_MAX: usize = 255;
 
-/// When a cache holds more entries than this, its dirty entries are written
-/// and the clean ones dropped.
-#[cfg(not(test))]
-const DIR_CACHE_MAX: usize = 16_384;
-// Small in unit tests, so the flush-and-evict path runs.
-#[cfg(test)]
-const DIR_CACHE_MAX: usize = 4;
-/// Dirty cache entries are written once this many have built up, so the
-/// final commit (at unmount) stays small.
-#[cfg(not(test))]
-const DIRTY_FLUSH: usize = 1024;
-#[cfg(test)]
-const DIRTY_FLUSH: usize = 8;
 /// A map tree is flushed (its overlay applied to the working root) once
 /// this many of its entries are dirty.
 #[cfg(not(test))]
 const TREE_FLUSH: usize = 16_384;
 #[cfg(test)]
 const TREE_FLUSH: usize = 8;
-
-/// Cached decoded objects plus the set of those changed since the last flush.
-struct Live<T> {
-    map: HashMap<u64, T>,
-    dirty: std::collections::HashSet<u64>,
-    /// Entries that a commit (at its cut, #108) or a cache flush took and now
-    /// writes with no lock held, each with the ticket of its take. Until the
-    /// writer installs their digests, the digest maps hold an older one, so
-    /// these stay in the cache. A change after the take removes the entry
-    /// (it is dirty again, and newer); a later take gives it a new ticket.
-    /// A writer installs its digest only if the entry still has its ticket.
-    flushing: HashMap<u64, u64>,
-    /// The last ticket given.
-    tickets: u64,
-}
-
-impl<T> Default for Live<T> {
-    fn default() -> Self {
-        Live { map: HashMap::new(), dirty: Default::default(), flushing: HashMap::new(), tickets: 0 }
-    }
-}
-
-impl<T> Live<T> {
-    fn remove(&mut self, ino: u64) {
-        self.map.remove(&ino);
-        self.dirty.remove(&ino);
-        self.flushing.remove(&ino);
-    }
-
-    fn mark_dirty(&mut self, ino: u64) {
-        self.dirty.insert(ino);
-        self.flushing.remove(&ino);
-    }
-
-    /// Drop the entries that are already written.
-    fn evict_clean(&mut self) {
-        let (dirty, flushing) = (&self.dirty, &self.flushing);
-        self.map.retain(|ino, _| dirty.contains(ino) || flushing.contains_key(ino));
-    }
-
-    /// A take failed (a commit): what is in flight is dirty again.
-    fn requeue(&mut self) {
-        let flushing: Vec<u64> = self.flushing.drain().map(|(ino, _)| ino).collect();
-        self.dirty.extend(flushing);
-    }
-
-    /// True if `ino` still has the ticket `t` of a take (not changed or
-    /// removed since): it is no longer in flight, and the caller installs
-    /// the digest it wrote.
-    fn settle(&mut self, ino: u64, t: u64) -> bool {
-        if self.flushing.get(&ino) == Some(&t) {
-            self.flushing.remove(&ino);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl<T: Clone> Live<T> {
-    /// The dirty entries, plus the entries in flight if `in_flight` (a
-    /// commit must have them all): each goes in flight with a new ticket.
-    fn take(&mut self, in_flight: bool) -> Vec<(u64, u64, T)> {
-        let mut inos: Vec<u64> = self.dirty.drain().collect();
-        if in_flight {
-            inos.extend(self.flushing.keys().copied());
-        }
-        let mut out = Vec::with_capacity(inos.len());
-        for ino in inos {
-            if let Some(v) = self.map.get(&ino) {
-                self.tickets += 1;
-                self.flushing.insert(ino, self.tickets);
-                out.push((ino, self.tickets, v.clone()));
-            }
-        }
-        out
-    }
-}
-
-/// Shards of the directory cache: threads that work on directories of
-/// different shards take different locks.
-const SHARDS: usize = 32;
-
-/// A cache split by inode number into `SHARDS` locks (`Rank::Store`). A
-/// thread holds at most one shard of a cache at a time. `len` and `dirty`
-/// count over all shards; a shard guard updates them before it unlocks.
-struct Sharded<T> {
-    shards: Vec<sync::Mutex<Live<T>>>,
-    len: AtomicUsize,
-    dirty: AtomicUsize,
-}
-
-/// One locked shard (derefs to its `Live`).
-struct Shard<'a, T> {
-    g: sync::MutexGuard<'a, Live<T>>,
-    of: &'a Sharded<T>,
-    /// `map.len()` and `dirty.len()` when it was locked.
-    at: (usize, usize),
-}
-
-impl<T> Sharded<T> {
-    fn new(site: Site) -> Self {
-        Sharded {
-            shards: (0..SHARDS).map(|_| lk(Live::default()).timed(site)).collect(),
-            len: AtomicUsize::new(0),
-            dirty: AtomicUsize::new(0),
-        }
-    }
-
-    /// The shard of `ino`, locked.
-    fn lock(&self, ino: u64) -> Shard<'_, T> {
-        self.lock_at((ino % SHARDS as u64) as usize)
-    }
-
-    fn lock_at(&self, i: usize) -> Shard<'_, T> {
-        let g = self.shards[i].lock();
-        let at = (g.map.len(), g.dirty.len());
-        Shard { g, of: self, at }
-    }
-
-    /// Cached entries, over all shards.
-    fn len(&self) -> usize {
-        self.len.load(Ordering::Relaxed)
-    }
-
-    /// Dirty entries, over all shards.
-    fn dirty(&self) -> usize {
-        self.dirty.load(Ordering::Relaxed)
-    }
-
-    /// `Live::evict_clean` on each shard, one at a time.
-    fn evict_clean(&self) {
-        for i in 0..SHARDS {
-            self.lock_at(i).evict_clean();
-        }
-    }
-
-    /// `Live::requeue` on each shard, one at a time.
-    fn requeue(&self) {
-        for i in 0..SHARDS {
-            self.lock_at(i).requeue();
-        }
-    }
-}
-
-impl<T: Clone> Sharded<T> {
-    /// What a commit writes: `Live::take(true)` of each shard.
-    fn take_all(&self) -> Vec<(u64, u64, T)> {
-        let mut out = Vec::new();
-        for i in 0..SHARDS {
-            out.extend(self.lock_at(i).take(true));
-        }
-        out
-    }
-}
-
-impl<T> std::ops::Deref for Shard<'_, T> {
-    type Target = Live<T>;
-    fn deref(&self) -> &Live<T> {
-        &self.g
-    }
-}
-
-impl<T> std::ops::DerefMut for Shard<'_, T> {
-    fn deref_mut(&mut self) -> &mut Live<T> {
-        &mut self.g
-    }
-}
-
-impl<T> Drop for Shard<'_, T> {
-    // Runs before the guard field unlocks, so the counts move under the lock.
-    fn drop(&mut self) {
-        fn moved(c: &AtomicUsize, old: usize, new: usize) {
-            if new > old {
-                c.fetch_add(new - old, Ordering::Relaxed);
-            } else if old > new {
-                c.fetch_sub(old - new, Ordering::Relaxed);
-            }
-        }
-        moved(&self.of.len, self.at.0, self.g.map.len());
-        moved(&self.of.dirty, self.at.1, self.g.dirty.len());
-    }
-}
 
 /// Points in `finish_commit` for `DictMetadataStore::test_fail_next_commit_at`.
 #[doc(hidden)]
@@ -350,7 +155,7 @@ pub struct PreparedCommit<'a> {
     _serial: sync::MutexGuard<'a, ()>,
     store: &'a DictMetadataStore,
     /// The root is logged. Else (an error, or dropped unfinished) the
-    /// directories it took are dirty again.
+    /// edits it took are dirty again (if the trees are not installed).
     done: bool,
     /// The map trees have their new roots (`finish_inner`). Else (an error
     /// before that, or dropped) their overlays are requeued and the
@@ -359,10 +164,7 @@ pub struct PreparedCommit<'a> {
     changes: u64,
     /// `wal_fail_seq` at the cut: failures up to it end with this root.
     fail_seq: u64,
-    /// With the ticket of each take (see `Live::flushing`).
-    dirs: Vec<(u64, u64, DirList)>,
     next_ino: u64,
-    dir_data: BTreeMap<u64, ObjectKey>,
     /// The manifest tree at the cut and the edits taken from its overlay.
     manifest_root: chunk_store::ObjectId,
     manifest: Taken<u64, ObjectKey>,
@@ -375,6 +177,9 @@ pub struct PreparedCommit<'a> {
     /// The inode tree at the cut and the edits taken from its overlay.
     inode_root: chunk_store::ObjectId,
     inodes: Taken<u64, InodeMeta>,
+    /// The directory tree at the cut and the edits taken from its overlay.
+    dir_root: chunk_store::ObjectId,
+    dirs: Taken<DirKey, DirValue>,
     logical_bytes: u64,
     inode_count: u64,
     snapshots: Vec<SnapshotEntry>,
@@ -392,7 +197,12 @@ impl Drop for PreparedCommit<'_> {
     }
 }
 
+/// The name of a new entry: not empty, at most `NAME_MAX` bytes (so its key
+/// is at most 263 bytes, below `prolly::MAX_KEY`).
 fn check_name(name: &str) -> Result<(), MetaError> {
+    if name.is_empty() {
+        return Err(MetaError::InvalidName("empty name".into()));
+    }
     if name.len() > NAME_MAX {
         return Err(MetaError::NameTooLong(name.len()));
     }
@@ -436,15 +246,13 @@ pub struct DictMetadataStore {
     /// timed as `Site::InodeLive`, the root lock as `Site::InodeData`.
     /// Lock order: `inode_alloc`, an overlay shard, the root lock.
     inodes: MapTree<u64, InodeMeta>,
-    /// Maps directory inode number → entry list `ObjectKey` as of the last flush.
-    /// A directory in `dir_live` can be newer than its digest here.
-    dir_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
-    /// Decoded entry lists of the directories in use, with a dirty flag.
-    /// Changes go here; `commit()` writes the dirty ones and updates `dir_data`.
-    /// Without this, each create re-wrote the whole entry list (O(n) per entry).
-    /// Sharded by inode number. Lock order: a `dir_live` shard, `dir_data`.
-    /// No shard lock is held across a node read, a hash or a put.
-    dir_live: Sharded<DirList>,
+    /// The directory entries, one per name: a prolly tree (key: the
+    /// directory ino, 8 bytes big endian, then the name bytes; value: the
+    /// child ino, 8 bytes little endian, and its type byte, see `dirent`)
+    /// and an overlay sharded by the directory ino. Every directory has `.`
+    /// and `..`. The overlay shards are timed as `Site::DirLive`, the root
+    /// lock as `Site::DirData`.
+    dirs: MapTree<DirKey, DirValue>,
     /// Count of mutations so far, and its value at the last commit: the
     /// commit timer commits only when they differ.
     changes: AtomicU64,
@@ -550,19 +358,14 @@ impl DictMetadataStore {
         root_meta.mtime_nsec = now.subsec_nanos() as _;
         root_meta.ctime_sec = root_meta.mtime_sec;
         root_meta.ctime_nsec = root_meta.mtime_nsec;
-        let root_dir_digest = {
-            let mut io_guard = lock_stats::lock(&io, Site::Io);
-            let mut fsa = &mut *io_guard;
-            create_dir_entries(&mut fsa, 1, 1)
-            // fsa drops here, flushing files to io
-        };
-        // The root inode goes into the empty tree through the overlay; the
-        // first commit writes it.
+        // The root inode and the `.` and `..` of the root directory go into
+        // the empty trees through the overlays; the first commit writes them.
         let inodes = MapTree::with_sites("inode_data", Site::InodeLive, Site::InodeData, empty);
         inodes.write(1, Some(root_meta));
-
-        let mut dir_data = BTreeMap::new();
-        dir_data.insert(1, root_dir_digest);
+        let dirs = MapTree::with_sites("dir_data", Site::DirLive, Site::DirData, empty);
+        for name in [".", ".."] {
+            dirs.write(entry_key(1, name), Some(DirValue { ino: 1, kind: KIND_DIR }));
+        }
 
         DictMetadataStore {
             io,
@@ -572,8 +375,7 @@ impl DictMetadataStore {
             put_error: lk(put_error),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inodes,
-            dir_data: lk(dir_data).timed(Site::DirData),
-            dir_live: Sharded::new(Site::DirLive),
+            dirs,
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
             manifest: MapTree::new("manifest_data", Site::ManifestData, empty),
@@ -854,63 +656,119 @@ impl DictMetadataStore {
     /// Return the last committed root digest, or `None` if `commit()` has not been called yet.
     ///
     /// Used by the background GC thread to determine which root to use as the live-set anchor.
-    /// Point directory `dir_ino`'s `..` entry at `parent_ino` (directory move).
+    /// Point directory `dir_ino`'s `..` entry at `parent_ino` (directory
+    /// move): a read-modify-write of the `..` entry (`NotADirectory` if
+    /// `dir_ino` has none).
     pub fn set_parent(&self, dir_ino: InodeId, parent_ino: InodeId) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        self.with_dir(dir_ino, |d| {
-            d.set_dotdot(parent_ino);
-            Ok(((), true))
-        })
+        self.dirs.read_modify_write(&self.trees, &entry_key(dir_ino, ".."), |cur| match cur {
+            None => (None, Err(MetaError::NotADirectory(dir_ino))),
+            Some(_) => (Some(Some(DirValue { ino: parent_ino, kind: KIND_DIR })), Ok(())),
+        })??;
+        self.flush_trees();
+        Ok(())
     }
 
-    /// The shard of directory `ino`, locked, with its entry list cached. A
-    /// cold list is read with no lock held and cached only if it is still
-    /// absent and its digest did not change meanwhile (else a delete or a
-    /// newer flush in between would be undone).
-    fn cached_dir(&self, ino: InodeId) -> Result<Shard<'_, DirList>, MetaError> {
-        let mut cold: Option<(ObjectKey, DirList)> = None;
-        loop {
-            let mut live = self.dir_live.lock(ino);
-            if live.map.contains_key(&ino) {
-                return Ok(live);
-            }
-            let digest = self.dir_data.lock().get(&ino).copied()
-                .ok_or(MetaError::NotADirectory(ino))?;
-            if let Some((d, list)) = cold.take()
-                && d == digest
-            {
-                live.map.insert(ino, list);
-                return Ok(live);
-            }
-            drop(live);
-            let list = DirList::load(&mut self.reader(), &digest)?;
-            cold = Some((digest, list));
+    /// True if `ino` is a directory: it has a `.` entry (one read).
+    fn is_dir(&self, ino: InodeId) -> Result<bool, MetaError> {
+        Ok(self.dirs.read(&self.trees, &entry_key(ino, "."))?.is_some())
+    }
+
+    /// `Ok` if `ino` is a directory, else `NotADirectory`.
+    fn check_dir(&self, ino: InodeId) -> Result<(), MetaError> {
+        if self.is_dir(ino)? { Ok(()) } else { Err(MetaError::NotADirectory(ino)) }
+    }
+
+    /// The error of an entry `parent`/`name` that is absent: `NotADirectory`
+    /// if `parent` is not a directory, else `NotFound(0)`.
+    fn missing_entry(&self, parent: InodeId) -> MetaError {
+        match self.check_dir(parent) {
+            Ok(()) => MetaError::NotFound(0),
+            Err(e) => e,
         }
     }
 
-    /// Run `f` on the cached entry list of directory `ino` (read from the store
-    /// on first use). `f` returns `(result, changed)`; a changed list is marked
-    /// dirty and written by the next flush. The flush and the eviction run
-    /// after the shard lock is released.
-    fn with_dir<R>(
+    /// Add the entry `name -> value` to directory `parent` if the name is
+    /// free (a read-modify-write: `AlreadyExists(value.ino)` if the name is
+    /// pending or in the tree). The caller checks the name and the parent.
+    fn add_entry(&self, parent: InodeId, name: &str, value: DirValue) -> Result<(), MetaError> {
+        self.dirs.read_modify_write(&self.trees, &entry_key(parent, name), |cur| match cur {
+            Some(_) => (None, Err(MetaError::AlreadyExists(value.ino))),
+            None => (Some(Some(value)), Ok(())),
+        })??;
+        self.flush_trees();
+        Ok(())
+    }
+
+    /// Call `f` with the name, child ino and type byte of each entry of
+    /// directory `ino` (`.` and `..` too) in name byte order, streamed from
+    /// a range scan of `ino BE .. (ino + 1) BE` merged with the pending edits
+    /// (`MapTree::scan_keys`); each entry is then read with no lock held (an
+    /// entry removed meanwhile is skipped). `Break` stops it. Memory: the
+    /// pending keys of the directory's shard in the range and one path of
+    /// tree nodes, never a list of the entries. `NotADirectory` if `ino` has
+    /// no `.` entry.
+    pub fn for_each_dir_entry(
         &self,
         ino: InodeId,
-        f: impl FnOnce(&mut DirList) -> Result<(R, bool), MetaError>,
-    ) -> Result<R, MetaError> {
-        let mut live = self.cached_dir(ino)?;
-        let (r, changed) = f(live.map.get_mut(&ino).expect("cached_dir caches it"))?;
-        if changed {
-            live.mark_dirty(ino);
+        f: &mut dyn FnMut(&str, InodeId, u8) -> ControlFlow<()>,
+    ) -> Result<(), MetaError> {
+        self.check_dir(ino)?;
+        let (start, end) = dir_range(ino);
+        let mut bad = None;
+        self.dirs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &start, end.as_deref(), &mut |k| {
+            let got = crate::dirent::name_of(k).and_then(|name| {
+                Ok(self.dirs.read(&self.trees, &entry_key(ino, name))?.map(|v| (name, v)))
+            });
+            match got {
+                Ok(Some((name, v))) => f(name, v.ino, v.kind),
+                Ok(None) => ControlFlow::Continue(()),
+                Err(e) => {
+                    bad = Some(e);
+                    ControlFlow::Break(())
+                }
+            }
+        })?;
+        bad.map_or(Ok(()), Err)
+    }
+
+    /// True if directory `ino` has no entry but `.` and `..`: the scan of
+    /// `for_each_dir_entry` stops at the first other name (a few entries
+    /// read, not a listing). `NotADirectory` if `ino` is not a directory.
+    pub fn dir_is_empty(&self, ino: InodeId) -> Result<bool, MetaError> {
+        let mut empty = true;
+        self.for_each_dir_entry(ino, &mut |name, _, _| {
+            if name == "." || name == ".." {
+                ControlFlow::Continue(())
+            } else {
+                empty = false;
+                ControlFlow::Break(())
+            }
+        })?;
+        Ok(empty)
+    }
+
+    /// Delete every entry of directory `ino`, pending and in the tree: scans
+    /// of at most `tree_flush` keys from a resume key, a delete for each, a
+    /// flush between them; no lock is held across a scan.
+    fn delete_dir_entries(&self, ino: InodeId) -> Result<(), MetaError> {
+        let (mut from, end) = dir_range(ino);
+        let batch = self.tree_flush.load(Ordering::Relaxed).max(1);
+        loop {
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            self.dirs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &from, end.as_deref(), &mut |k| {
+                keys.push(k.to_vec());
+                if keys.len() >= batch { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+            })?;
+            let Some(last) = keys.last() else { return Ok(()) };
+            // The next scan starts just after the last key.
+            from = last.clone();
+            from.push(0);
+            for k in &keys {
+                self.dirs.write(DirKey::from_encoded(k)?, None);
+            }
+            self.flush_trees();
         }
-        drop(live);
-        let (flush, full) = (self.dir_live.dirty() >= DIRTY_FLUSH, self.dir_live.len() > DIR_CACHE_MAX);
-        if flush || full {
-            self.flush_dirs();
-        }
-        if full {
-            self.dir_live.evict_clean();
-        }
-        Ok(r)
     }
 
     /// Current metadata of `ino`: the overlay, else the inode tree.
@@ -1014,66 +872,34 @@ impl DictMetadataStore {
         self.changes.fetch_add(1, Ordering::Relaxed);
         // Validate parent exists and is a directory
         check_name(name)?;
+        if name == "." || name == ".." {
+            return Err(MetaError::InvalidName(name.to_string()));
+        }
         let parent_meta = self.get_inode(parent_ino)?;
         if parent_meta.mode & S_IFMT != S_IFDIR {
             return Err(MetaError::NotADirectory(parent_ino));
         }
-        if !self.is_dir(parent_ino) {
-            return Err(MetaError::NotADirectory(parent_ino));
-        }
+        self.check_dir(parent_ino)?;
         let mut dir_meta = meta.clone();
         // Ensure mode has directory type bit
         if dir_meta.mode & S_IFMT != S_IFDIR {
             dir_meta.mode |= S_IFDIR;
         }
         // Take the number first; `inode_alloc` is released before the parent
-        // directory is read or changed (it may come from disk).
+        // directory is read or changed.
         let ino = self.insert_inode(at, &dir_meta)?;
-        // Then the name: if it already exists, the new inode goes again.
-        if let Err(e) = self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true))) {
+        // The `.` and `..` of the new directory, then its name in the parent
+        // (a lookup that finds the name finds a directory): if the name
+        // already exists, the new inode and its entries go again.
+        self.dirs.write(entry_key(ino, "."), Some(DirValue { ino, kind: KIND_DIR }));
+        self.dirs.write(entry_key(ino, ".."), Some(DirValue { ino: parent_ino, kind: KIND_DIR }));
+        if let Err(e) = self.add_entry(parent_ino, name, DirValue { ino, kind: KIND_DIR }) {
             let _ = self.delete_inode(ino);
             return Err(e);
-        }
-        {
-            let mut live = self.dir_live.lock(ino);
-            live.map.insert(ino, DirList::new_dir(ino, parent_ino));
-            live.mark_dirty(ino);
         }
         // The parent gains a link (the ".." of the new directory).
         self.modify_inode(parent_ino, |m| m.nlinks += 1)?;
         Ok(ino)
-    }
-
-    /// True if `ino` is a directory known to the store.
-    fn is_dir(&self, ino: InodeId) -> bool {
-        self.dir_live.lock(ino).map.contains_key(&ino)
-            || self.dir_data.lock().contains_key(&ino)
-    }
-
-    /// Write every dirty cached directory and record its digest in
-    /// `dir_data`, shard by shard: take the dirty entries (they go in
-    /// flight), write them with no shard lock held, then install each digest
-    /// only if the entry still has the ticket of this take (it was not
-    /// changed or deleted meanwhile; else a late install would bring back
-    /// an older or a deleted list).
-    fn flush_dirs(&self) {
-        for i in 0..SHARDS {
-            let taken = self.dir_live.lock_at(i).take(false);
-            if taken.is_empty() {
-                continue;
-            }
-            let mut w = self.writer();
-            let written: Vec<(u64, u64, ObjectKey)> =
-                taken.into_iter().map(|(ino, t, list)| (ino, t, list.intern(&mut w))).collect();
-            self.kept(w);
-            let mut live = self.dir_live.lock_at(i);
-            let mut dir_data = self.dir_data.lock();
-            for (ino, t, d) in written {
-                if live.settle(ino, t) {
-                    dir_data.insert(ino, d);
-                }
-            }
-        }
     }
 
     /// A node writer for one hot-path call (no lock held); give it back to
@@ -1162,8 +988,8 @@ impl DictMetadataStore {
         drop(self.commit_lock.lock());
     }
 
-    /// A commit that took the overlays and live caches failed (or was
-    /// dropped). What it took is dirty again, so the next commit writes it.
+    /// A commit that took the overlays failed (or was dropped). What it
+    /// took is dirty again, so the next commit writes it.
     /// `trees_installed`: the commit already installed the roots of the map
     /// trees (their edits are in the working roots, nothing to requeue, and
     /// the prepared state ended). Every map with an overlay is requeued here:
@@ -1174,9 +1000,9 @@ impl DictMetadataStore {
             self.refcounts.requeue();
             self.xattrs.requeue();
             self.inodes.requeue();
+            self.dirs.requeue();
             self.end_prepared();
         }
-        self.dir_live.requeue();
     }
 
     /// End the prepared state of a commit (flushes may run again).
@@ -1196,6 +1022,7 @@ impl DictMetadataStore {
             && self.refcounts.dirty() < limit
             && self.xattrs.dirty() < limit
             && self.inodes.dirty() < limit
+            && self.dirs.dirty() < limit
         {
             return;
         }
@@ -1203,7 +1030,7 @@ impl DictMetadataStore {
         if self.prepared.load(Ordering::Relaxed) {
             return;
         }
-        let mut results = Vec::with_capacity(4);
+        let mut results = Vec::with_capacity(5);
         if self.manifest.dirty() >= limit {
             results.push(self.manifest.flush(&self.trees, &apply));
         }
@@ -1215,6 +1042,9 @@ impl DictMetadataStore {
         }
         if self.inodes.dirty() >= limit {
             results.push(self.inodes.flush(&self.trees, &apply));
+        }
+        if self.dirs.dirty() >= limit {
+            results.push(self.dirs.flush(&self.trees, &apply));
         }
         for r in results {
             match r {
@@ -1233,9 +1063,8 @@ impl DictMetadataStore {
     }
 
     /// First half of a commit (#108), run while no request changes the store
-    /// (the file system holds its commit gate exclusively): take the dirty
-    /// directories, the edits of every map tree and a copy of the directory
-    /// map, and cut the write log
+    /// (the file system holds its commit gate exclusively): take the edits
+    /// of every map tree, and cut the write log
     /// (`WalStrategy::cut`), so requests after this go to the next
     /// generation. Fast: no node is written and nothing is synced. Waits for
     /// a commit still in `finish_commit`.
@@ -1268,12 +1097,11 @@ impl DictMetadataStore {
         // this commit holds their requests. Later ones are not cleared by it.
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
-        let dirs = self.dir_live.take_all();
         let (inode_root, inodes) = self.inodes.take_for_commit();
+        let (dir_root, dirs) = self.dirs.take_for_commit();
         let (manifest_root, manifest) = self.manifest.take_for_commit();
         // After the takes (IN-01).
         let next_ino = self.inode_alloc.lock().next_ino();
-        let dir_data = self.dir_data.lock().clone();
         let (refcount_root, refcounts) = self.refcounts.take_for_commit();
         let (xattr_root, xattrs) = self.xattrs.take_for_commit();
         Ok(PreparedCommit {
@@ -1283,9 +1111,7 @@ impl DictMetadataStore {
             installed: false,
             changes,
             fail_seq,
-            dirs,
             next_ino,
-            dir_data,
             manifest_root,
             manifest,
             refcount_root,
@@ -1294,6 +1120,8 @@ impl DictMetadataStore {
             xattrs,
             inode_root,
             inodes,
+            dir_root,
+            dirs,
             logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
             inode_count: self.inode_count.load(Ordering::Relaxed),
             snapshots: self.list_snapshots(),
@@ -1306,8 +1134,8 @@ impl DictMetadataStore {
     /// Second half of a commit (#108); requests may run meanwhile. Writes
     /// the nodes of `p`, syncs the chunk store, then logs the root
     /// (`WalStrategy::install_root`). Takes no store lock across a write
-    /// or a sync of more than one node. On an error, the edits and
-    /// directories that `p` took are dirty again.
+    /// or a sync of more than one node. On an error before the install, the
+    /// edits that `p` took are dirty again.
     pub fn finish_commit(&self, mut p: PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
         let r = self.finish_inner(&mut p);
         p.done = r.is_ok();
@@ -1318,26 +1146,19 @@ impl DictMetadataStore {
         let finish_started = std::time::Instant::now();
         let cs = Arc::clone(&self.cs);
         let mut w = NodeWriter::new(Arc::clone(&cs));
-        // Write the changed directories, so the digest map is current.
-        let mut new_dirs = Vec::with_capacity(p.dirs.len());
-        for (ino, t, list) in &p.dirs {
-            let d = list.intern(&mut w);
-            p.dir_data.insert(*ino, d);
-            new_dirs.push((*ino, *t, d));
-        }
 
         // Serialize the state into a root record (layout: `root_rec`):
         //   root_dir_ino (u64), next_ino (u64), the keys of the
         //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
         //   and inode_count (u64).
         let next_ino = p.next_ino;
-        let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
         // The map trees: the taken edits on the cut roots (no flush ran
         // since the cut, so the cut roots are still the working roots).
         let (manifest_root, manifest_apply) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
         let (refcount_root, refcount_apply) = self.refcounts.apply_batch(&self.trees, &p.refcount_root, &p.refcounts)?;
         let (xattr_root, xattr_apply) = self.xattrs.apply_batch(&self.trees, &p.xattr_root, &p.xattrs)?;
         let (inode_root, inode_apply) = self.inodes.apply_batch(&self.trees, &p.inode_root, &p.inodes)?;
+        let (dir_root, dir_apply) = self.dirs.apply_batch(&self.trees, &p.dir_root, &p.dirs)?;
         let tree_stats = |name: &'static str, root: &chunk_store::ObjectId, apply: prolly::ApplyStats| {
             let ctx = self.trees.ctx();
             let tree_err = |e| crate::pmap::tree_err(name, e);
@@ -1352,8 +1173,10 @@ impl DictMetadataStore {
         let refcount_stats = tree_stats("refcounts", &refcount_root, refcount_apply)?;
         let xattr_stats = tree_stats("xattr_data", &xattr_root, xattr_apply)?;
         let inode_stats = tree_stats("inode_data", &inode_root, inode_apply)?;
+        let dir_stats = tree_stats("dir_data", &dir_root, dir_apply)?;
         self.injected_fault(CommitFault::AfterApply)?;
         let inode_data_digest = crate::store_io::to_key(inode_root);
+        let dir_data_digest = crate::store_io::to_key(dir_root);
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = crate::store_io::to_key(xattr_root);
         let refcount_data_digest = crate::store_io::to_key(refcount_root);
@@ -1382,17 +1205,9 @@ impl DictMetadataStore {
             self.refcounts.install_and_settle(refcount_root, &p.refcounts, &apply);
             self.xattrs.install_and_settle(xattr_root, &p.xattrs, &apply);
             self.inodes.install_and_settle(inode_root, &p.inodes, &apply);
+            self.dirs.install_and_settle(dir_root, &p.dirs, &apply);
             p.installed = true;
             self.prepared.store(false, Ordering::Relaxed);
-        }
-
-        // The nodes are stored: the cache may forget the entries that were
-        // not changed again since the cut.
-        for (ino, t, d) in new_dirs {
-            let mut live = self.dir_live.lock(ino);
-            if live.settle(ino, t) {
-                self.dir_data.lock().insert(ino, d);
-            }
         }
 
         self.injected_fault(CommitFault::AfterInstall)?;
@@ -1443,7 +1258,7 @@ impl DictMetadataStore {
         // Update last_root so background GC can use it
         *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
-        let trees = vec![manifest_stats, refcount_stats, xattr_stats, inode_stats];
+        let trees = vec![manifest_stats, refcount_stats, xattr_stats, inode_stats, dir_stats];
         let stats = CommitStats {
             nodes_read: trees.iter().map(|t| t.apply.nodes_read).sum(),
             nodes_written: trees.iter().map(|t| t.apply.nodes_written).sum::<u64>() + 1,
@@ -1723,18 +1538,18 @@ impl MetadataStore for DictMetadataStore {
         // A pending delete, written with the size it had in the same hold of
         // the overlay shard lock (read-modify-write): of two deletes, one
         // counts and the other gets `NotFound`.
-        let size = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
+        let (size, mode) = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
             None => (None, Err(MetaError::NotFound(ino))),
-            Some(m) => (Some(None), Ok(m.size)),
+            Some(m) => (Some(None), Ok((m.size, m.mode))),
         })??;
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
         self.manifest.write(ino, None);
         self.delete_xattrs(ino)?;
-        {
-            let mut live = self.dir_live.lock(ino);
-            live.remove(ino);
-            self.dir_data.lock().remove(&ino);
+        // The entries of a directory (`.` and `..` of an empty one); a file
+        // has none, so its range is not scanned.
+        if mode & S_IFMT == S_IFDIR {
+            self.delete_dir_entries(ino)?;
         }
 
         // Decrement logical_bytes by the deleted inode's size.
@@ -1772,25 +1587,64 @@ impl MetadataStore for DictMetadataStore {
         self.make_directory(parent_ino, name, Some(ino), meta)
     }
 
+    /// Every entry in name byte order (a list: the file system streams its
+    /// readdir replies from `for_each_dir_entry`).
     fn list_directory(&self, ino: InodeId) -> Result<Vec<DirEntry>, MetaError> {
-        self.with_dir(ino, |d| Ok((d.list(), false)))
+        let mut out = Vec::new();
+        self.for_each_dir_entry(ino, &mut |name, child, _| {
+            out.push(DirEntry { name: name.to_string(), ino: child });
+            ControlFlow::Continue(())
+        })?;
+        Ok(out)
     }
 
+    /// One read of the entry; on a miss, one read of the parent's `.` tells
+    /// `NotADirectory` from `NotFound(0)`.
     fn lookup(&self, parent_ino: InodeId, name: &str) -> Result<InodeId, MetaError> {
-        check_name(name)?;
-        self.with_dir(parent_ino, |d| Ok((d.lookup(name), false)))?
-            .map_err(|_| MetaError::NotFound(0))
+        if name.len() > NAME_MAX {
+            return Err(MetaError::NameTooLong(name.len()));
+        }
+        if name.is_empty() {
+            return Err(self.missing_entry(parent_ino));
+        }
+        match self.dirs.read(&self.trees, &entry_key(parent_ino, name))? {
+            Some(v) => Ok(v.ino),
+            None => Err(self.missing_entry(parent_ino)),
+        }
     }
 
+    /// A new name for `ino` in `parent_ino` (`AlreadyExists` if taken; `.`
+    /// and `..` are refused). The type byte comes from the mode of `ino`,
+    /// read before the insert (0 if it has no inode).
     fn link(&self, parent_ino: InodeId, name: &str, ino: InodeId) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
         check_name(name)?;
-        self.with_dir(parent_ino, |d| d.add(name, ino).map(|()| ((), true)))
+        if name == "." || name == ".." {
+            return Err(MetaError::InvalidName(name.to_string()));
+        }
+        self.check_dir(parent_ino)?;
+        let kind = self.inodes.read(&self.trees, &ino)?.map_or(0, |m| kind_of(m.mode));
+        self.add_entry(parent_ino, name, DirValue { ino, kind })
     }
 
+    /// Remove the name (`NotFound(0)` if absent; `.` and `..` are refused).
     fn unlink(&self, parent_ino: InodeId, name: &str) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        self.with_dir(parent_ino, |d| d.remove(name).map(|()| ((), true)))
+        if name == "." || name == ".." {
+            return Err(MetaError::InvalidName(name.to_string()));
+        }
+        if name.is_empty() || name.len() > NAME_MAX {
+            return Err(self.missing_entry(parent_ino));
+        }
+        let found = self.dirs.read_modify_write(&self.trees, &entry_key(parent_ino, name), |cur| match cur {
+            None => (None, false),
+            Some(_) => (Some(None), true),
+        })?;
+        if !found {
+            return Err(self.missing_entry(parent_ino));
+        }
+        self.flush_trees();
+        Ok(())
     }
 
     fn set_manifest(&self, ino: InodeId, blocks: &[ObjectKey]) -> Result<(), MetaError> {
@@ -1859,9 +1713,8 @@ impl MetadataStore for DictMetadataStore {
 }
 
 /// The metadata values that the root record `root` refers to, each a file
-/// value: the record itself and its flat directory map, the directory
-/// nodes, the manifest nodes and the spilled xattr values (metadata, with no
-/// refcount). The nodes of the map trees are not file values and are not
+/// value: the record itself, the manifest nodes and the spilled xattr
+/// values (metadata, with no refcount). The nodes of the map trees are not file values and are not
 /// here (see [`tree_nodes`]); nor are file content keys (see
 /// [`content_keys`]). The GC mark phase (#25) walks the object tree of each.
 pub fn referenced_roots(
@@ -1915,12 +1768,13 @@ pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> 
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let mut out = Vec::new();
     // The order of `for_each_referenced`: the manifest tree, the refcounts,
-    // the xattrs, then the inodes.
+    // the xattrs, the inodes, then the directories.
     for (name, o) in [
         ("manifest_data", root_rec::MANIFEST_DATA),
         ("refcounts", root_rec::REFCOUNTS),
         ("xattr_data", root_rec::XATTR_DATA),
         ("inode_data", root_rec::INODE_DATA),
+        ("dir_data", root_rec::DIR_DATA),
     ] {
         walk_tree(cs, name, &at(o), &mut |id| {
             out.push(id);
@@ -1998,6 +1852,17 @@ fn inode_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
     Ok(())
 }
 
+/// Check a leaf entry of the directory tree (a key of at least 9 bytes and
+/// a 9-byte value, else corrupt).
+fn dir_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
+    if k.len() < 9 || v.len() != 9 {
+        return Err(MetaError::Corrupted(format!(
+            "dir_data tree: entry of a {}-byte key and a {}-byte value", k.len(), v.len()
+        )));
+    }
+    Ok(())
+}
+
 /// The spilled value key of a leaf entry of the xattr tree, if any (a key
 /// of at least 9 bytes and a value that `XattrValue::decode` takes, else
 /// corrupt).
@@ -2014,9 +1879,9 @@ fn xattr_leaf(k: &[u8], v: &[u8]) -> Result<Option<ObjectKey>, MetaError> {
 
 /// Call `f` with each key that the root record `root` refers to, without a
 /// list of them (the GC mark, #207). A key can come more than once. The
-/// map and manifest nodes are read in windows of [`WALK_WINDOW`] bytes of
-/// whole entries, never whole, and the trees with one path of nodes: RAM
-/// does not grow with the entry count. The tree nodes are `Ref::Tree`; a
+/// manifest nodes are read in windows of [`WALK_WINDOW`] bytes of whole
+/// entries, never whole, and the trees with one path of nodes: RAM does
+/// not grow with the entry count. The tree nodes are `Ref::Tree`; a
 /// spilled xattr value is `Ref::Node` (its manifest nodes and chunks).
 pub(crate) fn for_each_referenced(
     io: &mut impl crate::store_io::NodeRead,
@@ -2026,11 +1891,8 @@ pub(crate) fn for_each_referenced(
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let (dirs, manifests) = (at(root_rec::DIR_DATA), at(root_rec::MANIFEST_DATA));
-    for k in [*root, dirs] {
-        f(Ref::Node, k)?;
-    }
-    for_each_map_value(cs, &dirs, &mut |k| f(Ref::Node, k))?;
+    let manifests = at(root_rec::MANIFEST_DATA);
+    f(Ref::Node, *root)?;
     // The manifest tree: its nodes, and per leaf entry the manifest node and
     // its content keys. `f` is used by both callbacks, one at a time.
     let f = std::cell::RefCell::new(f);
@@ -2051,28 +1913,25 @@ pub(crate) fn for_each_referenced(
         }
     })?;
     // The inode tree: its nodes only (the records are inline and hold no key).
-    walk_tree(cs, "inode_data", &at(root_rec::INODE_DATA), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut inode_leaf)
+    walk_tree(cs, "inode_data", &at(root_rec::INODE_DATA), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut inode_leaf)?;
+    // The directory tree: its nodes only (an entry holds an ino, no key).
+    walk_tree(cs, "dir_data", &at(root_rec::DIR_DATA), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut dir_leaf)
 }
 
 /// About how many keys [`for_each_referenced`] gives to the sorter for
 /// `root` (tree nodes go straight to the live set), from the sizes of its
-/// maps (no map is read whole): the 2 file-value nodes of the root (the
-/// root record and its flat directory map), one key per entry of that map,
-/// nothing for the inode tree (its nodes are not sorted), for each entry
+/// maps (no map is read whole): the root record (the one file-value node of
+/// the root), nothing for the inode and directory trees (their nodes are
+/// not sorted), for each entry
 /// of the manifest tree (`prolly::count`, the root node only) its manifest
 /// and one content key (a file with more extents gives more), and at most
 /// one spilled value per entry of the xattr tree. For the temp space check
 /// of the GC mark.
 pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
-    const WHAT: &str = "u64-digest map node";
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 2u64;
-    let key = at(root_rec::DIR_DATA);
-    let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
-        .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
-    keys = keys.saturating_add(r.len().saturating_sub(8) / MAP_ENTRY as u64);
+    let keys = 1u64;
     let manifests = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::MANIFEST_DATA)))
         .map_err(|e| crate::pmap::tree_err("manifest_data", e))?;
     let xattrs = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::XATTR_DATA)))
@@ -2080,7 +1939,7 @@ pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root:
     Ok(keys.saturating_add(manifests.saturating_mul(2)).saturating_add(xattrs))
 }
 
-/// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
+/// Bytes of a manifest node that [`for_each_referenced`] reads at a
 /// time (rounded down to whole entries). Tiny in tests, so that a small
 /// node takes many windows.
 const WALK_WINDOW: usize = if cfg!(test) { 100 } else { 1 << 20 };
@@ -2123,29 +1982,6 @@ fn for_each_window(
     Ok(())
 }
 
-/// Call `f` with the key of each entry of the u64-digest map node `key`, in
-/// the stored order. The checks of [`load_u64_digest_map`], but the node
-/// is read in windows.
-fn for_each_map_value(
-    cs: &ChunkStore,
-    key: &ObjectKey,
-    f: &mut dyn FnMut(ObjectKey) -> Result<(), MetaError>,
-) -> Result<(), MetaError> {
-    const WHAT: &str = "u64-digest map node";
-    let mut r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(key))
-        .map_err(|e| crate::store_io::node_err(WHAT, key, e))?;
-    let len = r.len();
-    let head = if len >= 8 { r.read(cs, 0, 8).map_err(|e| crate::store_io::node_err(WHAT, key, e))? } else { Vec::new() };
-    if head.len() < 8 {
-        return Err(MetaError::Corrupted(format!("u64-digest map: expected at least 8 bytes, got {len}")));
-    }
-    let (count, expected) = map_size(&head);
-    if expected.map(|e| e as u64) != Some(len) {
-        return Err(MetaError::Corrupted(format!("u64-digest map: {len} bytes cannot hold {count} entries")));
-    }
-    for_each_window(cs, &mut r, WHAT, 8, MAP_ENTRY, &mut |e| f(parse_key(&e[8..MAP_ENTRY])))
-}
-
 /// Call `f` with each key of the manifest node `key` (the checks of
 /// [`load_manifest`], but the node is read in windows).
 fn for_each_manifest_key(
@@ -2181,70 +2017,13 @@ fn put_digest(buf: &mut Vec<u8>, d: &ObjectKey) {
     buf.extend_from_slice(&d.0);
 }
 
-// ─── helpers for BTreeMap<u64, ObjectKey> serialization ─────────────────────
-
-/// Serialize a `BTreeMap<u64, ObjectKey>` and store it as a node (`NodeWrite`).
-///
-/// Format: `[count: u64 LE][for each entry: u64 LE ino + ObjectKey]`
-/// The entry count of a map node and the size it needs (`None` if the size
-/// overflows: the count is untrusted, see #64). The caller checks
-/// `bytes.len() >= 8` first.
-fn map_size(bytes: &[u8]) -> (u64, Option<usize>) {
-    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-    let size = usize::try_from(count).ok().and_then(|n| n.checked_mul(MAP_ENTRY)).and_then(|s| s.checked_add(8));
-    (count, size)
-}
-
-/// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
-fn intern_u64_digest_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<u64, ObjectKey>) -> ObjectKey {
-    let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
-    bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
-    for (ino, digest) in map {
-        bytes.extend_from_slice(&ino.to_le_bytes());
-        put_digest(&mut bytes, digest);
-    }
-    (storage).put_node(&bytes)
-}
-
-/// Read and deserialize a `BTreeMap<u64, ObjectKey>` node (`NodeRead`).
-fn load_u64_digest_map(
-    io: &mut impl crate::store_io::NodeRead,
-    key: &ObjectKey,
-) -> Result<BTreeMap<u64, ObjectKey>, MetaError> {
-    let bytes = (io).get_node(key)
-        .map_err(|e| crate::store_io::node_err("u64-digest map node", key, e))?;
-
-    if bytes.len() < 8 {
-        return Err(MetaError::Corrupted(format!(
-            "u64-digest map: expected at least 8 bytes, got {}",
-            bytes.len()
-        )));
-    }
-    let (count, expected) = map_size(&bytes);
-    if Some(bytes.len()) != expected {
-        return Err(MetaError::Corrupted(format!(
-            "u64-digest map: {} bytes cannot hold {} entries",
-            bytes.len(), count
-        )));
-    }
-
-    let mut map = BTreeMap::new();
-    for i in 0..count as usize { // checked by map_size
-        let off = 8 + i * MAP_ENTRY;
-        let ino = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-        let digest = parse_key(&bytes[off + 8..off + MAP_ENTRY]);
-        map.insert(ino, digest);
-    }
-    Ok(map)
-}
-
 impl DictMetadataStore {
     /// Reconstruct a `DictMetadataStore` from the node store and a root key
     /// previously returned by `commit()`.
     ///
-    /// Restores the in-memory directory map (dir_data), the working roots
-    /// of the inode, manifest, refcount and xattr trees and the inode
-    /// numbering state so that subsequent operations continue seamlessly.
+    /// Restores the working roots of the inode, directory, manifest,
+    /// refcount and xattr trees and the inode numbering state so that
+    /// subsequent operations continue seamlessly.
     /// The counts come from the root record; the root inode is checked with
     /// one tree read (no walk).
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
@@ -2272,8 +2051,6 @@ impl DictMetadataStore {
         let mut inode_alloc = InodeAlloc::new();
         inode_alloc.set_next_ino(next_ino);
 
-        let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
-
         let cs = Arc::clone(io_guard.store());
         let trees = TreeIo::new(Arc::clone(&cs), io_guard.node_cache(), io_guard.tree_config());
         drop(io_guard);
@@ -2287,6 +2064,9 @@ impl DictMetadataStore {
             )));
         }
 
+        // The working root; no entry is read here.
+        let dirs = MapTree::with_sites("dir_data", Site::DirLive, Site::DirData, crate::store_io::to_id(&dir_data_digest));
+
         Ok(DictMetadataStore {
             io,
             cs,
@@ -2295,8 +2075,7 @@ impl DictMetadataStore {
             put_error: lk(None),
             inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inodes,
-            dir_data: lk(dir_data).timed(Site::DirData),
-            dir_live: Sharded::new(Site::DirLive),
+            dirs,
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
             // The working root; no manifest is read here.
@@ -2332,26 +2111,6 @@ fn parse_key(bytes: &[u8]) -> ObjectKey {
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod map_decode_tests {
-    use super::*;
-    use crate::store_io::{NodeWrite, StoreIo};
-
-    // A map node with an entry count whose size overflows is corrupt
-    // metadata: an error, never a panic or a wrapped length.
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn a_map_with_an_overflowing_count_is_corrupt() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut io = StoreIo::open(dir.path()).unwrap();
-        for n in [u64::MAX, 1u64 << 63, u64::MAX / MAP_ENTRY as u64 + 1, 1] {
-            let key = io.put_node(&n.to_le_bytes());
-            let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_u64_digest_map(&mut io, &key)));
-            assert!(matches!(a, Ok(Err(MetaError::Corrupted(_)))), "u64-key map, count {n}");
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
 
     #[test]
@@ -2368,7 +2127,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn cached_dirs_and_inodes_survive_eviction_commit_and_reload() {
+    fn dirs_and_inodes_survive_flushes_commit_and_reload() {
         let tmp = tempfile::tempdir().unwrap();
         let io = Arc::new(Mutex::new(StoreIo::open(tmp.path()).unwrap()));
         let store = DictMetadataStore::new(io.clone());
@@ -2387,12 +2146,11 @@ mod tests {
             }
             store.unlink(dir, "f0").unwrap();
         }
-        // The cache and the overlay stayed bounded, and every change is
+        // The overlays stayed bounded (dirty entries are written in
+        // batches, so the final commit stays small), and every change is
         // still visible.
-        assert!(store.dir_live.len() <= DIR_CACHE_MAX + 1);
-        // Dirty entries are written in batches, so the final commit stays small.
         assert!(store.inodes.dirty() < TREE_FLUSH);
-        assert!(store.dir_live.dirty() < DIRTY_FLUSH);
+        assert!(store.dirs.dirty() < TREE_FLUSH);
         let check = |s: &DictMetadataStore| {
             for (dir, name, ino, size) in &expect {
                 if name == "f0" {
@@ -2844,6 +2602,215 @@ mod tests {
         // Inode 9999 doesn't exist as a directory
         let result = store.list_directory(9999);
         assert!(result.is_err());
+    }
+
+    /// The names of `ino` in listing order.
+    fn names(store: &DictMetadataStore, ino: u64) -> Vec<String> {
+        store.list_directory(ino).unwrap().into_iter().map(|e| e.name).collect()
+    }
+
+    /// The stored entry `dir`/`name` (overlay, then tree).
+    fn dir_entry(store: &DictMetadataStore, dir: u64, name: &str) -> Option<DirValue> {
+        store.dirs.read(&store.trees, &entry_key(dir, name)).unwrap()
+    }
+
+    /// The keys of the committed directory tree in the range of `dir`.
+    fn tree_dir_keys(store: &DictMetadataStore, dir: u64) -> Vec<Vec<u8>> {
+        let (s, e) = dir_range(dir);
+        let root = store.dirs.root();
+        prolly::range(&store.trees.ctx(), &root, &s, e.as_deref()).unwrap().map(|r| r.unwrap().0).collect()
+    }
+
+    // A listing merges the tree with the pending edits of the directory, in
+    // name byte order, before a flush, after it and after a reload.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn listing_merges_pending_edits() {
+        let (_dir, store) = make_store();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        for n in ["c", "a", "b"] {
+            let ino = store.create_inode(&new_file_meta()).unwrap();
+            store.link(d, n, ino).unwrap();
+        }
+        store.commit().unwrap();
+        assert_eq!(store.dirs.dirty(), 0);
+        store.unlink(d, "b").unwrap();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        store.link(d, "d", ino).unwrap();
+        assert!(store.dirs.dirty() > 0, "the edits are pending");
+        let want = [".", "..", "a", "c", "d"];
+        assert_eq!(names(&store, d), want);
+        let apply = store.apply_lock.lock();
+        store.dirs.flush(&store.trees, &apply).unwrap();
+        drop(apply);
+        assert_eq!(store.dirs.dirty(), 0);
+        assert_eq!(names(&store, d), want, "after a flush");
+        let root = store.commit().unwrap();
+        let re = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(names(&re, d), want, "after a reload");
+        assert_eq!(re.lookup(d, "d").unwrap(), ino);
+    }
+
+    // `.` and `..` are stored entries; `set_parent` moves `..`; `is_dir`
+    // reads `.`.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn dot_and_dotdot_are_entries() {
+        let (_dir, store) = make_store();
+        let a = store.create_directory(1, "a", &new_dir_meta()).unwrap();
+        let b = store.create_directory(a, "b", &new_dir_meta()).unwrap();
+        let entries = store.list_directory(b).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!((entries[0].name.as_str(), entries[0].ino), (".", b));
+        assert_eq!((entries[1].name.as_str(), entries[1].ino), ("..", a));
+        assert_eq!(store.lookup(b, "..").unwrap(), a);
+        assert_eq!(store.lookup(b, ".").unwrap(), b);
+        assert_eq!(store.lookup(1, "..").unwrap(), 1, "the root is its own parent");
+        store.set_parent(b, 1).unwrap();
+        assert_eq!(store.lookup(b, "..").unwrap(), 1);
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        store.link(a, "f", f).unwrap();
+        assert!(!store.is_dir(f).unwrap());
+        assert!(store.is_dir(b).unwrap() && store.is_dir(1).unwrap());
+        assert!(matches!(store.set_parent(f, 1), Err(MetaError::NotADirectory(_))));
+        // `.` and `..` are not names a caller can add or remove.
+        assert!(matches!(store.unlink(b, "."), Err(MetaError::InvalidName(_))));
+        assert!(matches!(store.unlink(b, ".."), Err(MetaError::InvalidName(_))));
+        assert!(matches!(store.link(b, ".", f), Err(MetaError::InvalidName(_))));
+        assert!(store.is_dir(b).unwrap());
+        let root = store.commit().unwrap();
+        let re = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(re.lookup(b, "..").unwrap(), 1);
+        assert!(re.is_dir(b).unwrap() && !re.is_dir(f).unwrap());
+    }
+
+    // A taken name is `AlreadyExists` and a missing one `NotFound`, whether
+    // the entry is pending or only in the tree; a lookup or an unlink in a
+    // file is `NotADirectory`.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn link_refuses_a_taken_name_and_unlink_a_missing_one() {
+        let (_dir, store) = make_store();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        store.link(1, "pending", f).unwrap();
+        assert!(store.dirs.dirty() > 0);
+        assert!(matches!(store.link(1, "pending", f), Err(MetaError::AlreadyExists(_))), "pending");
+        store.link(1, "tree", f).unwrap();
+        store.commit().unwrap();
+        assert_eq!(store.dirs.dirty(), 0, "the overlay is empty");
+        assert!(matches!(store.link(1, "tree", f), Err(MetaError::AlreadyExists(_))), "in the tree only");
+        store.unlink(1, "tree").unwrap();
+        assert!(matches!(store.unlink(1, "tree"), Err(MetaError::NotFound(0))), "a pending delete");
+        store.link(1, "tree", f).unwrap();
+        store.commit().unwrap();
+        assert!(matches!(store.unlink(1, "nope"), Err(MetaError::NotFound(0))), "absent from the tree");
+        assert!(matches!(store.lookup(1, "nope"), Err(MetaError::NotFound(0))));
+        assert!(matches!(store.lookup(f, "x"), Err(MetaError::NotADirectory(_))));
+        assert!(matches!(store.unlink(f, "x"), Err(MetaError::NotADirectory(_))));
+        assert!(matches!(store.link(f, "x", f), Err(MetaError::NotADirectory(_))));
+        assert!(matches!(store.list_directory(f), Err(MetaError::NotADirectory(_))));
+        assert!(matches!(store.dir_is_empty(f), Err(MetaError::NotADirectory(_))));
+    }
+
+    // The type byte of an entry is the type of the child mode (DT_*).
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn the_entry_type_is_the_child_mode() {
+        let (_dir, store) = make_store();
+        let f = store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100_644)).unwrap();
+        store.link(1, "f", f).unwrap();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        let l = store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o120_777)).unwrap();
+        store.link(1, "l", l).unwrap();
+        store.link(1, "ghost", 9999).unwrap();
+        assert_eq!(dir_entry(&store, 1, "f"), Some(DirValue { ino: f, kind: 8 }));
+        assert_eq!(dir_entry(&store, 1, "d"), Some(DirValue { ino: d, kind: 4 }));
+        assert_eq!(dir_entry(&store, 1, "l"), Some(DirValue { ino: l, kind: 10 }));
+        assert_eq!(dir_entry(&store, 1, "ghost"), Some(DirValue { ino: 9999, kind: 0 }), "no inode: 0");
+        store.commit().unwrap();
+        let mut kinds = Vec::new();
+        store.for_each_dir_entry(1, &mut |n, _, k| {
+            kinds.push((n.to_string(), k));
+            ControlFlow::Continue(())
+        }).unwrap();
+        let want: Vec<(String, u8)> = [(".", 4), ("..", 4), ("d", 4), ("f", 8), ("ghost", 0), ("l", 10)]
+            .into_iter().map(|(n, k)| (n.to_string(), k)).collect();
+        assert_eq!(kinds, want, "from the tree");
+    }
+
+    // `delete_inode` of a directory deletes all of its entries, pending and
+    // in the tree, in batches of the flush limit.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn deleting_a_directory_deletes_its_entries() {
+        let (_dir, store) = make_store();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        let other = store.create_directory(1, "other", &new_dir_meta()).unwrap();
+        store.unlink(1, "d").unwrap();
+        store.delete_inode(d).unwrap();
+        store.commit().unwrap();
+        assert!(tree_dir_keys(&store, d).is_empty(), "the `.` and `..` of an empty directory");
+        assert!(matches!(store.list_directory(d), Err(MetaError::NotADirectory(_))));
+        // A directory with committed and pending names (past `TREE_FLUSH`).
+        let big = store.create_directory(1, "big", &new_dir_meta()).unwrap();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        for i in 0..30 {
+            store.link(big, &format!("n{i:02}"), f).unwrap();
+        }
+        store.commit().unwrap();
+        store.link(big, "late", f).unwrap();
+        assert_eq!(tree_dir_keys(&store, big).len(), 32);
+        store.delete_inode(big).unwrap();
+        store.commit().unwrap();
+        assert!(tree_dir_keys(&store, big).is_empty());
+        assert_eq!(tree_dir_keys(&store, other).len(), 2, "another directory keeps its entries");
+        assert_eq!(names(&store, other), [".", ".."]);
+    }
+
+    // An empty name is refused at a create; a 255-byte name links and looks
+    // up, a 256-byte one is too long.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_empty_name_is_refused() {
+        let (_dir, store) = make_store();
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        assert!(matches!(store.link(1, "", f), Err(MetaError::InvalidName(_))));
+        assert!(matches!(store.create_directory(1, "", &new_dir_meta()), Err(MetaError::InvalidName(_))));
+        assert!(matches!(store.lookup(1, ""), Err(MetaError::NotFound(0))));
+        assert!(matches!(store.unlink(1, ""), Err(MetaError::NotFound(0))));
+        let long = "x".repeat(NAME_MAX);
+        store.link(1, &long, f).unwrap();
+        assert_eq!(store.lookup(1, &long).unwrap(), f);
+        let root = store.commit().unwrap();
+        let re = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(re.lookup(1, &long).unwrap(), f);
+        let longer = "x".repeat(NAME_MAX + 1);
+        assert!(matches!(re.link(1, &longer, f), Err(MetaError::NameTooLong(256))));
+        assert!(matches!(re.lookup(1, &longer), Err(MetaError::NameTooLong(256))));
+    }
+
+    // A directory is empty with only `.` and `..`, also when other names
+    // sort before `.` in byte order.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn dir_is_empty_stops_at_the_first_other_name() {
+        let (_dir, store) = make_store();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        assert!(store.dir_is_empty(d).unwrap());
+        let f = store.create_inode(&new_file_meta()).unwrap();
+        for n in ["+x", "-a", "!"] {
+            store.link(d, n, f).unwrap();
+            assert!(!store.dir_is_empty(d).unwrap(), "{n}");
+            assert_eq!(names(&store, d)[0], n, "{n} sorts before `.`");
+            store.unlink(d, n).unwrap();
+            assert!(store.dir_is_empty(d).unwrap(), "{n} removed");
+        }
+        store.link(d, "z", f).unwrap();
+        store.commit().unwrap();
+        assert!(!store.dir_is_empty(d).unwrap(), "in the tree");
+        store.unlink(d, "z").unwrap();
+        assert!(store.dir_is_empty(d).unwrap(), "a pending delete hides it");
+        assert!(store.dir_is_empty(1).is_ok_and(|e| !e), "the root has d");
     }
 
     // ── persistence round-trip tests (Task 2) ─────────────────────────────────
@@ -3610,7 +3577,7 @@ mod tests {
         assert!(store.create_inode(&new_file_meta()).unwrap() >= 8);
         assert!(matches!(store.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
         assert!(matches!(store.create_inode_at(1, &new_file_meta()), Err(MetaError::AlreadyExists(1))));
-        // Taken after a commit and a reload too (the digest maps have it).
+        // Taken after a commit and a reload too (the inode tree has it).
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert!(matches!(reloaded.create_inode_at(7, &new_file_meta()), Err(MetaError::AlreadyExists(7))));
@@ -3650,12 +3617,13 @@ mod tests {
     /// The longest wait of a test for one step.
     const LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    // LOCK-01: thread A loads a directory that is not cached, and its pack
-    // read is held. Thread B changes a cached inode, creates one, and looks
-    // up a name in another (cached) directory: none of it waits for A.
+    // LOCK-01: thread A looks up a name in a directory whose tree leaf is
+    // not cached, and its pack read is held. Thread B changes a cached
+    // inode, creates one, and looks up a name in another directory (cached
+    // nodes): none of it waits for A.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
-    fn cold_dir_load_does_not_block_other_inodes() {
+    fn cold_dir_read_does_not_block_other_inodes() {
         use chunk_store::mem::{Hold, MemIo};
         use std::sync::mpsc;
         let mem = MemIo::new();
@@ -3664,11 +3632,18 @@ mod tests {
         let b_dir = store.create_directory(1, "b", &new_dir_meta()).unwrap();
         let f = store.create_inode(&new_file_meta()).unwrap();
         store.link(a_dir, "n", f).unwrap();
+        // Many names in `a`, so its entries and those of `b` are in other
+        // leaves of the directory tree.
+        for i in 0..2000 {
+            store.link(a_dir, &format!("p{i:04}"), f).unwrap();
+        }
         store.link(b_dir, "m", f).unwrap();
-        let shard = |ino: u64| ino % SHARDS as u64;
-        assert!(shard(a_dir) != shard(b_dir) && shard(a_dir) != shard(f), "other shards");
         let root = store.commit().unwrap();
-        // A new store from the root: every cache is empty.
+        let dirs = crate::store_io::to_id(&parse_key(&store.reader().get_node(&root).unwrap()[root_rec::DIR_DATA..root_rec::DIR_DATA + KEY_BYTES]));
+        assert!(prolly::height(&prolly::Ctx::uncached(&store.cs), &dirs).unwrap() >= 2, "more than one leaf");
+        // A new store from the root, with an empty node cache.
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", cs)));
         let store = DictMetadataStore::load_from_root(io, &root).unwrap();
         assert_eq!(store.lookup(b_dir, "m").unwrap(), f);
         store.get_inode(f).unwrap();
@@ -3941,8 +3916,8 @@ mod tests {
         assert_eq!(reloaded.inode_count(), count_before,
             "inode_count should match original after load_from_root round-trip");
     }
-    /// The walk of the GC mark reads the map and manifest nodes in tiny
-    /// windows (in tests) and gives the keys of the whole-node loads.
+    /// The walk of the GC mark reads the manifest nodes in tiny windows (in
+    /// tests) and gives the keys of the whole-node loads.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn the_windowed_walk_gives_the_keys_of_the_whole_nodes() {
@@ -3969,8 +3944,7 @@ mod tests {
         // The keys of whole-node loads, as the mark had them before #207.
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-        let mut want = vec![root, at(root_rec::DIR_DATA)];
-        want.extend(load_u64_digest_map(&mut io, &at(root_rec::DIR_DATA)).unwrap().into_values());
+        let mut want = vec![root];
         // The manifests: the values of the manifest tree, in key order.
         let mut want_content = Vec::new();
         let tree = crate::store_io::to_id(&at(root_rec::MANIFEST_DATA));
@@ -3993,7 +3967,7 @@ mod tests {
         let (nodes, content) = referenced(&mut io, &root).unwrap();
         assert_eq!(nodes, want);
         assert_eq!(content, want_content);
-        assert!(want.len() > 2 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
+        assert!(want_content.len() > 100 / KEY_BYTES, "many windows");
         // The tree nodes come apart from the file values (`Ref::Tree`).
         let mut trees = Vec::new();
         for_each_referenced(&mut io, &root, &mut |r, k| {
@@ -4014,25 +3988,28 @@ mod tests {
         let xi = trees.iter().position(|k| *k == xattrs).expect("the xattr tree is in the tree nodes");
         assert!(trees.iter().position(|k| *k == refcounts).unwrap() < xi, "manifest, refcounts, then xattrs");
         assert!(!nodes.contains(&xattrs));
-        // The inode tree last: its nodes are tree nodes, its records inline.
+        // Then the inode tree: its nodes are tree nodes, its records inline.
         let inodes = at(root_rec::INODE_DATA);
         assert_eq!(prolly::count(&prolly::Ctx::uncached(&cs), &crate::store_io::to_id(&inodes)).unwrap(), 41);
         let ii = trees.iter().position(|k| *k == inodes).expect("the inode tree is in the tree nodes");
         assert!(xi < ii, "manifest, refcounts, xattrs, then inodes");
         assert!(!nodes.contains(&inodes), "and not a file value");
+        // The directory tree last (`.`, `..` and 40 names of the root).
+        let dirs = at(root_rec::DIR_DATA);
+        assert_eq!(prolly::count(&prolly::Ctx::uncached(&cs), &crate::store_io::to_id(&dirs)).unwrap(), 42);
+        let di = trees.iter().position(|k| *k == dirs).expect("the directory tree is in the tree nodes");
+        assert!(ii < di, "inodes, then directories");
+        assert!(!nodes.contains(&dirs), "and not a file value");
+        assert!(dir_leaf(&[0; 8], &[0; 9]).is_err(), "no name");
+        assert!(dir_leaf(&[0; 9], &[0; 8]).is_err(), "short value");
+        dir_leaf(&[0; 9], &[0; 9]).unwrap();
         // A bad xattr leaf entry is corrupt.
         assert!(xattr_leaf(&[1, 2, 3], &[0]).is_err(), "short key");
         assert!(xattr_leaf(&[0; 9], &[2]).is_err(), "bad tag");
         assert_eq!(xattr_leaf(&[0; 9], &[0, 1]).unwrap(), None);
 
-        // A map node whose count does not fit its length is refused.
-        let mut bad = 3u64.to_le_bytes().to_vec();
-        bad.extend_from_slice(&[0u8; MAP_ENTRY * 2]);
-        let bad = crate::store_io::put_value(io.chunk_store(), &bad).unwrap();
-        let e = for_each_map_value(io.chunk_store(), &bad, &mut |_| Ok(())).unwrap_err();
-        assert!(e.to_string().contains("cannot hold 3 entries"), "{e}");
+        // A manifest node whose length is not whole keys is refused.
         let short = crate::store_io::put_value(io.chunk_store(), &[1, 2, 3]).unwrap();
-        assert!(for_each_map_value(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
         assert!(for_each_manifest_key(io.chunk_store(), &short, &mut |_| Ok(())).is_err());
     }
 
@@ -4171,7 +4148,7 @@ mod tests {
             assert!(store.refcounts.dirty() > 0, "{fault:?}: the refcount overlay is dirty again");
             assert!(store.xattrs.dirty() > 0, "{fault:?}: the xattr overlay is dirty again");
             assert!(store.inodes.dirty() > 0, "{fault:?}: the inode overlay is dirty again");
-            assert!(store.dir_live.dirty() > 0, "{fault:?}");
+            assert!(store.dirs.dirty() > 0, "{fault:?}: the directory overlay is dirty again");
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}: flushes may run again");
             // The state is still readable.
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)]);
@@ -4231,6 +4208,7 @@ mod tests {
             assert_eq!(store.refcounts.dirty(), 0, "{fault:?}: the counts are in the tree");
             assert_eq!(store.xattrs.dirty(), 0, "{fault:?}: the xattrs are in the tree");
             assert_eq!(store.inodes.dirty(), 0, "{fault:?}: the inodes are in the tree");
+            assert_eq!(store.dirs.dirty(), 0, "{fault:?}: the entries are in the tree");
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)], "{fault:?}");
             assert!(store.get_manifest(files[11]).is_err(), "{fault:?}");
 
