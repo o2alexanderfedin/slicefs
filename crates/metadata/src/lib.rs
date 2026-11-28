@@ -19,3 +19,5 @@ pub mod gc;
 pub mod snapshot;
 pub mod rehash;
 mod pmap;
+#[doc(hidden)]
+pub mod testkit;
