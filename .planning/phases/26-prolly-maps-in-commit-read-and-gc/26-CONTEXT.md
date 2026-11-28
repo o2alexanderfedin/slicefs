@@ -28,6 +28,9 @@ Not in this phase: store migration (Phase 27), crash/soak tests of a live mount 
 ### PMAP-07 target (owner, 2026-11-27)
 - The 1/5 target applies to the pre-sync work of a one-change commit at 1,000,000 inodes (CPU time and nodes read and written, sync excluded). The total wall time, sync included, must be lower than flat; the owner said "even 0.7x is a good change", so a sync-bound total such as 0.7x passes. Both numbers are measured and recorded; the rule file is committed before any measurement.
 
+### PMAP-07 Boost rows (owner, 2026-11-27)
+- No early optimization: prolly was chosen for data scalability. Checks A and B decide PMAP-07. Check C (the 9 Boost rows) is measured and recorded but does not block; a Boost row where prolly is not better (for example insert/delete at K = 100) is recorded as an accepted cost. No tuning or re-runs follow from check C. Recorded in `runs/pmap07-owner-amendment.md` before any decision run; the frozen rule file and script are not changed.
+
 ### Carried from Phase 25 (locked)
 - Layout a (five trees), constants L=8192 / NODE_MAX=16384 / NODE_MIN=512 / MAX_ENTRY=2048 / MAX_KEY=1024, integer boundary rule with `RULE_VERSION` 1, optional boundary salt, store format 8, 197-byte root record with five map keys and `next_ino`.
 - Design target 1B+ inodes; counts from internal entry counts or the root record, never a full leaf walk.
