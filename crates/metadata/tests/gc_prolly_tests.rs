@@ -14,6 +14,8 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 /// Offset of the manifest tree root in the root record (pinned by the
 /// `root_record_layout` unit test): root dir ino, next ino, inode and dir maps.
 const MANIFEST_DATA: usize = 8 + 8 + 2 * KEY_BYTES;
+/// Offset of the xattr tree root: after the manifest field.
+const XATTR_DATA: usize = MANIFEST_DATA + KEY_BYTES;
 /// Offset of the refcount tree root: after the manifest and xattr fields.
 const REFCOUNTS: usize = MANIFEST_DATA + 2 * KEY_BYTES;
 
@@ -81,10 +83,12 @@ fn manifest_tree_end_to_end() {
     let (nodes_a, nodes_b) = (nodes_of(&cs, &tree_a), nodes_of(&cs, &tree_b));
     let mut io_r = NodeReader(Arc::clone(&cs));
     let listed: BTreeSet<_> = tree_nodes(&mut io_r, &b).unwrap().iter().map(to_id).collect();
-    // The refcount tree (plan 26-07) is in the list too.
+    // The refcount tree (plan 26-07) and the xattr tree (26-15) are in the
+    // list too.
     let rec = get_value(&cs, &b).unwrap();
-    let refcounts = chunk_store::ObjectId(rec[REFCOUNTS..REFCOUNTS + KEY_BYTES].try_into().unwrap());
-    let want: BTreeSet<_> = nodes_b.union(&nodes_of(&cs, &refcounts)).copied().collect();
+    let field = |o: usize| chunk_store::ObjectId(rec[o..o + KEY_BYTES].try_into().unwrap());
+    let mut want: BTreeSet<_> = nodes_b.union(&nodes_of(&cs, &field(REFCOUNTS))).copied().collect();
+    want.extend(nodes_of(&cs, &field(XATTR_DATA)));
     assert_eq!(listed, want, "tree_nodes lists the nodes of the trees");
     let old: Vec<_> = nodes_a.difference(&nodes_b).copied().collect();
     assert!(!old.is_empty(), "B rewrote nodes of A");
@@ -166,4 +170,52 @@ fn nodes_of_a_flush_after_gc_begin_survive_the_sweep() {
     for ino in &inos {
         assert_eq!(store.manifest_digest(*ino), Some(digest), "inode {ino}");
     }
+}
+
+/// A spilled xattr value is a metadata value of the xattr tree: a full GC
+/// keeps it while an entry refers to it, and frees it after the entry is
+/// replaced, or after its inode is deleted (T-26-20).
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+fn a_spilled_xattr_value_lives_while_referenced() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
+    let cs = Arc::clone(io.lock().unwrap().store());
+    let store = DictMetadataStore::new(Arc::clone(&io));
+    let r = store.root_ino();
+    let file = |name: &str| {
+        let ino = store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap();
+        store.link(r, name, ino).unwrap();
+        ino
+    };
+    let (a, b, c) = (file("a"), file("b"), file("c"));
+    let big = |seed: u32| -> Vec<u8> { (0..200u32 << 10).map(|i| (i.wrapping_mul(seed).wrapping_add(i >> 7) >> 3) as u8).collect() };
+    let (big_a, big_c) = (big(2_654_435_761), big(40_503));
+    store.set_xattr(a, "user.big", &big_a).unwrap();
+    store.set_xattr(b, "user.small", &[5u8; 50]).unwrap();
+    store.set_xattr(c, "user.big", &big_c).unwrap();
+    // The root object of a spilled value: put_value of the same bytes
+    // (a spilled value is stored like file content) gives the same key.
+    let key_a = put_value(&cs, &big_a).unwrap();
+    let key_c = put_value(&cs, &big_c).unwrap();
+    let root = store.commit().unwrap();
+    full_gc(&cs, &[root]);
+    assert_eq!(store.get_xattr(a, "user.big").unwrap(), big_a, "kept while referenced");
+    assert_eq!(store.get_xattr(c, "user.big").unwrap(), big_c);
+    assert_eq!(store.get_xattr(b, "user.small").unwrap(), [5u8; 50]);
+
+    // Replaced by a short value: the old value is freed.
+    store.set_xattr(a, "user.big", &[1u8; 50]).unwrap();
+    // The inode of c is deleted: its value is freed.
+    store.unlink(r, "c").unwrap();
+    store.delete_inode(c).unwrap();
+    let root = store.commit().unwrap();
+    full_gc(&cs, &[root]);
+    assert!(matches!(cs.read(&to_id(&key_a)), Err(chunk_store::Error::Missing(_))), "the replaced value is freed");
+    assert!(matches!(cs.read(&to_id(&key_c)), Err(chunk_store::Error::Missing(_))), "the value of a deleted inode is freed");
+    assert_eq!(store.get_xattr(a, "user.big").unwrap(), [1u8; 50]);
+    assert_eq!(store.get_xattr(b, "user.small").unwrap(), [5u8; 50]);
+    let store = DictMetadataStore::load_from_root(Arc::clone(&io), &root).unwrap();
+    assert_eq!(store.get_xattr(a, "user.big").unwrap(), [1u8; 50]);
+    assert!(store.list_xattrs(c).unwrap().is_empty());
 }

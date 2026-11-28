@@ -282,3 +282,162 @@ fn a_failed_chunk_store_sync_stops_writes_until_a_remount() {
     let loaded = DictMetadataStore::load_from_root(io, &b).unwrap();
     check_tree(&loaded, &cs, &b, &state_b, "root B after the remount");
 }
+
+/// Offset of the xattr tree root in the root record: after the manifest field.
+const XATTR_DATA: usize = MANIFEST_DATA + KEY_BYTES;
+
+/// The xattrs that a root must hold: (ino, name) -> value.
+type Xattrs = BTreeMap<(u64, String), Vec<u8>>;
+
+/// Seeded bytes (xorshift).
+fn noise(seed: u64, n: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// Validate the xattrs of `root`, as loaded by `meta`, against `want` with
+/// the bounded calls: the names of each of `inos` in byte order, each
+/// length, each value read whole and a large one also at two offsets; every
+/// node of the xattr tree reads and passes the prolly checks, it holds
+/// exactly `want.len()` entries, and the first 8 key bytes of each entry are
+/// an inode.
+fn check_xattrs(meta: &DictMetadataStore, cs: &ChunkStore, root: &ObjectKey, inos: &[u64], want: &Xattrs, what: &str) {
+    for ino in inos {
+        let mut names = Vec::new();
+        meta.for_each_xattr_name(*ino, &mut |n| {
+            names.push(n.to_string());
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap_or_else(|e| panic!("{what}: names of {ino}: {e}"));
+        let expect: Vec<String> = want.keys().filter(|(i, _)| i == ino).map(|(_, n)| n.clone()).collect();
+        assert_eq!(names, expect, "{what}: the names of ino {ino}");
+    }
+    for ((ino, name), v) in want {
+        let len = v.len() as u64;
+        assert_eq!(meta.xattr_len(*ino, name).unwrap(), len, "{what}: length of {ino} {name}");
+        assert!(meta.read_xattr(*ino, name, 0, v.len()).unwrap() == *v, "{what}: value of {ino} {name}");
+        if v.len() > 10_000 {
+            let at = v.len() / 3;
+            assert_eq!(meta.read_xattr(*ino, name, at as u64, 4096).unwrap(), &v[at..at + 4096], "{what}: {name} at {at}");
+            assert_eq!(meta.read_xattr(*ino, name, len - 100, 200).unwrap(), &v[v.len() - 100..], "{what}: the tail of {name}");
+        }
+    }
+    let rec = get_value(cs, root).unwrap_or_else(|e| panic!("{what}: root record: {e}"));
+    let tree = ObjectId(rec[XATTR_DATA..XATTR_DATA + KEY_BYTES].try_into().unwrap());
+    let mut entries = 0u64;
+    let all = prolly::visit(&prolly::Ctx::uncached(cs), &tree, &mut |v| {
+        for (k, _) in v.entries {
+            let ino = u64::from_be_bytes(k[..8].try_into().expect("an 8-byte prefix"));
+            meta.get_inode(ino).unwrap_or_else(|e| panic!("{what}: xattr of ino {ino}, not an inode: {e}"));
+            entries += 1;
+        }
+        true
+    })
+    .unwrap_or_else(|e| panic!("{what}: a node of the xattr tree fails its checks: {e}"));
+    assert!(all, "{what}: the walk ends early");
+    assert_eq!(entries, want.len() as u64, "{what}: entry count");
+}
+
+/// The files and the xattr model of `xattrs_survive_a_cut_commit`.
+struct XWorld {
+    a: u64,
+    b: u64,
+    d: u64,
+    want: Xattrs,
+}
+
+impl XWorld {
+    fn set(&mut self, store: &DictMetadataStore, ino: u64, name: &str, v: Vec<u8>) {
+        store.set_xattr(ino, name, &v).unwrap();
+        self.want.insert((ino, name.to_string()), v);
+    }
+
+    fn file(store: &DictMetadataStore) -> u64 {
+        store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap()
+    }
+
+    /// File A with 300 inline names, B with a 200 KiB spilled value, D with 20 names.
+    fn build(store: &DictMetadataStore) -> Self {
+        let (a, b, d) = (Self::file(store), Self::file(store), Self::file(store));
+        let mut w = XWorld { a, b, d, want: Xattrs::new() };
+        for i in 0..300u64 {
+            w.set(store, a, &format!("user.a{i:03}"), noise(i + 1, 40));
+        }
+        w.set(store, b, "user.big", noise(500, 200 << 10));
+        for i in 0..20u64 {
+            w.set(store, d, &format!("user.d{i:02}"), noise(600 + i, 30));
+        }
+        w
+    }
+
+    /// 100 new names and 50 removes on A, B's value replaced by another
+    /// spilled value, a spilled value on a new file C, D deleted. Gives C.
+    fn edit(&mut self, store: &DictMetadataStore) -> u64 {
+        for i in 300..400u64 {
+            self.set(store, self.a, &format!("user.a{i:03}"), noise(i + 1, 40));
+        }
+        for i in (0..300u64).step_by(6) {
+            let name = format!("user.a{i:03}");
+            store.remove_xattr(self.a, &name).unwrap();
+            self.want.remove(&(self.a, name));
+        }
+        self.set(store, self.b, "user.big", noise(501, 150 << 10));
+        let c = Self::file(store);
+        self.set(store, c, "user.big", noise(502, 120 << 10));
+        store.delete_inode(self.d).unwrap();
+        let d = self.d;
+        self.want.retain(|(ino, _), _| *ino != d);
+        c
+    }
+}
+
+// PMAP-08 for xattrs: a commit cut at each fault point, then a power loss,
+// reloads the last logged root to its xattrs (inline and spilled); a good
+// commit of the same edits then reloads to the new state.
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+fn xattrs_survive_a_cut_commit() {
+    let opts = Options::default();
+    for fault in FAULTS {
+        let what = format!("{fault:?}");
+        let mem = MemIo::new();
+        let (io, cs) = open(&mem, &opts);
+        let store = DictMetadataStore::new(io);
+        // Flushes run before the cut too.
+        store.test_set_tree_flush(64);
+        let mut w = XWorld::build(&store);
+        let r1 = store.commit().unwrap();
+        let want_r1 = w.want.clone();
+        let c = w.edit(&store);
+        let inos = [w.a, w.b, c, w.d];
+        store.test_fail_next_commit_at(fault);
+        assert!(store.commit().is_err(), "{what}: the commit fails");
+        drop(store);
+        drop(cs);
+        mem.crash();
+
+        let (io, cs) = open(&mem, &opts);
+        let loaded = DictMetadataStore::load_from_root(Arc::clone(&io), &r1).unwrap();
+        check_xattrs(&loaded, &cs, &r1, &inos, &want_r1, &format!("{what}: R1 after the crash"));
+
+        // The same edits, a good commit, a power loss.
+        loaded.test_set_tree_flush(64);
+        let mut w = XWorld { want: want_r1, ..w };
+        let c = w.edit(&loaded);
+        let inos = [w.a, w.b, c, w.d];
+        let r2 = loaded.commit().unwrap();
+        drop(loaded);
+        drop(cs);
+        mem.crash();
+        let (io, cs) = open(&mem, &opts);
+        let loaded = DictMetadataStore::load_from_root(io, &r2).unwrap();
+        check_xattrs(&loaded, &cs, &r2, &inos, &w.want, &format!("{what}: R2 after the second crash"));
+    }
+}

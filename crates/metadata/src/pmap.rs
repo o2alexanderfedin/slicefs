@@ -20,6 +20,13 @@
 //!   generation read before the tree read. The caller locks again, checks the
 //!   overlay and the generation, and retries on a change (no lost update):
 //!   `modify` is that step.
+//! - **Scan** of a key range whose keys are all in one overlay shard
+//!   (`scan_keys`; keys sharded by their 8-byte prefix, such as the xattrs
+//!   of one inode). Lock the shard, copy the encoded keys of the range of
+//!   its pending edits (keys only, with a put or delete flag), unlock; then
+//!   read the working root (the read rule: overlay first, then root) and
+//!   merge the copy with a `prolly::range` cursor in key order. RAM is the
+//!   pending keys of the range and one path of nodes.
 //! - **Flush** (hot path, with no shard lock held, when `dirty()` reaches
 //!   the store's limit). The caller holds the store's apply lock
 //!   (`try_lock`, skipped when busy or while a commit is prepared). Take the
@@ -44,6 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
@@ -74,8 +82,8 @@ impl TreeIo {
     }
 }
 
-/// A key of a map tree.
-pub(crate) trait TreeKey: Copy + Eq + Hash {
+/// A key of a map tree (it owns its bytes: an xattr key holds a name).
+pub(crate) trait TreeKey: Clone + Eq + Hash {
     /// The tree key bytes (their order is the tree order).
     fn encode(&self) -> Vec<u8>;
     /// The overlay shard of the key (below `SHARDS`).
@@ -89,6 +97,12 @@ pub(crate) trait TreeValue: Clone + Sized {
     fn decode(bytes: &[u8]) -> Result<Self, String>;
 }
 
+/// The overlay shard of a key whose first 8 bytes are the inode number `n`
+/// (an inode key, an xattr key).
+pub(crate) fn shard_of(n: u64) -> usize {
+    (n % SHARDS as u64) as usize
+}
+
 /// An inode number: 8 bytes big endian (tree order is number order).
 impl TreeKey for u64 {
     fn encode(&self) -> Vec<u8> {
@@ -96,7 +110,7 @@ impl TreeKey for u64 {
     }
 
     fn shard(&self) -> usize {
-        (*self % SHARDS as u64) as usize
+        shard_of(*self)
     }
 }
 
@@ -196,9 +210,9 @@ impl<K: TreeKey, V: TreeValue> Overlay<K, V> {
     /// Set the pending edit of `k` (`None`: a delete).
     fn put(&self, k: K, v: Option<V>) {
         self.with(k.shard(), |s| {
-            s.map.insert(k, v);
-            s.dirty.insert(k);
             s.flushing.remove(&k);
+            s.dirty.insert(k.clone());
+            s.map.insert(k, v);
         });
     }
 
@@ -207,7 +221,7 @@ impl<K: TreeKey, V: TreeValue> Overlay<K, V> {
         let mut out = Vec::new();
         for sh in &self.shards {
             let g = sh.lock();
-            out.extend(g.map.iter().map(|(k, v)| (*k, v.clone())));
+            out.extend(g.map.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         out
     }
@@ -220,13 +234,14 @@ impl<K: TreeKey, V: TreeValue> Overlay<K, V> {
             self.with(i, |s| {
                 let mut keys: Vec<K> = s.dirty.drain().collect();
                 if in_flight {
-                    keys.extend(s.flushing.keys().copied());
+                    keys.extend(s.flushing.keys().cloned());
                 }
                 for k in keys {
                     if let Some(v) = s.map.get(&k) {
+                        let v = v.clone();
                         s.tickets += 1;
-                        s.flushing.insert(k, s.tickets);
-                        out.push((k, s.tickets, v.clone()));
+                        s.flushing.insert(k.clone(), s.tickets);
+                        out.push((k, s.tickets, v));
                     }
                 }
             });
@@ -399,9 +414,9 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
             if let Some(v) = edit {
                 // As `Overlay::put`: dirty, and a ticket in flight is dropped
                 // (the settle of a take keeps this newer value).
-                s.map.insert(k, v);
-                s.dirty.insert(k);
                 s.flushing.remove(&k);
+                s.dirty.insert(k.clone());
+                s.map.insert(k, v);
             }
             Some(r)
         })
@@ -424,6 +439,66 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
         }
         pending.into_values().flatten().for_each(f);
         Ok(())
+    }
+
+    /// Call `f` with each key in `[start, end)` (`end` `None`: to the last
+    /// key) in key order: the tree at the working root merged with the
+    /// pending edits (see "Scan" in the module doc). Every key of the range
+    /// must be in overlay shard `shard`. A pending put gives its key (once,
+    /// also when the tree has it), a pending delete hides the tree key.
+    /// `Break` stops the scan. RAM: the pending keys of the range (a flush
+    /// bounds the overlay) and one path of nodes; no value is kept.
+    pub(crate) fn scan_keys(
+        &self,
+        io: &TreeIo,
+        shard: usize,
+        start: &[u8],
+        end: Option<&[u8]>,
+        f: &mut dyn FnMut(&[u8]) -> ControlFlow<()>,
+    ) -> Result<(), MetaError> {
+        let in_range = |k: &[u8]| k >= start && end.is_none_or(|e| k < e);
+        // Keys only, copied under the shard lock; no node I/O under it.
+        let mut pending: Vec<(Vec<u8>, bool)> = {
+            let g = self.overlay.shards[shard].lock();
+            g.map
+                .iter()
+                .filter_map(|(k, v)| {
+                    let k = k.encode();
+                    in_range(&k).then(|| (k, v.is_some()))
+                })
+                .collect()
+        };
+        pending.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let root = self.tree.root();
+        let mut tree = prolly::range(&io.ctx(), &root, start, end).map_err(|e| tree_err(self.name, e))?;
+        let mut next_tree = || tree.next().transpose().map_err(|e| tree_err(self.name, e)).map(|o| o.map(|(k, _)| k));
+        let mut t = next_tree()?;
+        let mut p = pending.into_iter().peekable();
+        loop {
+            let yielded = match (t.as_deref(), p.peek()) {
+                (None, None) => return Ok(()),
+                (Some(tk), Some((pk, _))) if tk >= pk.as_slice() => {
+                    if tk == pk.as_slice() {
+                        // The pending edit decides for this key.
+                        t = next_tree()?;
+                    }
+                    let (pk, put) = p.next().unwrap();
+                    if put { f(&pk) } else { ControlFlow::Continue(()) }
+                }
+                (None, Some(_)) => {
+                    let (pk, put) = p.next().unwrap();
+                    if put { f(&pk) } else { ControlFlow::Continue(()) }
+                }
+                (Some(_), _) => {
+                    let r = f(t.as_deref().unwrap());
+                    t = next_tree()?;
+                    r
+                }
+            };
+            if yielded.is_break() {
+                return Ok(());
+            }
+        }
     }
 
     /// Dirty entries of the overlay.
@@ -631,6 +706,50 @@ mod tests {
         let fresh = m.read_with_generation(&io, &k).unwrap();
         assert_eq!(m.modify(k, Some(fresh), |_| (None, ())), Some(()));
         assert_eq!(m.dirty(), 0);
+    }
+
+    // A scan of one prefix merges the tree and the pending edits in key
+    // order, gives no key of another prefix, and stops at `Break`.
+    #[test]
+    fn pending_edits_merge_into_scan_keys() {
+        use crate::xattr::{xattr_range, XattrKey, XattrValue};
+        let io = io();
+        let m: MapTree<XattrKey, XattrValue> = MapTree::new("test", Site::XattrData, prolly::empty_root(&io.cs).unwrap());
+        let apply = lock();
+        let v = || Some(XattrValue::Inline(b"v".to_vec()));
+        for (ino, name) in [(4, "z"), (5, "a"), (5, "b"), (5, "c"), (6, "a"), (6, "b")] {
+            m.write(XattrKey::new(ino, name), v());
+        }
+        m.flush(&io, &apply.lock()).unwrap();
+        m.write(XattrKey::new(5, "b"), None);
+        m.write(XattrKey::new(5, "d"), v());
+        // A put of a key the tree has: given once.
+        m.write(XattrKey::new(5, "a"), v());
+        let scan = |m: &MapTree<XattrKey, XattrValue>, stop_after: usize| {
+            let (s, e) = xattr_range(5);
+            let mut got: Vec<String> = Vec::new();
+            m.scan_keys(&io, shard_of(5), &s, e.as_deref(), &mut |k| {
+                got.push(crate::xattr::name_of(k).unwrap().to_string());
+                if got.len() == stop_after { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+            })
+            .unwrap();
+            got
+        };
+        assert_eq!(scan(&m, usize::MAX), ["a", "c", "d"]);
+        assert_eq!(scan(&m, 1), ["a"], "Break stops the scan");
+        m.flush(&io, &apply.lock()).unwrap();
+        assert_eq!(m.dirty(), 0);
+        assert_eq!(scan(&m, usize::MAX), ["a", "c", "d"], "the same after a flush");
+        // Pending only (nothing in the tree under the prefix).
+        m.write(XattrKey::new(7, "q"), v());
+        let (s, e) = xattr_range(7);
+        let mut n = 0;
+        m.scan_keys(&io, shard_of(7), &s, e.as_deref(), &mut |_| {
+            n += 1;
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
