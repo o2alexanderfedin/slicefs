@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v2.3
 milestone_name: Prolly Metadata & Robustness
-current_phase: 26
-current_phase_name: Prolly maps in commit, read and GC
-status: executing
-stopped_at: Phase 25 complete, ready to plan Phase 26
-last_updated: "2026-11-27T23:07:11.468Z"
-last_activity: 2026-11-27
-last_activity_desc: Phase 26 execution started
-state_head: 34a3348605e554dd157153fff8d614a04101d062
+current_phase: 27
+current_phase_name: Store migration
+status: planning
+stopped_at: Phase 26 complete, ready to plan Phase 27
+last_updated: "2026-11-28T10:58:12.919Z"
+last_activity: 2026-11-28
+last_activity_desc: Phase 26 complete, transitioned to Phase 27
+state_head: b738520d7b137593e773492916d12929eddffcdc
 progress:
   total_phases: 6
-  completed_phases: 1
-  total_plans: 22
-  completed_plans: 8
-  percent: 17
+  completed_phases: 2
+  total_plans: 24
+  completed_plans: 24
+  percent: 33
 ---
 
 # Project State
@@ -29,12 +29,12 @@ See: .planning/PROJECT.md (updated 2026-11-27)
 
 ## Current Position
 
-Phase: 26 (Prolly maps in commit, read and GC) — EXECUTING
-Plan: 1 of 14
-Status: Executing Phase 26
-Last activity: 2026-11-27 — Phase 26 execution started
+Phase: 27 — Store migration
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-28 — Phase 26 complete, transitioned to Phase 27
 
-Progress: [██░░░░░░░░] 17%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -105,7 +105,7 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-11-27T08:09:54Z
-Stopped at: Phase 25 complete, ready to plan Phase 26
+Stopped at: Phase 26 complete, ready to plan Phase 27
 Resume file: None
 
 ## Operator Next Steps

@@ -11,7 +11,7 @@
     {
       "number": "26",
       "name": "Prolly maps in commit, read and GC",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "27",
@@ -36,8 +36,8 @@
   ],
   "next": {
     "command": "/gsd-progress --next",
-    "label": "Advance to the next step",
-    "reason": "Phase 2 of 6 · 17% · executing"
+    "label": "Advance to the next step (plan phase 27)",
+    "reason": "Phase 3 of 6 — needs a plan"
   },
-  "updated_at": "2026-11-27T23:07:11.533Z"
+  "updated_at": "2026-11-28T10:58:12.963Z"
 }
