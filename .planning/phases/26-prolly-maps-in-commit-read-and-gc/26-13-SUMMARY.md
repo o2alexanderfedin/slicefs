@@ -28,13 +28,14 @@ key-decisions:
   - "Each decision run starts only after three quiet samples of the Docker VM (load < 3, disk writes < 30 MB/s, host load < 24), at most 45 min"
   - "Cargo target volumes slicefs-target-pmap07-flat and -prolly (one per source tree), warmed by the smoke"
 metrics:
+  duration: "about 1 h 15 min"
   completed: 2026-11-28
 actuals:
   tokens: 39100
   tasks: 3
-  commits: 3
+  commits: 5
 plan_head_before: ba401563f005e38b3d19121e54c1961ab5e73196
-plan_head_after: 7e14ead9ff9d8a48ea8621750a6cd990f2779337
+plan_head_after: 68610c077ee6e8605ef5c6eb11ef8902137778c1
 ---
 
 # Phase 26 Plan 13: PMAP-07 decision run Summary
@@ -43,13 +44,24 @@ PMAP-07 passes on the product code. At 1,000,000 files a one-change commit
 takes 6.8 ms in place of 528.6 ms, 1.6 in place of 515.1 CPU ms, and 18 in
 place of 14,181 nodes. All nine gated Boost rows are better than flat.
 
+Two notes for the verifier:
+
+- The plan's rule-diff check gives `diff_rc=1`. This is not a breach. The
+  check compares with 8c6d271, and `pmap07.py` changed once after that, in
+  5cab585. That was a 26-01 fix, before any measurement. The rule file is
+  unchanged since 8c6d271 and the script is unchanged since 5cab585
+  (deviation 1).
+- Other projects ran heavy jobs on the host during the runs (deviation 6).
+
 ## Commits
 
 - 3a64054 feat(26-13): boost mode of the PMAP-07 runner and the harness smoke
 - 92ee5fc docs(26-13): PMAP-07 decision runs and verdict (pass)
 - 7e14ead docs(26-13): Phase 26 product run in the research record; gate log
+- af77db5 docs(26-13): summary
+- 68610c0 docs(26-13): correct the insert/delete acceptance text
 
-`commits: 3` counts these three. The SUMMARY commit is not in the count.
+`commits: 5` counts these. The last SUMMARY commit is not in the count.
 
 ## The numbers (from `runs/pmap07/verdict.txt`)
 
@@ -75,12 +87,9 @@ prolly, one at a time. All six runs had rc=0, and none was repeated.
 - Insert/delete acceptance (the plan's discretion choice): every row where
   prolly is worse gets a written acceptance with its numbers. Code
   mitigations are follow-ups only.
-- Quiet-start gate: other projects ran heavy jobs on the host (CI runner
-  VMs in OrbStack, test binaries, a training job). I could not stop them.
-  So I fixed a start condition before the first run, and each run waited
-  for it. Load samples are in `runs/pmap07/run-order.log`. At the run
-  starts the host load was 10.8 to 16.8 (32 CPUs) and the VM load was 0.3
-  to 2.4. At the run ends the host load was up to 21.8.
+- Quiet-start gate: before the first run I fixed a start condition. Each
+  run waited for three quiet samples of the Docker VM (load < 3, disk
+  writes < 30 MB/s) and a host load < 24, for at most 45 min.
 - Target volumes: one per source tree (`slicefs-target-pmap07-flat` and
   `-prolly`). Both trees mount at `/src`, so a shared volume could mix the
   builds. The smoke used the same volumes, so the decision builds were warm.
@@ -115,6 +124,24 @@ prolly, one at a time. All six runs had rc=0, and none was repeated.
    smoke, so the prolly smoke commits had slow syncs (170 to 1,437 ms).
    The smoke decides nothing. The decision runs started only after the
    quiet gate.
+6. **Other heavy jobs on the host.** The plan's must-have says that no
+   other heavy job runs during the decision runs. That was not fully true.
+   Jobs of other projects ran on the macOS host: CI runner VMs in OrbStack,
+   test binaries and a training job. I did not start them and could not
+   stop them. I started no other job of my own during the runs. The quiet
+   gate held each start until the Docker VM was quiet. At the run starts
+   the host load was 10.8 to 16.8 (32 CPUs) and the VM load was 0.3 to
+   2.4. At the run ends the host load was up to 21.8. The samples are in
+   `runs/pmap07/run-order.log`. The ratios of checks A and B (0.003 and
+   0.013, against limits of 0.20 and 1) are too far from the limits for
+   this load to change the result.
+7. **[Rule 1] Acceptance text corrected.** In the first version of the
+   insert/delete acceptance, the claim about where the flat cost goes did
+   not match the table, and the "rare" reason covered only `inode_data`.
+   The text now gives the split (about 31 ms grows with the store and about
+   82 ms grows with K). It names the maps with keys in the middle
+   (`dir_data`, `refcounts`) and the commit trigger (a 30 s timer). It also
+   gives scatter K = 1,000 its own reason. The numbers did not change.
 
 ## Gates
 
@@ -134,7 +161,7 @@ lock-stats test was not run, because no lock changed.
 - Files exist: `runs/pmap07/verdict.txt`, `harness-smoke.log`,
   `run-order.log`, the four `commit-*.log`, `boost-flat/results.csv`,
   `boost-prolly/results.csv`, and `runs/gate-26-13.log`.
-- Commits 3a64054, 92ee5fc and 7e14ead are ancestors of HEAD.
+- Commits 3a64054, 92ee5fc, 7e14ead, af77db5 and 68610c0 are ancestors of HEAD.
 - Plan checks: 11 prolly samples in `commit-prolly-1.log` and 11 flat
   samples in `commit-flat-2.log`. `verdict.txt` has 3 check lines and 1
   verdict line. There are 380 `whole` rows in `boost-prolly/results.csv`.
