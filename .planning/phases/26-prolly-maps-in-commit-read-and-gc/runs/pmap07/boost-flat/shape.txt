@@ -1,0 +1,7 @@
+run=0 seed secs=26.526 inode_count=84104
+run=1 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=67764224
+run=1 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=2 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=68042752
+run=2 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
+run=3 info inode_data_entries=84104 inode_count_field=84104 next_ino=84105 map_bytes=10344832 maxrss_after_load=67710976
+run=3 version files_changed=18991 files_created=1588 files_deleted=734 dirs_created=150 dirs_deleted=28
