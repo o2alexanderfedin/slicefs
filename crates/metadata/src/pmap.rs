@@ -19,7 +19,7 @@
 //! - **Read-modify-write.** `read_with_generation` gives the value and the tree
 //!   generation read before the tree read. The caller locks again, checks the
 //!   overlay and the generation, and retries on a change (no lost update):
-//!   `modify` is that step.
+//!   `modify` is that step, and `read_modify_write` the whole loop.
 //! - **Scan** of a key range whose keys are all in one overlay shard
 //!   (`scan_keys`; keys sharded by their 8-byte prefix, such as the xattrs
 //!   of one inode). Lock the shard, copy the encoded keys of the range of
@@ -319,6 +319,9 @@ pub(crate) struct MapTree<K, V> {
     /// Test hooks (see `fail_next_flush` and `set_flush_hook`).
     fail_flush: AtomicBool,
     flush_hook: sync::Mutex<Option<FlushHook>>,
+    /// Unit-test hook of `read_modify_write` (see `set_read_hook`).
+    #[cfg(test)]
+    read_hook: sync::Mutex<Option<FlushHook>>,
 }
 
 /// A function that tests run inside a flush (see `MapTree::set_flush_hook`).
@@ -327,13 +330,29 @@ pub(crate) type FlushHook = Arc<dyn Fn() + Send + Sync>;
 impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
     /// A map whose working root is `root`; its locks are timed as `site`.
     pub(crate) fn new(name: &'static str, site: Site, root: ObjectId) -> Self {
+        Self::with_sites(name, site, site, root)
+    }
+
+    /// `new`, with the overlay shards timed as `shards` and the root lock
+    /// as `root_site`.
+    pub(crate) fn with_sites(name: &'static str, shards: Site, root_site: Site, root: ObjectId) -> Self {
         MapTree {
             name,
-            overlay: Overlay::new(site),
-            tree: Tree::new(site, root),
+            overlay: Overlay::new(shards),
+            tree: Tree::new(root_site, root),
             fail_flush: AtomicBool::new(false),
             flush_hook: sync::Mutex::new(Rank::Store, None),
+            #[cfg(test)]
+            read_hook: sync::Mutex::new(Rank::Store, None),
         }
+    }
+
+    /// Run `f` once in the next `read_modify_write` that reads the tree,
+    /// between the tree read and the recheck under the shard lock (unit-test
+    /// hook). It is taken out of its slot and called with no lock held.
+    #[cfg(test)]
+    pub(crate) fn set_read_hook(&self, f: FlushHook) {
+        *self.read_hook.lock() = Some(f);
     }
 
     /// Make the next flush fail after its take (test hook): the entries are
@@ -420,6 +439,34 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
             }
             Some(r)
         })
+    }
+
+    /// A whole read-modify-write of `k` (see the module doc): `modify` with
+    /// the pending edit; on a miss, the tree read (`read_with_generation`,
+    /// no lock held), then `modify` again with that value, until the
+    /// generation did not move between the read and the check. `f` runs
+    /// once, under the shard lock (no I/O, no other lock), as in `modify`.
+    pub(crate) fn read_modify_write<R>(
+        &self,
+        io: &TreeIo,
+        k: &K,
+        f: impl FnOnce(Option<V>) -> (Option<Option<V>>, R),
+    ) -> Result<R, MetaError> {
+        let mut f = Some(f);
+        let mut tree = None;
+        loop {
+            if let Some(r) = self.modify(k.clone(), tree.take(), |cur| (f.take().expect("f runs once"))(cur)) {
+                return Ok(r);
+            }
+            tree = Some(self.read_with_generation(io, k)?);
+            #[cfg(test)]
+            {
+                let hook = self.read_hook.lock().take();
+                if let Some(h) = hook {
+                    h();
+                }
+            }
+        }
     }
 
     /// Call `f` with each value of the map: the tree at the working root
