@@ -460,12 +460,18 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
             }
             tree = Some(self.read_with_generation(io, k)?);
             #[cfg(test)]
-            {
-                let hook = self.read_hook.lock().take();
-                if let Some(h) = hook {
-                    h();
-                }
-            }
+            self.run_read_hook();
+        }
+    }
+
+    /// Run the hook of `set_read_hook` once, if one is set (taken out of its
+    /// slot, called with no lock held). Also called by callers that do their
+    /// own `read_with_generation` then `modify`, between the two.
+    #[cfg(test)]
+    pub(crate) fn run_read_hook(&self) {
+        let hook = self.read_hook.lock().take();
+        if let Some(h) = hook {
+            h();
         }
     }
 

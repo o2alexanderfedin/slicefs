@@ -862,6 +862,40 @@ enum Window {
     GcDuringFinish,
 }
 
+/// The `cutmap-` objects of one generation of `cut_window_scenario`.
+struct CutMap {
+    dir: u64,
+    file: u64,
+}
+
+/// Requests that touch every map (named `cutmap-<tag>-*`): a mkdir with a
+/// written file in it (inode, dir, manifest and refcount entries), xattrs
+/// (inline, spilled, one set then removed, one on the directory), a hard
+/// link, a rename across directories, a mkdir then an rmdir of an empty
+/// directory.
+fn cutmap_requests(fs: &SliceFsFilesystem, tag: &str, seed: u64) -> CutMap {
+    let mkdir = |parent: u64, name: &str| match h::handle_mkdir(fs, parent, name, S_IFDIR | 0o755, 0o022, 501, 20) {
+        EntryResult::Ok(i, _) => i,
+        _ => panic!("mkdir {name}"),
+    };
+    let ok = |r: EmptyResult, what: &str| assert!(matches!(r, EmptyResult::Ok), "{what}");
+    let dir = mkdir(1, &format!("cutmap-{tag}-dir"));
+    let (f, ff) = create(fs, dir, &format!("cutmap-{tag}-f"));
+    write(fs, ff, 0, &data(seed, 20_000));
+    release(fs, f, ff);
+    ok(h::handle_setxattr(fs, f, "user.small", b"inline"), "setxattr small");
+    ok(h::handle_setxattr(fs, f, "user.big", &data(seed + 1, 9_000)), "setxattr big");
+    ok(h::handle_setxattr(fs, f, "user.gone", b"x"), "setxattr gone");
+    ok(h::handle_removexattr(fs, f, "user.gone"), "removexattr gone");
+    ok(h::handle_setxattr(fs, dir, "user.dir", b"on a directory"), "setxattr dir");
+    assert!(matches!(h::handle_link(fs, f, 1, &format!("cutmap-{tag}-link")), EntryResult::Ok(..)), "link");
+    let other = mkdir(1, &format!("cutmap-{tag}-other"));
+    ok(h::handle_rename(fs, dir, &format!("cutmap-{tag}-f"), other, &format!("cutmap-{tag}-moved"), 0), "rename");
+    mkdir(other, &format!("cutmap-{tag}-empty"));
+    ok(h::handle_rmdir(fs, other, &format!("cutmap-{tag}-empty")), "rmdir");
+    CutMap { dir, file: f }
+}
+
 /// Files in the old generation (closed, an overlay, a streaming handle with
 /// pending bytes, a directory of new files), a commit cut, requests after
 /// the cut (in the next generation, some fsynced), then the commit stopped
@@ -949,6 +983,9 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
         fo
     };
 
+    // Requests over every map in the old generation.
+    let pre = { let _t = at(t0 + 32); cutmap_requests(fs, "pre", 70) };
+
     // The generation switch (what the commit timer does under the gate).
     let cut = { let _t = at(t0 + 40); fs.commit_cut_begin().unwrap() };
     // Requests after the cut, as they run while the commit finishes.
@@ -961,6 +998,24 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
         fsync(fs, l, fl);
         release(fs, l, fl);
         assert!(matches!(h::handle_rename(fs, 1, "kept.bin", 1, "kept2.bin", 0), EmptyResult::Ok));
+        // Every map again in the new generation, and changes of the
+        // old generation's objects: an xattr removed and one replaced, a
+        // hard link moved across directories, one more link. They run on
+        // another thread, as the requests of a mount run beside the commit:
+        // this thread holds the commit lock of the cut, and a rename across
+        // directories takes the rename lock, of the same rank.
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _t = at(t0 + 51);
+                cutmap_requests(fs, "post", 80);
+                assert!(matches!(h::handle_removexattr(fs, pre.file, "user.small"), EmptyResult::Ok));
+                assert!(matches!(h::handle_setxattr(fs, pre.file, "user.big", &data(81, 12_000)), EmptyResult::Ok));
+                assert!(matches!(h::handle_rename(fs, 1, "cutmap-pre-link", pre.dir, "cutmap-pre-link2", 0), EmptyResult::Ok));
+                assert!(matches!(h::handle_link(fs, pre.file, pre.dir, "cutmap-pre-link3"), EntryResult::Ok(..)));
+            })
+            .join()
+            .unwrap();
+        });
         fsync(fs, a, fh);
     }
     let _t = at(t0 + 60);
@@ -1017,9 +1072,24 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
             for name in ["kept.bin", "a.bin", "r.bin", "b.bin", "ooo.bin", "d"] {
                 assert!(at_cut.lookup(1, name).is_ok(), "{name} is in the committed root");
             }
-            for name in ["kept2.bin", "late.bin"] {
+            for name in ["kept2.bin", "late.bin", "cutmap-post-dir", "cutmap-post-link", "cutmap-post-other"] {
                 assert!(at_cut.lookup(1, name).is_err(), "{name} was made after the cut");
             }
+            // The old generation's requests over every map are in the
+            // committed root; the changes after the cut are not.
+            for name in ["cutmap-pre-dir", "cutmap-pre-link", "cutmap-pre-other"] {
+                assert!(at_cut.lookup(1, name).is_ok(), "{name} is in the committed root");
+            }
+            let other = at_cut.lookup(1, "cutmap-pre-other").unwrap();
+            assert_eq!(at_cut.lookup(other, "cutmap-pre-moved").unwrap(), pre.file);
+            assert!(at_cut.lookup(other, "cutmap-pre-empty").is_err(), "the rmdir is in the committed root");
+            assert!(at_cut.lookup(pre.dir, "cutmap-pre-link2").is_err() && at_cut.lookup(pre.dir, "cutmap-pre-link3").is_err(),
+                "the links after the cut are not in the committed root");
+            assert_eq!(at_cut.get_xattr(pre.file, "user.small").unwrap(), b"inline", "removed after the cut");
+            assert_eq!(at_cut.get_xattr(pre.file, "user.big").unwrap(), data(71, 9_000), "replaced after the cut");
+            assert!(at_cut.get_xattr(pre.file, "user.gone").is_err());
+            assert_eq!(at_cut.get_xattr(pre.dir, "user.dir").unwrap(), b"on a directory");
+            assert!(at_cut.get_manifest(pre.file).is_ok(), "the file of the old generation has its manifest");
             let d = at_cut.lookup(1, "d").unwrap();
             for i in 0..20 {
                 let x = at_cut.lookup(d, &format!("x{i}")).expect("in the committed root");
@@ -1061,20 +1131,25 @@ fn a_crash_between_the_cut_and_the_root_replays() {
                   Window::BeforePreRootSync, Window::AfterSyncs, Window::AfterRoot,
                   Window::RootTorn, Window::RootHeaderOnly, Window::RootEmpty, Window::Done,
                   Window::GcDuringFinish] {
-            // One thread per run: a window that forgets the cut keeps its
-            // lock (a crash does), and so its entry in the thread's lock-order
-            // stack, which must not reach the next run.
+            // One thread per run, and the crashed mount on a thread of its
+            // own: a window that forgets the cut keeps its lock (a crash
+            // does), and so its entry in the thread's lock-order stack, which
+            // must not reach the replay (a new mount) or the next run.
             let config = config.clone();
             std::thread::spawn(move || {
                 let dir = TempDir::new().unwrap();
-                let live = {
-                    let fs = new_fs_with(dir.path(), config.clone());
-                    cut_window_scenario(&fs, dir.path(), w);
-                    fs.meta().flush_wal().unwrap();
-                    let d = dump_open(&fs);
-                    std::mem::forget(fs); // a crash with the handles open
-                    d
-                };
+                let live = std::thread::scope(|s| {
+                    s.spawn(|| {
+                        let fs = new_fs_with(dir.path(), config.clone());
+                        cut_window_scenario(&fs, dir.path(), w);
+                        fs.meta().flush_wal().unwrap();
+                        let d = dump_open(&fs);
+                        std::mem::forget(fs); // a crash with the handles open
+                        d
+                    })
+                    .join()
+                    .unwrap()
+                });
                 let fs = reload_and_replay(dir.path());
                 assert_eq!(dump_open(&fs), live, "{config:?} {w:?}");
             })
