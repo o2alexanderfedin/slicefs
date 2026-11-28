@@ -35,8 +35,10 @@ step rmdir-notempty 10 bash -c "! rmdir $R/mnt/big 2>/dev/null"
 step rmdir 120 bash -c "rm -f $R/mnt/big/f* && rmdir $R/mnt/big && [ ! -e $R/mnt/big ]"
 # Unlink each name while the directory is read (one open handle, no
 # rewind): the readdir cursor resumes after the last name, so no name is
-# left behind when the names before it are gone.
-step readdir-unlink 180 bash -c "mkdir $R/mnt/del && for i in \$(seq 1 1000); do : > $R/mnt/del/f\$i || exit 1; done; perl -e 'opendir(D, \$ARGV[0]) or die; while (defined(my \$e = readdir D)) { next if \$e eq q(.) || \$e eq q(..); unlink(\$ARGV[0] . q(/) . \$e) or die } closedir D' $R/mnt/del && [ \$(ls -A $R/mnt/del | wc -l) = 0 ] && rmdir $R/mnt/del"
+# left behind when the names before it are gone. Names of 204 bytes, so
+# the 1,000 names take many readdir replies (a kernel reply can hold as
+# many bytes as the getdents buffer).
+step readdir-unlink 180 bash -c "mkdir $R/mnt/del && printf -v p %0200d 0 && for i in \$(seq 1000 1999); do : > $R/mnt/del/\$p\$i || exit 1; done; perl -e 'opendir(D, \$ARGV[0]) or die; while (defined(my \$e = readdir D)) { next if \$e eq q(.) || \$e eq q(..); unlink(\$ARGV[0] . q(/) . \$e) or die } closedir D' $R/mnt/del && [ \$(ls -A $R/mnt/del | wc -l) = 0 ] && rmdir $R/mnt/del"
 step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done
