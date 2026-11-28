@@ -354,7 +354,7 @@ write.
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
 | M17 | The format number is 7 (a store of release v2.3.0). | `{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
 | M18 | `seed` with `--boundary-salt` on an existing store whose salt differs (also a store with no salt, and always for `random`). Nothing in the store changes. | `{store} has {have}; --boundary-salt {want} is another salt. The boundary salt of a store is fixed when the store is made.` |
-| M19 | A mount (writable, read-only or of a snapshot) of a format 8 store whose root record fields are not prolly trees (a store of an interim build with flat maps). Nothing in the store changes. | `{store} was made by a development build of SliceFS (store format 8 with flat metadata maps). This SliceFS reads store format 8 with prolly metadata maps only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
+| M19 | A mount (writable, read-only or of a snapshot) of a format 8 store whose root record fields are not prolly trees (a store of an interim build with flat maps). Nothing in the store changes (a mount with `--hash` records that hash in FORMAT before the store loads, as for any store). | `{store} was made by a development build of SliceFS (store format 8 with flat metadata maps). This SliceFS reads store format 8 with prolly metadata maps only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
 
 The values in the texts:
 
@@ -601,8 +601,8 @@ layout c 98 bytes.)
 At load, the root object of each of the five fields must start with the
 node magic `SPT1` (one read per field). A record of another size, or a field
 that is not a tree root, is refused. A store of an interim build of format 8
-had flat maps in these fields; a mount refuses it with M19 and does not
-change it. There is no read path for flat maps.
+had flat maps in these fields; a mount refuses it with M19 and writes
+nothing to its segments or packs. There is no read path for flat maps.
 
 ### Node format
 
@@ -779,8 +779,11 @@ lines of `decision.txt`):
 | Total | | | | 23,479,915 |
 
 The entry counts follow the mix of the synthetic base tree (2 refcount keys
-per file). The refcount line is from synthetic data only. At the Dolt config
-the same method gives 47,291,816 nodes.
+per file). The table was measured with the key grammar of Phase 25 (one
+`dir_data` entry per directory, 33-byte values); with the final grammar
+above (one entry per name, inline inode records) the node counts differ.
+They were not measured again. The refcount line is from synthetic data
+only. At the Dolt config the same method gives 47,291,816 nodes.
 
 One change at 10,000,000 files touches 52 nodes (median of 10 commits, nodes
 read and written; Dolt config: 63).
