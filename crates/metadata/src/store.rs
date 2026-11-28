@@ -15,6 +15,9 @@
 //!   briefly: never across the write-log cut or a return to the file system.
 //!   A flush is never called with a shard lock held; it holds `apply_lock`
 //!   (`try_lock`) across its node reads and puts.
+//!   A refcount change (read-modify-write) holds one `refcounts` overlay
+//!   shard only for its check and edit (`MapTree::modify`); its tree read
+//!   runs with no lock held.
 //!   The test flush hook of a tree (`pmap`, `Rank::Store`) is a leaf: it is
 //!   cloned out and called with no tree lock held.
 //!   The commit stats lock (`last_stats`, `Rank::Store`, untimed) is a leaf: it
@@ -359,7 +362,9 @@ pub struct PreparedCommit<'a> {
     manifest_root: chunk_store::ObjectId,
     manifest: Taken<u64, ObjectKey>,
     xattr_data: BTreeMap<u64, ObjectKey>,
-    refcounts: BTreeMap<ObjectKey, u64>,
+    /// The refcount tree at the cut and the edits taken from its overlay.
+    refcount_root: chunk_store::ObjectId,
+    refcounts: Taken<ObjectKey, u64>,
     logical_bytes: u64,
     inode_count: u64,
     snapshots: Vec<SnapshotEntry>,
@@ -456,9 +461,12 @@ pub struct DictMetadataStore {
     /// Called in `commit()` after the metadata objects are synced and before
     /// the root is logged: makes the file content (chunk store) durable.
     pre_root_sync: sync::Mutex<Option<PreRootSync>>,
-    /// Reference counts for content `ObjectKey`s.
-    /// Incremented when a manifest references a block; decremented on manifest replacement or inode deletion.
-    refcounts: sync::Mutex<BTreeMap<ObjectKey, u64>>,
+    /// Reference counts for content `ObjectKey`s: a prolly tree (key: the
+    /// 33-byte content key; value: the count, 8 bytes little endian) and an
+    /// overlay (see `pmap`). Incremented when a manifest references a block;
+    /// decremented on manifest replacement or inode deletion. Its locks are
+    /// timed as `Site::Refcounts`.
+    refcounts: MapTree<ObjectKey, u64>,
     /// Running total of logical bytes — sum of all inode `size` fields.
     ///
     /// Updated atomically in `create_inode` (+size), `update_inode` (delta),
@@ -564,7 +572,7 @@ impl DictMetadataStore {
             prepared: AtomicBool::new(false),
             xattr_data: lk(BTreeMap::new()).timed(Site::XattrData),
             pre_root_sync: lk(None),
-            refcounts: lk(BTreeMap::new()).timed(Site::Refcounts),
+            refcounts: MapTree::new("refcounts", Site::Refcounts, empty),
             logical_bytes: AtomicU64::new(0),
             inode_count: AtomicU64::new(1),
             wal: lk(None).timed(Site::Wal),
@@ -602,14 +610,8 @@ impl DictMetadataStore {
     /// a block reaches saturation.
     pub fn increment_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock();
-        let val = rc.entry(*digest).or_insert(0);
-        if *val == u64::MAX {
-            // Already saturated — no-op.
-            return;
-        }
-        *val += 1;
-        if *val == u64::MAX {
+        // A saturated count does not change.
+        if self.change_refcount(digest, |c| (c != u64::MAX).then(|| c + 1)) == Some(u64::MAX) {
             tracing::warn!(
                 "refcount saturated for block — block is now immortal and will not be GC'd"
             );
@@ -619,30 +621,60 @@ impl DictMetadataStore {
     /// Decrement the reference count for `digest` by 1.
     ///
     /// Removes the entry entirely when the count reaches 0.
-    /// Does nothing if `digest` is not tracked.
+    /// Does nothing if `digest` is not tracked (no edit is written).
     ///
     /// If the current count is `u64::MAX` (saturated / immortal), this is a
     /// no-op — immortal blocks are never freed.
     pub fn decrement_refcount(&self, digest: &ObjectKey) {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut rc = self.refcounts.lock();
-        if let Some(count) = rc.get_mut(digest) {
-            // Saturated blocks are immortal — decrement is a no-op.
-            if *count == u64::MAX {
-                return;
+        self.change_refcount(digest, |c| (c != u64::MAX && c != 0).then(|| c - 1));
+    }
+
+    /// The read-modify-write of a count (the `pmap` protocol): `step` gets
+    /// the count of `digest` (0: no entry) and gives the new count, or
+    /// `None` to change nothing. A count of 0 is deleted. Gives the new
+    /// count if it changed. A tree read error is logged and kept for the
+    /// next commit (as a hot-path put error); the count does not change.
+    fn change_refcount(&self, digest: &ObjectKey, step: impl Fn(u64) -> Option<u64>) -> Option<u64> {
+        let mut tree = None;
+        loop {
+            let done = self.refcounts.modify(*digest, tree.take(), |cur| match step(cur.unwrap_or(0)) {
+                Some(0) => (Some(None), Some(0)),
+                Some(n) => (Some(Some(n)), Some(n)),
+                None => (None, None),
+            });
+            if let Some(changed) = done {
+                if changed.is_some() {
+                    self.flush_trees();
+                }
+                return changed;
             }
-            if *count <= 1 {
-                rc.remove(digest);
-            } else {
-                *count -= 1;
+            // Not in the overlay: read the tree with no lock held, then
+            // check again (a flush or commit between them retries).
+            match self.refcounts.read_with_generation(&self.trees, digest) {
+                Ok(t) => tree = Some(t),
+                Err(e) => {
+                    tracing::warn!("refcount of {digest:?}: {e}");
+                    let mut k = self.put_error.lock();
+                    if k.is_none() {
+                        *k = Some(std::io::Error::other(e.to_string()));
+                    }
+                    return None;
+                }
             }
         }
     }
 
-    /// Return the current reference count for `digest`, or `0` if not tracked.
+    /// Return the current reference count for `digest`, or `0` if not
+    /// tracked (or if the tree read fails: the error is logged).
     pub fn get_refcount(&self, digest: &ObjectKey) -> u64 {
-        let rc = self.refcounts.lock();
-        rc.get(digest).copied().unwrap_or(0)
+        match self.refcounts.read(&self.trees, digest) {
+            Ok(c) => c.unwrap_or(0),
+            Err(e) => {
+                tracing::warn!("refcount of {digest:?}: {e}");
+                0
+            }
+        }
     }
 
     /// Return the number of blocks whose reference count has saturated at `u64::MAX`.
@@ -650,9 +682,14 @@ impl DictMetadataStore {
     /// Saturated blocks are *immortal* — they will never be garbage-collected.
     /// A non-zero count here indicates the GC dead-letter queue has accumulated
     /// blocks; this is surfaced as a warning in `slicefs scrub`.
-    pub fn saturated_refcount_count(&self) -> usize {
-        let rc = self.refcounts.lock();
-        rc.values().filter(|&&v| v == u64::MAX).count()
+    ///
+    /// A scrub-time scan: one cursor over the whole refcount tree plus the
+    /// pending edits (`MapTree::for_each_value`), O(map) time and bounded
+    /// memory. Exact when no request changes the store meanwhile.
+    pub fn saturated_refcount_count(&self) -> Result<usize, MetaError> {
+        let mut n = 0;
+        self.refcounts.for_each_value(&self.trees, |c| n += usize::from(c == u64::MAX))?;
+        Ok(n)
     }
 
     /// Return the current logical byte total — the sum of all inode `size` fields.
@@ -1171,6 +1208,7 @@ impl DictMetadataStore {
     fn requeue_all(&self, trees_installed: bool) {
         if !trees_installed {
             self.manifest.requeue();
+            self.refcounts.requeue();
             self.end_prepared();
         }
         self.inode_live.requeue();
@@ -1183,27 +1221,38 @@ impl DictMetadataStore {
         self.prepared.store(false, Ordering::Relaxed);
     }
 
-    /// Hot path, with no store lock held: flush the manifest tree when
-    /// enough of its entries are dirty. Skipped while another flush runs
-    /// or a commit is prepared (the commit takes the entries). A failed
-    /// apply leaves the entries dirty and fails the next commit.
+    /// Hot path, with no store lock held: flush each map tree that has
+    /// enough dirty entries, all under one `apply_lock` hold. Skipped while
+    /// another flush runs or a commit is prepared (the commit takes the
+    /// entries). A failed apply leaves the entries dirty and fails the next
+    /// commit.
     fn flush_trees(&self) {
-        if self.manifest.dirty() < self.tree_flush.load(Ordering::Relaxed) {
+        let limit = self.tree_flush.load(Ordering::Relaxed);
+        if self.manifest.dirty() < limit && self.refcounts.dirty() < limit {
             return;
         }
         let Some(apply) = self.apply_lock.try_lock() else { return };
         if self.prepared.load(Ordering::Relaxed) {
             return;
         }
-        match self.manifest.flush(&self.trees, &apply) {
-            Ok(Some(stats)) => {
-                self.unsynced_puts.fetch_add(stats.nodes_written, Ordering::Relaxed);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                let mut k = self.put_error.lock();
-                if k.is_none() {
-                    *k = Some(std::io::Error::other(e.to_string()));
+        let mut results = Vec::with_capacity(2);
+        if self.manifest.dirty() >= limit {
+            results.push(self.manifest.flush(&self.trees, &apply));
+        }
+        if self.refcounts.dirty() >= limit {
+            results.push(self.refcounts.flush(&self.trees, &apply));
+        }
+        for r in results {
+            match r {
+                Ok(Some(stats)) => {
+                    self.unsynced_puts.fetch_add(stats.nodes_written, Ordering::Relaxed);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let mut k = self.put_error.lock();
+                    if k.is_none() {
+                        *k = Some(std::io::Error::other(e.to_string()));
+                    }
                 }
             }
         }
@@ -1251,8 +1300,8 @@ impl DictMetadataStore {
         let next_ino = self.inode_alloc.lock().next_ino();
         let inode_data = self.inode_data.lock().clone();
         let dir_data = self.dir_data.lock().clone();
+        let (refcount_root, refcounts) = self.refcounts.take_for_commit();
         let xattr_data = self.xattr_data.lock().clone();
-        let refcounts = self.refcounts.lock().clone();
         Ok(PreparedCommit {
             _serial: serial,
             store: self,
@@ -1268,6 +1317,7 @@ impl DictMetadataStore {
             manifest_root,
             manifest,
             xattr_data,
+            refcount_root,
             refcounts,
             logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
             inode_count: self.inode_count.load(Ordering::Relaxed),
@@ -1314,23 +1364,26 @@ impl DictMetadataStore {
         let next_ino = p.next_ino;
         let inode_data_digest = intern_u64_digest_map(&mut w, &p.inode_data);
         let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
-        // The manifest tree: the taken edits on the cut root (no flush ran
-        // since the cut, so the cut root is still the working root).
+        // The map trees: the taken edits on the cut roots (no flush ran
+        // since the cut, so the cut roots are still the working roots).
         let (manifest_root, manifest_apply) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
-        let manifest_stats = {
+        let (refcount_root, refcount_apply) = self.refcounts.apply_batch(&self.trees, &p.refcount_root, &p.refcounts)?;
+        let tree_stats = |name: &'static str, root: &chunk_store::ObjectId, apply: prolly::ApplyStats| {
             let ctx = self.trees.ctx();
-            let tree_err = |e| crate::pmap::tree_err("manifest_data", e);
-            TreeStats {
-                name: "manifest_data",
-                height: prolly::height(&ctx, &manifest_root).map_err(tree_err)?,
-                entries: prolly::count(&ctx, &manifest_root).map_err(tree_err)?,
-                apply: manifest_apply,
-            }
+            let tree_err = |e| crate::pmap::tree_err(name, e);
+            Ok::<_, MetaError>(TreeStats {
+                name,
+                height: prolly::height(&ctx, root).map_err(tree_err)?,
+                entries: prolly::count(&ctx, root).map_err(tree_err)?,
+                apply,
+            })
         };
+        let manifest_stats = tree_stats("manifest_data", &manifest_root, manifest_apply)?;
+        let refcount_stats = tree_stats("refcounts", &refcount_root, refcount_apply)?;
         self.injected_fault(CommitFault::AfterApply)?;
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
-        let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
+        let refcount_data_digest = crate::store_io::to_key(refcount_root);
 
         let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
         // root_dir_ino: always 1
@@ -1353,6 +1406,7 @@ impl DictMetadataStore {
         {
             let apply = self.apply_lock.lock();
             self.manifest.install_and_settle(manifest_root, &p.manifest, &apply);
+            self.refcounts.install_and_settle(refcount_root, &p.refcounts, &apply);
             p.installed = true;
             self.prepared.store(false, Ordering::Relaxed);
         }
@@ -1422,7 +1476,7 @@ impl DictMetadataStore {
         // Update last_root so background GC can use it
         *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
-        let trees = vec![manifest_stats];
+        let trees = vec![manifest_stats, refcount_stats];
         let stats = CommitStats {
             nodes_read: trees.iter().map(|t| t.apply.nodes_read).sum(),
             nodes_written: trees.iter().map(|t| t.apply.nodes_written).sum::<u64>() + 1,
@@ -1844,12 +1898,15 @@ pub(crate) enum Ref {
 pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<Vec<ObjectKey>, MetaError> {
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
-    let manifests = parse_key(&bytes[root_rec::MANIFEST_DATA..root_rec::MANIFEST_DATA + KEY_BYTES]);
+    let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let mut out = Vec::new();
-    walk_tree(cs, "manifest_data", &manifests, &mut |id| {
-        out.push(id);
-        Ok(())
-    }, &mut |_, _| Ok(()))?;
+    // The order of `for_each_referenced`: the manifest tree, then the refcounts.
+    for (name, o) in [("manifest_data", root_rec::MANIFEST_DATA), ("refcounts", root_rec::REFCOUNTS)] {
+        walk_tree(cs, name, &at(o), &mut |id| {
+            out.push(id);
+            Ok(())
+        }, &mut |_, _| Ok(()))?;
+    }
     Ok(out)
 }
 
@@ -1899,6 +1956,17 @@ fn manifest_leaf(k: &[u8], v: &[u8]) -> Result<ObjectKey, MetaError> {
     Ok(parse_key(v))
 }
 
+/// Check a leaf entry of the refcount tree (a 33-byte key and an 8-byte
+/// count, else corrupt).
+fn refcount_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
+    if k.len() != KEY_BYTES || v.len() != 8 {
+        return Err(MetaError::Corrupted(format!(
+            "refcounts tree: entry of a {}-byte key and a {}-byte value", k.len(), v.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Call `f` with each key that the root record `root` refers to, without a
 /// list of them (the GC mark, #207). A key can come more than once. The
 /// map and manifest nodes are read in windows of [`WALK_WINDOW`] bytes of
@@ -1915,7 +1983,7 @@ pub(crate) fn for_each_referenced(
         at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
         at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
     );
-    for k in [*root, inodes, dirs, xattrs, at(root_rec::REFCOUNTS)] {
+    for k in [*root, inodes, dirs, xattrs] {
         f(Ref::Node, k)?;
     }
     for map in [inodes, dirs, xattrs] {
@@ -1929,13 +1997,18 @@ pub(crate) fn for_each_referenced(
         let mut f = f.borrow_mut();
         f(Ref::Node, manifest)?;
         for_each_manifest_key(cs, &manifest, &mut |k| f(Ref::Content, k))
-    })
+    })?;
+    // The refcount tree: its nodes only (a counted content key is not a
+    // reference; the manifests give the live content).
+    let f = f.into_inner();
+    walk_tree(cs, "refcounts", &at(root_rec::REFCOUNTS), &mut |id| f(Ref::Tree, id), &mut refcount_leaf)
 }
 
 /// About how many keys [`for_each_referenced`] gives to the sorter for
 /// `root` (tree nodes go straight to the live set), from the sizes of its
-/// maps (no map is read whole): the 5 nodes of the root, one key per map
-/// entry, and for each entry of the manifest tree (`prolly::count`, the
+/// maps (no map is read whole): the 4 file-value nodes of the root (the
+/// root record and its flat maps), one key per map entry, and for each
+/// entry of the manifest tree (`prolly::count`, the
 /// root node only) its manifest and one content key (a file with more
 /// extents gives more). For the temp space check of the GC mark.
 pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
@@ -1943,7 +2016,7 @@ pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root:
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 5u64;
+    let mut keys = 4u64;
     for off in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
         let key = at(off);
         let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
@@ -2118,7 +2191,7 @@ impl DictMetadataStore {
     /// previously returned by `commit()`.
     ///
     /// Restores the in-memory maps (inode_data, dir_data, xattr_data) and the
-    /// working root of the manifest tree
+    /// working roots of the manifest and refcount trees
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
@@ -2148,7 +2221,6 @@ impl DictMetadataStore {
         let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
         let xattr_data = load_u64_digest_map(&mut *io_guard, &xattr_data_digest)?;
-        let refcounts = load_key_u64_map(&mut *io_guard, &refcount_data_digest)?;
 
         // Sanity: root directory inode must exist
         if !inode_data.contains_key(&root_dir_ino) {
@@ -2182,7 +2254,7 @@ impl DictMetadataStore {
             prepared: AtomicBool::new(false),
             xattr_data: lk(xattr_data).timed(Site::XattrData),
             pre_root_sync: lk(None),
-            refcounts: lk(refcounts).timed(Site::Refcounts),
+            refcounts: MapTree::new("refcounts", Site::Refcounts, crate::store_io::to_id(&refcount_data_digest)),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
             inode_count: AtomicU64::new(initial_inode_count),
             wal: lk(None).timed(Site::Wal),
@@ -2196,52 +2268,6 @@ impl DictMetadataStore {
             snapshots_by_name: lk(HashMap::new()),
         })
     }
-}
-
-/// Serialize a `BTreeMap<ObjectKey, u64>` and store it as a node (`NodeWrite`).
-///
-/// Format: `[count: u64 LE][for each entry: ObjectKey + u64 LE]`
-/// Each entry is `MAP_ENTRY` bytes; total = 8 + count × `MAP_ENTRY`.
-fn intern_key_u64_map(storage: &mut impl crate::store_io::NodeWrite, map: &BTreeMap<ObjectKey, u64>) -> ObjectKey {
-    let mut bytes = Vec::with_capacity(8 + map.len() * MAP_ENTRY);
-    bytes.extend_from_slice(&(map.len() as u64).to_le_bytes());
-    for (digest, count) in map {
-        put_digest(&mut bytes, digest);
-        bytes.extend_from_slice(&count.to_le_bytes());
-    }
-    (storage).put_node(&bytes)
-}
-
-/// Read and deserialize a `BTreeMap<ObjectKey, u64>` node (`NodeRead`).
-fn load_key_u64_map(
-    io: &mut impl crate::store_io::NodeRead,
-    key: &ObjectKey,
-) -> Result<BTreeMap<ObjectKey, u64>, MetaError> {
-    let bytes = (io).get_node(key)
-        .map_err(|e| crate::store_io::node_err("key-u64 map node", key, e))?;
-
-    if bytes.len() < 8 {
-        return Err(MetaError::Corrupted(format!(
-            "key-u64 map: expected at least 8 bytes, got {}",
-            bytes.len()
-        )));
-    }
-    let (count, expected) = map_size(&bytes);
-    if Some(bytes.len()) != expected {
-        return Err(MetaError::Corrupted(format!(
-            "key-u64 map: {} bytes cannot hold {} entries",
-            bytes.len(), count
-        )));
-    }
-
-    let mut map = BTreeMap::new();
-    for i in 0..count as usize { // checked by map_size
-        let off = 8 + i * MAP_ENTRY;
-        let digest = parse_key(&bytes[off..off + KEY_BYTES]);
-        let count_val = u64::from_le_bytes(bytes[off + KEY_BYTES..off + MAP_ENTRY].try_into().unwrap());
-        map.insert(digest, count_val);
-    }
-    Ok(map)
 }
 
 /// Parse an `ObjectKey` from a `KEY_BYTES`-byte slice.
@@ -2268,8 +2294,6 @@ mod map_decode_tests {
             let key = io.put_node(&n.to_le_bytes());
             let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_u64_digest_map(&mut io, &key)));
             assert!(matches!(a, Ok(Err(MetaError::Corrupted(_)))), "u64-key map, count {n}");
-            let b = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load_key_u64_map(&mut io, &key)));
-            assert!(matches!(b, Ok(Err(MetaError::Corrupted(_)))), "key-u64 map, count {n}");
         }
     }
 }
@@ -3255,10 +3279,7 @@ mod tests {
         let digest: ObjectKey = ObjectKey::example(0xDE);
 
         // Manually set refcount to u64::MAX - 1
-        {
-            let mut rc = store.refcounts.lock();
-            rc.insert(digest, u64::MAX - 1);
-        }
+        store.refcounts.write(digest, Some(u64::MAX - 1));
 
         // One more increment brings it to u64::MAX
         store.increment_refcount(&digest);
@@ -3278,10 +3299,7 @@ mod tests {
         let digest: ObjectKey = ObjectKey::example(0xAB);
 
         // Set refcount to u64::MAX directly
-        {
-            let mut rc = store.refcounts.lock();
-            rc.insert(digest, u64::MAX);
-        }
+        store.refcounts.write(digest, Some(u64::MAX));
 
         // Decrement must be a no-op for saturated blocks
         store.decrement_refcount(&digest);
@@ -3299,17 +3317,68 @@ mod tests {
         let d4: ObjectKey = ObjectKey::example(0x04);
         let d5: ObjectKey = ObjectKey::example(0x05);
 
-        {
-            let mut rc = store.refcounts.lock();
-            rc.insert(d1, u64::MAX); // saturated
-            rc.insert(d2, u64::MAX); // saturated
-            rc.insert(d3, 5);        // normal
-            rc.insert(d4, 2);        // normal
-            rc.insert(d5, 1);        // normal
-        }
+        store.refcounts.write(d1, Some(u64::MAX)); // saturated
+        store.refcounts.write(d2, Some(u64::MAX)); // saturated
+        store.refcounts.write(d3, Some(5));        // normal
+        store.refcounts.write(d4, Some(2));        // normal
+        store.refcounts.write(d5, Some(1));        // normal
 
-        assert_eq!(store.saturated_refcount_count(), 2,
+        assert_eq!(store.saturated_refcount_count().unwrap(), 2,
             "should count exactly 2 saturated refcounts");
+        // The same from the tree after a commit, and with pending edits on
+        // top: d1 is hidden by a delete, d2 by a normal count, d3 saturates
+        // in the overlay only.
+        store.commit().unwrap();
+        assert_eq!(store.refcounts.dirty(), 0);
+        assert_eq!(store.saturated_refcount_count().unwrap(), 2, "from the tree");
+        store.refcounts.write(d1, None);
+        store.refcounts.write(d2, Some(7));
+        store.refcounts.write(d3, Some(u64::MAX));
+        assert_eq!(store.saturated_refcount_count().unwrap(), 1, "pending edits hide tree entries");
+        let d6 = ObjectKey::example(0x06);
+        store.refcounts.write(d6, Some(u64::MAX));
+        assert_eq!(store.saturated_refcount_count().unwrap(), 2);
+    }
+
+    /// A refcount change reads the tree once and writes one edit; a
+    /// decrement of an absent key, or of a saturated one, writes none; a
+    /// count of 0 is deleted from the tree.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn refcount_changes_follow_the_tree() {
+        let (_dir, store) = make_store();
+        store.test_set_tree_flush(usize::MAX);
+        let (a, b) = (ObjectKey::example(0x10), ObjectKey::example(0x11));
+        store.decrement_refcount(&a);
+        assert_eq!(store.refcounts.dirty(), 0, "no edit for an absent key");
+        store.increment_refcount(&a);
+        store.increment_refcount(&a);
+        store.increment_refcount(&b);
+        store.commit().unwrap();
+        assert_eq!(store.refcounts.dirty(), 0);
+        let rec = store.io().lock().unwrap().get_node(&store.current_root().unwrap()).unwrap();
+        let tree = crate::store_io::to_id(&parse_key(&rec[root_rec::REFCOUNTS..root_rec::REFCOUNTS + KEY_BYTES]));
+        let cs = Arc::clone(&store.cs);
+        assert_eq!(prolly::get(&cs, &tree, &a.0).unwrap(), Some(2u64.to_le_bytes().to_vec()), "8 bytes LE");
+        // From the tree: one edit each.
+        store.decrement_refcount(&a);
+        store.decrement_refcount(&b);
+        assert_eq!(store.refcounts.dirty(), 2);
+        assert_eq!((store.get_refcount(&a), store.get_refcount(&b)), (1, 0));
+        // A tombstone counts as 0: a decrement changes nothing.
+        store.decrement_refcount(&b);
+        assert_eq!(store.get_refcount(&b), 0);
+        store.commit().unwrap();
+        let rec = store.io().lock().unwrap().get_node(&store.current_root().unwrap()).unwrap();
+        let tree = crate::store_io::to_id(&parse_key(&rec[root_rec::REFCOUNTS..root_rec::REFCOUNTS + KEY_BYTES]));
+        assert_eq!(prolly::count(&prolly::Ctx::uncached(&cs), &tree).unwrap(), 1, "the count of 0 is deleted");
+        // Saturated in the tree: a decrement writes nothing.
+        store.refcounts.write(b, Some(u64::MAX));
+        store.commit().unwrap();
+        store.decrement_refcount(&b);
+        store.increment_refcount(&b);
+        assert_eq!(store.refcounts.dirty(), 0);
+        assert_eq!(store.get_refcount(&b), u64::MAX);
     }
 
     // ── inode_count AtomicU64 tests (FIX-02 store layer) ─────────────────────
@@ -3616,6 +3685,9 @@ mod tests {
             if i % 3 == 0 {
                 store.set_xattr(ino, "user.a", b"x").unwrap();
             }
+            for p in &parts {
+                store.increment_refcount(p);
+            }
         }
         let root = store.commit().unwrap();
         let mut io = NodeReader(Arc::clone(store.io().lock().unwrap().store()));
@@ -3623,7 +3695,7 @@ mod tests {
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
         let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
-                            at(root_rec::XATTR_DATA), at(root_rec::REFCOUNTS)];
+                            at(root_rec::XATTR_DATA)];
         for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
             want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
         }
@@ -3650,6 +3722,11 @@ mod tests {
         }).unwrap();
         assert_eq!(trees, tree_nodes(&mut io, &root).unwrap());
         assert_eq!(trees[0], at(root_rec::MANIFEST_DATA), "the tree root first");
+        // The refcount tree root is a tree node, not a file value.
+        let refcounts = at(root_rec::REFCOUNTS);
+        assert!(prolly::count(&prolly::Ctx::uncached(&cs), &crate::store_io::to_id(&refcounts)).unwrap() > 100);
+        assert!(trees.contains(&refcounts), "the refcount tree is in the tree nodes");
+        assert!(!nodes.contains(&refcounts), "and not a file value");
 
         // A map node whose count does not fit its length is refused.
         let mut bad = 3u64.to_le_bytes().to_vec();
@@ -3782,11 +3859,16 @@ mod tests {
             store.link(1, "new", new).unwrap();
             store.set_manifest(new, &[mkey(new, 1)]).unwrap();
             store.modify_inode(files[7], |m| m.size = 77).unwrap();
+            let (rc_a, rc_b) = (mkey(1, 9), mkey(2, 9));
+            store.increment_refcount(&rc_a);
+            store.increment_refcount(&rc_a);
+            store.increment_refcount(&rc_b);
 
             store.test_fail_next_commit_at(fault);
             assert!(store.commit().is_err(), "{fault:?}");
             assert!(store.has_uncommitted_changes(), "{fault:?}");
             assert!(store.manifest.dirty() > 0, "{fault:?}: the manifest overlay is dirty again");
+            assert!(store.refcounts.dirty() > 0, "{fault:?}: the refcount overlay is dirty again");
             assert!(store.inode_live.dirty() > 0 && store.dir_live.dirty() > 0, "{fault:?}");
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}: flushes may run again");
             // The state is still readable.
@@ -3807,6 +3889,7 @@ mod tests {
             assert_eq!(re.lookup(1, "new").unwrap(), new, "{fault:?}");
             assert_eq!(re.get_manifest(new).unwrap(), vec![mkey(new, 1)], "{fault:?}");
             assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
+            assert_eq!((re.get_refcount(&rc_a), re.get_refcount(&rc_b)), (2, 1), "{fault:?}");
         }
     }
 
@@ -3829,12 +3912,17 @@ mod tests {
             let new = store.create_inode(&new_file_meta()).unwrap();
             store.link(1, "new", new).unwrap();
             store.modify_inode(files[7], |m| m.size = 77).unwrap();
+            let (rc_a, rc_b) = (mkey(1, 9), mkey(2, 9));
+            store.increment_refcount(&rc_a);
+            store.increment_refcount(&rc_a);
+            store.increment_refcount(&rc_b);
 
             store.test_fail_next_commit_at(fault);
             assert!(store.commit().is_err(), "{fault:?}");
             assert!(store.has_uncommitted_changes(), "{fault:?}: no root was logged");
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}");
             assert_eq!(store.manifest.dirty(), 0, "{fault:?}: the edits are in the tree");
+            assert_eq!(store.refcounts.dirty(), 0, "{fault:?}: the counts are in the tree");
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)], "{fault:?}");
             assert!(store.get_manifest(files[11]).is_err(), "{fault:?}");
 
@@ -3849,6 +3937,7 @@ mod tests {
             assert!(re.get_manifest(files[11]).is_err(), "{fault:?}");
             assert_eq!(re.lookup(1, "new").unwrap(), new, "{fault:?}");
             assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
+            assert_eq!((re.get_refcount(&rc_a), re.get_refcount(&rc_b)), (2, 1), "{fault:?}");
         }
     }
 

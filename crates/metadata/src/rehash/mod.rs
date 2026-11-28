@@ -16,21 +16,23 @@
 //!   directory entry holds the BLAKE3-256 of its name, not a content
 //!   address; it is inside the copied bytes and does not change.
 //! - **Translation of a key-carrying node.** The manifest lists, the three
-//!   flat `u64 -> key` maps, the refcount table and the root record are
-//!   read in windows of whole records; each key is replaced by its new key,
-//!   and the node is written again through a `FileWriter`. These nodes are
-//!   always translated, also when their own key has the target tag: they
-//!   can list keys of another tag. The refcount rows are sorted by their
-//!   new keys with the external sorter of the chunk store, and rows that
-//!   get one new key are merged.
-//! - **Rebuild of a map tree** (the `manifest_data` prolly tree). A tree
+//!   flat `u64 -> key` maps and the root record are read in windows of
+//!   whole records; each key is replaced by its new key, and the node is
+//!   written again through a `FileWriter`. These nodes are always
+//!   translated, also when their own key has the target tag: they can list
+//!   keys of another tag.
+//! - **Rebuild of a map tree** (the `manifest_data` and `refcounts` prolly
+//!   trees). A tree
 //!   node holds the IDs of its children, so every node ID changes with the
 //!   hash. The old tree is read in key order with a cursor (one path of
 //!   nodes, no cache; every object read is verified with the hasher of its
 //!   tag), each value is translated (a manifest key through the manifest
 //!   list translation), and the entries go into a `prolly::Builder` of the
 //!   target store with the store's boundary salt (`RehashOptions::tree_salt`).
-//!   The keys (inode numbers) do not change, so their order does not either.
+//!   The manifest keys (inode numbers) do not change, so their order does
+//!   not either. The refcount keys are content keys and do change: the rows
+//!   are sorted by their new keys with the external sorter of the chunk
+//!   store, and rows that get one new key are merged (saturating sum).
 //!   A tree is always rebuilt, also when every node already has the target
 //!   tag (the build then gives the same IDs): to know that its values need
 //!   no translation, all of its leaves must be read anyway, and the rebuild
@@ -453,26 +455,28 @@ impl Walker<'_, '_> {
         self.done(kind, what, old, len, w)
     }
 
-    /// The new key of a refcount table: each key translated, the rows
-    /// sorted by new key, the counts of one new key summed.
-    fn refcounts(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
-        if let Some(new) = self.hit(Kind::Refcounts, &old)? {
+    /// The new root of the refcount tree `old`: read in key order with a
+    /// cursor, each content key translated (a row whose content is missing
+    /// is stale and dropped), the rows sorted by their new keys with the
+    /// external sorter, the counts of one new key summed (saturating), and
+    /// the rows pushed into a `prolly::Builder` of the target store. In a
+    /// dry run the old root, with the tree nodes of another tag counted.
+    fn refcount_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::RefcountTree;
+        if let Some(new) = self.hit(kind, &old)? {
             return Ok(new);
         }
         let cs = self.cs;
-        let what = "refcount table";
-        let corrupt = |m: String| RehashError::Corrupt(format!("{what} {}: {m}", old.to_hex()));
-        let err = |source| RehashError::Read { what, key: old, source };
-        let mut r = FileReader::open(cs, to_id(&old)).map_err(err)?;
-        let len = r.len();
-        let h = if len >= 8 { r.read(cs, 0, 8).map_err(err)? } else { Vec::new() };
-        if h.len() != 8 {
-            return Err(corrupt(format!("{len} bytes, no count")));
-        }
-        let count = u64::from_le_bytes(h[..8].try_into().unwrap());
-        if count.checked_mul(MAP_ENTRY as u64).and_then(|n| n.checked_add(8)) != Some(len) {
-            return Err(corrupt(format!("{len} bytes cannot hold {count} rows")));
-        }
+        let what = "refcount tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
         let mut sorter = if self.dry() {
             None
         } else {
@@ -480,64 +484,52 @@ impl Walker<'_, '_> {
             let cfg = SortCfg { chunk_records: extsort::SORT_CHUNK_BYTES / REF_ROW, fan_in: extsort::MERGE_FAN_IN };
             Some(Sorter::<REF_ROW>::new(tmp, "refcounts", cfg))
         };
-        let per = (WINDOW / MAP_ENTRY) as u64;
-        let (mut off, mut done, mut row) = (8u64, 0u64, 0u64);
-        while done < count {
-            let n = per.min(count - done);
-            let buf = r.read(cs, off, n as usize * MAP_ENTRY).map_err(err)?;
-            if buf.len() != n as usize * MAP_ENTRY {
-                return Err(corrupt(format!("short read at {off}")));
+        let mut row = 0u64;
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if k.len() != KEY_BYTES || v.len() != 8 {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
             }
-            for one in buf.as_chunks::<MAP_ENTRY>().0 {
-                let key = ObjectKey::read(one, 0);
-                let new = match self.value("file content", key) {
-                    Ok(new) => new,
-                    // No manifest of this root uses it (the manifests
-                    // were translated first): a stale count.
-                    Err(RehashError::Read { source: chunk_store::Error::Missing(_), .. }) => {
-                        self.stats.stale_refcounts += 1;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
-                if let Some(s) = sorter.as_mut() {
-                    let mut rec = [0u8; REF_ROW];
-                    rec[..KEY_BYTES].copy_from_slice(&new.0);
-                    rec[KEY_BYTES..KEY_BYTES + 8].copy_from_slice(&u64::from_le_bytes(one[KEY_BYTES..].try_into().unwrap()).to_be_bytes());
-                    rec[KEY_BYTES + 8..].copy_from_slice(&row.to_be_bytes());
-                    s.push(rec)?;
+            let new = match self.value("file content", ObjectKey::read(&k, 0)) {
+                Ok(new) => new,
+                // No manifest of this root uses it (the manifests were
+                // translated first): a stale count.
+                Err(RehashError::Read { source: chunk_store::Error::Missing(_), .. }) => {
+                    self.stats.stale_refcounts += 1;
+                    continue;
                 }
-                row += 1;
+                Err(e) => return Err(e),
+            };
+            if let Some(s) = sorter.as_mut() {
+                let mut rec = [0u8; REF_ROW];
+                rec[..KEY_BYTES].copy_from_slice(&new.0);
+                rec[KEY_BYTES..KEY_BYTES + 8].copy_from_slice(&u64::from_le_bytes(v[..8].try_into().unwrap()).to_be_bytes());
+                rec[KEY_BYTES + 8..].copy_from_slice(&row.to_be_bytes());
+                s.push(rec)?;
             }
-            off += buf.len() as u64;
-            done += n;
+            row += 1;
         }
         self.stats.values_read += 1;
-        self.stats.bytes_read += len;
         let Some(sorter) = sorter else {
-            return self.done(Kind::Refcounts, what, old, len, None);
+            let tag = self.target.tag();
+            let mut other = 0u64;
+            prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                other += u64::from(n.id.tag() != tag);
+                true
+            })
+            .map_err(err)?;
+            self.stats.other_tag_objects += other;
+            return self.mapped(kind, old, old);
         };
+        // One pass: the rows of one new key are next to each other.
         let sorted = sorter.finish()?;
-        // Pass 1: the count of distinct new keys.
-        let mut distinct = 0u64;
-        let mut prev: Option<[u8; KEY_BYTES]> = None;
-        let mut rd = sorted.reader()?;
-        while let Some(rec) = rd.next_rec()? {
-            let k: [u8; KEY_BYTES] = rec[..KEY_BYTES].try_into().unwrap();
-            if prev != Some(k) {
-                distinct += 1;
-                prev = Some(k);
-            }
-        }
-        // Pass 2: one row per new key with the sum of its counts.
-        let mut w = FileWriter::new();
-        w.write(cs, &distinct.to_le_bytes()).map_err(RehashError::Write)?;
-        let mut out = Vec::new();
+        let mut b = prolly::Builder::new(cs, prolly::Config::DEFAULT.with_salt(self.tree_salt));
         let mut cur: Option<([u8; KEY_BYTES], u64)> = None;
         let mut rd = sorted.reader()?;
         loop {
-            let rec = rd.next_rec()?;
-            let next = rec.map(|rec| {
+            let next = rd.next_rec()?.map(|rec| {
                 let k: [u8; KEY_BYTES] = rec[..KEY_BYTES].try_into().unwrap();
                 (k, u64::from_be_bytes(rec[KEY_BYTES..KEY_BYTES + 8].try_into().unwrap()))
             });
@@ -545,12 +537,7 @@ impl Walker<'_, '_> {
                 (Some((k, sum)), Some((nk, c))) if k == nk => cur = Some((k, sum.saturating_add(c))),
                 (c, n) => {
                     if let Some((k, sum)) = c {
-                        out.extend_from_slice(&k);
-                        out.extend_from_slice(&sum.to_le_bytes());
-                        if out.len() >= WINDOW {
-                            w.write(cs, &out).map_err(RehashError::Write)?;
-                            out.clear();
-                        }
+                        b.push(&k, &sum.to_le_bytes()).map_err(werr)?;
                     }
                     if n.is_none() {
                         break;
@@ -559,8 +546,9 @@ impl Walker<'_, '_> {
                 }
             }
         }
-        w.write(cs, &out).map_err(RehashError::Write)?;
-        self.done(Kind::Refcounts, what, old, len, Some(w))
+        let (root, _) = b.finish().map_err(werr)?;
+        self.stats.values_rewritten += 1;
+        self.mapped(kind, old, to_key(root))
     }
 
     /// The new key of a root record: its six keys translated, the other
@@ -584,7 +572,7 @@ impl Walker<'_, '_> {
         enum Field {
             Map(Blob),
             ManifestTree,
-            Refcounts,
+            RefcountTree,
         }
         // The manifests before the refcounts: a refcount row that no
         // manifest uses is stale.
@@ -593,14 +581,14 @@ impl Walker<'_, '_> {
             (root_rec::DIR_DATA, Field::Map(Blob::ValueMap("directory node"))),
             (root_rec::XATTR_DATA, Field::Map(Blob::ValueMap("xattr node"))),
             (root_rec::MANIFEST_DATA, Field::ManifestTree),
-            (root_rec::REFCOUNTS, Field::Refcounts),
+            (root_rec::REFCOUNTS, Field::RefcountTree),
         ];
         for (o, f) in fields {
             let key = at(&rec, o);
             let new = match f {
                 Field::Map(b) => self.blob(b, key)?,
                 Field::ManifestTree => self.manifest_tree(key)?,
-                Field::Refcounts => self.refcounts(key)?,
+                Field::RefcountTree => self.refcount_tree(key)?,
             };
             rec[o..o + KEY_BYTES].copy_from_slice(&new.0);
         }

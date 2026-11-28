@@ -14,6 +14,8 @@ use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 /// Offset of the manifest tree root in the root record (pinned by the
 /// `root_record_layout` unit test): root dir ino, next ino, inode and dir maps.
 const MANIFEST_DATA: usize = 8 + 8 + 2 * KEY_BYTES;
+/// Offset of the refcount tree root: after the manifest and xattr fields.
+const REFCOUNTS: usize = MANIFEST_DATA + 2 * KEY_BYTES;
 
 fn manifest_tree(cs: &chunk_store::ChunkStore, root: &ObjectKey) -> chunk_store::ObjectId {
     let rec = get_value(cs, root).unwrap();
@@ -79,7 +81,11 @@ fn manifest_tree_end_to_end() {
     let (nodes_a, nodes_b) = (nodes_of(&cs, &tree_a), nodes_of(&cs, &tree_b));
     let mut io_r = NodeReader(Arc::clone(&cs));
     let listed: BTreeSet<_> = tree_nodes(&mut io_r, &b).unwrap().iter().map(to_id).collect();
-    assert_eq!(listed, nodes_b, "tree_nodes lists the nodes of the tree");
+    // The refcount tree (plan 26-07) is in the list too.
+    let rec = get_value(&cs, &b).unwrap();
+    let refcounts = chunk_store::ObjectId(rec[REFCOUNTS..REFCOUNTS + KEY_BYTES].try_into().unwrap());
+    let want: BTreeSet<_> = nodes_b.union(&nodes_of(&cs, &refcounts)).copied().collect();
+    assert_eq!(listed, want, "tree_nodes lists the nodes of the trees");
     let old: Vec<_> = nodes_a.difference(&nodes_b).copied().collect();
     assert!(!old.is_empty(), "B rewrote nodes of A");
 
