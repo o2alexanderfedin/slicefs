@@ -21,6 +21,12 @@ step mkdir-mv 10 bash -c "mkdir $R/mnt/d && mv $R/mnt/r1.bin $R/mnt/d/"
 step chmod 10 bash -c "chmod 600 $R/mnt/e.txt && [ \$(stat -c %a $R/mnt/e.txt) = 600 ]"
 step truncate 10 bash -c "truncate -s 1 $R/mnt/e.txt && [ \$(stat -c %s $R/mnt/e.txt) = 1 ]"
 step xattr 10 bash -c "setfattr -n user.k -v v $R/mnt/e.txt && [ \"\$(getfattr --only-values -n user.k $R/mnt/e.txt)\" = v ]"
+# A 60,000-byte value (above the inline limit, so spilled), 300 names on
+# one file, then a remove: all through the kernel (size query, then read).
+head -c 60000 /dev/urandom > $R/xv
+step xattr-big 30 bash -c "setfattr -n user.big -v 0s\$(base64 -w0 $R/xv) $R/mnt/e.txt && getfattr --only-values -n user.big $R/mnt/e.txt | cmp - $R/xv"
+step xattr-many 120 bash -c "for i in \$(seq 1 300); do setfattr -n user.n\$i -v v\$i $R/mnt/e.txt || exit 1; done; [ \$(getfattr -d $R/mnt/e.txt | grep -c '^user\.n') = 300 ]"
+step xattr-remove 10 bash -c "setfattr -x user.big $R/mnt/e.txt && ! getfattr -n user.big $R/mnt/e.txt"
 step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done

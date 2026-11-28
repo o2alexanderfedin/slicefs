@@ -1,0 +1,280 @@
+# Gate log 26-16 (tree d52598d plus the mt-linux.sh steps of Task 3; Task 3 changes no Rust code)
+
+== cargo test -p slicefs-cli --lib
+test unmount::tests::test_try_force_unmount_nonexistent_path_returns_false ... ok
+test snapshot::tests::test_snapshot_create_succeeds_on_unmounted_store ... ok
+test snapshot::tests::test_snapshot_create_with_name_succeeds ... ok
+test mount::tests::a_writable_mount_holds_the_store_lock_until_stop ... ok
+test unmount::tests::test_kill_processes_at_mountpoint_temp_dir_does_not_panic ... ok
+test stats::tests::stats_of_a_normal_store_shows_no_flags ... ok
+test unmount::tests::the_wait_ends_when_the_process_exits ... ok
+test snapshot::tests::test_snapshot_list_after_create ... ok
+test stats::tests::stats_shows_the_header ... ok
+test stats::tests::test_stats_mounted_store_json_succeeds ... ok
+test snapshot::tests::test_snapshot_switch_refuses_mounted_store ... ok
+test stats::tests::test_stats_segment_store_json_output ... ok
+test stats::tests::test_stats_segment_store_succeeds ... ok
+test unmount::tests::the_wait_ends_when_the_store_lock_is_free ... ok
+test stats::tests::test_stats_mounted_store_succeeds ... ok
+test scrub::tests::test_scrub_verifies_objects_of_both_hashes ... ok
+Unmount failed for /nonexistent/path/that/cannot/be/a/mountpoint
+umount: /nonexistent/path/that/cannot/be/a/mountpoint: not currently mounted
+test unmount::tests::test_run_unmount_nonexistent_path_returns_error ... ok
+Unmount failed for /nonexistent/path/that/cannot/be/mounted
+umount: /nonexistent/path/that/cannot/be/mounted: not currently mounted
+test unmount::tests::test_run_unmount_returns_error_message_with_path ... ok
+test snapshot::tests::test_snapshot_switch_unknown_ref_fails ... ok
+Unmount failed for /nonexistent/not_a_mountpoint
+test mount::tests::offline_commands_see_a_ro_compat_mount ... ok
+umount: /nonexistent/not_a_mountpoint: not currently mounted
+test unmount::tests::test_run_unmount_with_nonexistent_store_cleans_nothing ... ok
+test snapshot::tests::test_snapshot_switch_by_name ... ok
+test gc::tests::a_sorter_io_error_in_the_mark_fails_the_gc_and_deletes_nothing ... ok
+test snapshot::tests::test_snapshot_switch_by_version ... ok
+test stats::tests::stats_shows_the_chunk_profile ... ok
+test seed::tests::test_seed_file_larger_than_read_buffer ... ok
+test header::tests::two_parallel_creates_of_a_new_store_agree ... ok
+test online_gc::tests::a_request_without_a_mount_times_out_and_is_removed ... ok
+test online_gc::tests::an_old_heartbeat_does_not_keep_the_request_waiting ... ok
+test commit_timer::tests::a_timed_commit_holds_the_gate_for_a_small_part_of_the_commit ... ok
+test online_gc::tests::a_request_waits_while_a_gc_runs_and_is_taken_after_it ... ok
+
+test result: ok. 426 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.79s
+
+rc=0
+
+== cargo test -p slicefs-cli --test dir_link_tests --test coverage_boost_tests --test e2e_filesystem_tests --test integration_tests --test posix_compliance_tests
+test test_dir_mkdir_has_dot_entries ... ok
+test test_dedup_refcount_incremented_for_identical_content ... ok
+test test_dir_nested_mkdir ... ok
+test test_dir_rmdir_nonempty_returns_enotempty ... ok
+test test_dir_rmdir_on_file_returns_enotdir ... ok
+test test_dedup_logical_bytes_counts_both_files ... ok
+test test_mtime_updates_on_write ... ok
+test test_dir_rmdir_empty_succeeds ... ok
+test test_setattr_mtime_explicit ... ok
+test test_rename_within_same_directory ... ok
+test test_rename_directory ... ok
+test test_dir_mkdir_increments_parent_nlinks ... ok
+test test_file_create_in_subdirectory ... ok
+test test_link_unlink_one_keeps_inode ... ok
+test test_file_create_write_read ... ok
+test test_file_overwrite_content ... ok
+test test_link_unlink_last_deletes_inode ... ok
+test test_file_delete_removes_from_directory ... ok
+test test_rename_editor_pattern ... ok
+test test_dir_rmdir_decrements_parent_nlinks ... ok
+test test_dedup_identical_content_same_digest ... ok
+test test_link_cross_directory ... ok
+test test_link_to_directory_returns_eperm ... ok
+test test_file_create_empty_has_size_zero ... ok
+test test_rename_across_directories ... ok
+test test_link_nlinks_equals_two ... ok
+test test_chown_changes_uid_gid ... ok
+test test_file_write_at_offset_zero_pads ... ok
+test test_rename_overwrites_existing_target ... ok
+test test_symlink_dangling_allowed ... ok
+test test_symlink_size_equals_target_length ... ok
+test test_truncate_to_shorter_length ... ok
+test test_truncate_to_zero ... ok
+test test_symlink_readlink_returns_target ... ok
+test test_symlink_and_file_are_distinct_inodes ... ok
+test test_symlink_long_target_path ... ok
+test test_truncate_zero_extend ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+rc=0
+
+== fuser lib tests and examples, host (macOS), in a copy of vendor/fuser
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/null.rs (<scratch>/fuser-target/debug/examples/null-1119c4812be650ae)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/passthrough.rs (<scratch>/fuser-target/debug/examples/passthrough-5cfb6d641a5270da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/passthrough_fork.rs (<scratch>/fuser-target/debug/examples/passthrough_fork-0a3d2cb1cf421375)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/poll.rs (<scratch>/fuser-target/debug/examples/poll-24503e28bf9a0555)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/poll_client.rs (<scratch>/fuser-target/debug/examples/poll_client-19358999f9d8c0a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/simple.rs (<scratch>/fuser-target/debug/examples/simple-c3d5e9aa5b499b66)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
+== cargo +stable clippy --locked -p slicefs-cli --all-targets -- -D warnings
+    Checking tempfile v3.27.0
+    Checking slicefs-traits v0.1.0 (<repo>/crates/slicefs-traits)
+    Checking zstd v0.13.3
+    Checking chunk-store v0.1.0 (<repo>/crates/chunk-store)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.93s
+rc=0
+
+== bash scripts/safety/unsafe-count.sh
+UNSAFE files=34 tokens=144 result=ok
+rc=0
+
+== cargo test --workspace (host; run on the committed Rust tree d52598d)
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+
+== scripts/docker-linux-test/run.sh all (Linux workspace, fuser lib tests, mount smoke)
+-- step results
+  read: ok
+  echo-write: ok
+  cp-3MB: ok
+  cp-again: ok
+  readback: ok
+  mkdir-mv: ok
+  chmod: ok
+  truncate: ok
+  xattr: ok
+  xattr-big: ok
+  xattr-many: ok
+  xattr-remove: ok
+  rm: ok
+  unmount: ok
+  daemon-exit: ok
+-- last 40 lines
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 8 (default)
+  pool-line: pool: workers=8 jobs=1077 max_weight=131072 max_queue_wait_ms=0 queue_max=1 jobs_per_worker=133,132,134,135,134,132,139,138
+  allocator-line: Allocator: mmap threshold 131072 bytes (fixed)
+  steps-line: steps: save_steps=1 steps_per_s=0.61 freed_per_step=0 freed_bytes=0
+CAS bytes        : 2.96 MiB (3106507 bytes) (packs/, apparent size)
+CAS on disk      : 2.97 MiB (3112960 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+== seeded
+Logical bytes    : 2 B
+Unique content   : 2 B (each distinct file content once)
+CAS bytes        : 3.09 KiB (3166 bytes) (packs/, apparent size)
+CAS on disk      : 8.00 KiB (8192 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3248	packs
+107	segments
+  workers-line: Workers: 8 (default)
+== after a.bin
+Logical bytes    : 2.86 MiB (3000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3041849 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3042013	packs
+187	segments
+  workers-line: Workers: 8 (default)
+== after b.bin (same content)
+Logical bytes    : 5.72 MiB (6000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3044457 bytes) (packs/, apparent size)
+CAS on disk      : 2.92 MiB (3059712 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3044703	packs
+187	segments
+  workers-line: Workers: 8 (default)
+content ok
+rc=0
