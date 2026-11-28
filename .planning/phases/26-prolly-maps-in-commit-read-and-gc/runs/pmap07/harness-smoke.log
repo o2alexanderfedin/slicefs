@@ -1,0 +1,111 @@
+# harness smoke; decides nothing
+# Plan 26-13 task 1. Both builds, end to end, before any decision run.
+# Commit runs: pmap07.sh commit at n=2000, 11 samples, labels smoke-flat and smoke-prolly.
+# Boost runs: SMOKE=1 pmap07.sh boost (generated trees, RUNS=1, KS="1 10 100").
+# pmap07.py fixes n=1000000 and gates K=100, so the smoke commit logs were given to it
+# through scratch copies with ' n=2000 ' changed to ' n=1000000 '. Only the smoke files.
+# The Boost download ran at the same time as these runs: the times are noisy.
+# The verdict line below means nothing.
+== build identity
+label=smoke-flat bin_src_commit=582a41d40a4f824882a9f65b6e4af19125e9e037 bench_commit=ba401563f005e38b3d19121e54c1961ab5e73196 smoke=1
+label=smoke-prolly bin_src_commit=ba401563f005e38b3d19121e54c1961ab5e73196 bench_commit=ba401563f005e38b3d19121e54c1961ab5e73196 smoke=1
+== commit smoke-flat (v2.3.0)
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+seed tree=smoke-flat n=2000 dirs=20 seed_ms=20.080 first_commit_ms=49.685
+sample tree=smoke-flat n=2000 seq=0 wall_ms=5.433 cpu_ms=2.272 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=1 wall_ms=4.601 cpu_ms=1.636 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=2 wall_ms=4.778 cpu_ms=1.853 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=3 wall_ms=3.370 cpu_ms=1.462 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=4 wall_ms=4.794 cpu_ms=1.754 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=5 wall_ms=4.728 cpu_ms=1.810 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=6 wall_ms=4.900 cpu_ms=1.915 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=7 wall_ms=4.621 cpu_ms=1.754 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=8 wall_ms=5.016 cpu_ms=1.973 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=9 wall_ms=5.189 cpu_ms=1.864 nodes_read=0 nodes_written=35 presync_ms=NA
+sample tree=smoke-flat n=2000 seq=10 wall_ms=4.683 cpu_ms=1.585 nodes_read=0 nodes_written=35 presync_ms=NA
+summary tree=smoke-flat n=2000 samples=11 wall_ms_median=4.778 cpu_ms_median=1.810
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.13s
+== commit smoke-prolly (branch)
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+seed tree=smoke-prolly n=2000 dirs=20 seed_ms=14.697 first_commit_ms=1561.395
+sample tree=smoke-prolly n=2000 seq=0 wall_ms=370.687 cpu_ms=0.815 nodes_read=6 nodes_written=5 presync_ms=0.710
+sample tree=smoke-prolly n=2000 seq=1 wall_ms=1436.752 cpu_ms=10.464 nodes_read=6 nodes_written=5 presync_ms=0.650
+sample tree=smoke-prolly n=2000 seq=2 wall_ms=613.899 cpu_ms=0.881 nodes_read=6 nodes_written=5 presync_ms=0.400
+sample tree=smoke-prolly n=2000 seq=3 wall_ms=246.309 cpu_ms=1.106 nodes_read=6 nodes_written=5 presync_ms=0.622
+sample tree=smoke-prolly n=2000 seq=4 wall_ms=255.736 cpu_ms=0.492 nodes_read=6 nodes_written=5 presync_ms=0.389
+sample tree=smoke-prolly n=2000 seq=5 wall_ms=237.363 cpu_ms=0.885 nodes_read=6 nodes_written=5 presync_ms=0.768
+sample tree=smoke-prolly n=2000 seq=6 wall_ms=454.245 cpu_ms=1.553 nodes_read=6 nodes_written=5 presync_ms=0.710
+sample tree=smoke-prolly n=2000 seq=7 wall_ms=258.830 cpu_ms=0.571 nodes_read=6 nodes_written=5 presync_ms=0.498
+sample tree=smoke-prolly n=2000 seq=8 wall_ms=431.936 cpu_ms=1.607 nodes_read=6 nodes_written=5 presync_ms=0.554
+sample tree=smoke-prolly n=2000 seq=9 wall_ms=169.105 cpu_ms=0.503 nodes_read=6 nodes_written=6 presync_ms=0.408
+sample tree=smoke-prolly n=2000 seq=10 wall_ms=231.644 cpu_ms=1.062 nodes_read=6 nodes_written=5 presync_ms=0.524
+summary tree=smoke-prolly n=2000 samples=11 wall_ms_median=258.830 cpu_ms_median=0.885
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.29s
+== boost smoke-flat: median rows of results.csv
+mode,run,pattern,k,seq,entries_changed,serialized_bytes,begin_ms,finish_ms,total_ms,cpu_user_s,cpu_sys_s,maxrss_bytes,new_objects,new_raw_bytes,new_stored_bytes,new_record_bytes,nodes_read,nodes_written,peak_rss_bytes
+whole,median,setup,0,all,NA,248484,0.304,10.142,10.447,0.002346,0.003233,9801728,17,29893,25435,26217,NA,NA,NA
+whole,median,scatter,1,all,NA,248484,0.194,3.421,3.616,0.001013,0.001027,9801728,9,22848,18954,19368,NA,NA,NA
+whole,median,scatter,10,all,NA,248484,0.196,4.935,5.161,0.001205,0.002171,9801728,23,84570,69513,70617,NA,NA,NA
+whole,median,scatter,100,all,NA,248484,0.214,8.219,8.434,0.003195,0.001553,9801728,119,176681,146238,151712,NA,NA,NA
+whole,median,cluster,1,all,NA,248607,0.167,3.174,3.341,0.001054,0.000097,9801728,7,12062,10062,10384,NA,NA,NA
+whole,median,cluster,10,all,NA,248730,0.188,5.315,5.525,0.000853,0.000896,10170368,25,32763,27397,28547,NA,NA,NA
+whole,median,cluster,100,all,NA,248730,0.250,6.159,6.411,0.001164,0.003165,10170368,117,46513,39496,44878,NA,NA,NA
+whole,median,version,0,all,NA,261030,0.819,21.289,22.108,0.009504,0.010169,11485184,851,345083,275798,314944,NA,NA,NA
+whole,median,insdel,1,all,NA,260907,0.224,3.696,3.920,0.001201,0.001113,11485184,7,11494,9595,9917,NA,NA,NA
+whole,median,insdel,10,all,NA,259800,0.299,10.331,10.631,0.003759,0.001250,11485184,27,137181,108421,109663,NA,NA,NA
+whole,median,insdel,100,all,NA,249960,0.308,11.620,12.058,0.004020,0.004226,12021760,76,295969,228813,232309,NA,NA,NA
+== boost smoke-prolly: median rows of results.csv
+whole,median,setup,0,all,NA,21585,0.013,1111.410,1111.423,0.001131,0.002152,5513216,8,21635,4093,4461,8,7,NA
+whole,median,scatter,1,all,NA,15447,0.015,178.401,178.416,0.000544,0.001057,5775360,6,15497,8017,8385,6,5,NA
+whole,median,scatter,10,all,NA,63479,0.017,201.821,201.838,0.000418,0.001134,6823936,11,56745,19210,19716,15,13,NA
+whole,median,scatter,100,all,NA,208914,0.061,205.566,205.627,0.002983,0.000416,7872512,32,205741,79647,81119,34,32,NA
+whole,median,cluster,1,all,NA,9278,0.017,91.990,92.007,0.000190,0.000910,8921088,4,9328,2264,2448,3,3,NA
+whole,median,cluster,10,all,NA,25960,0.021,358.694,358.715,0.001026,0.001035,8921088,10,26010,14243,14703,11,9,NA
+whole,median,cluster,100,all,NA,34062,0.057,249.324,249.381,0.001018,0.001025,8921088,10,34112,15473,15979,11,9,NA
+whole,median,version,0,all,NA,305758,0.295,599.718,600.013,0.002681,0.005526,11481088,46,300803,99349,101465,45,46,NA
+whole,median,insdel,1,all,NA,30526,0.017,318.896,318.913,0.001583,0.000000,11481088,4,11623,2438,2622,9,7,NA
+whole,median,insdel,10,all,NA,132392,0.030,400.947,400.978,0.002510,0.001117,11481088,22,132442,46537,47641,23,21,NA
+whole,median,insdel,100,all,NA,291810,0.108,798.708,798.816,0.003565,0.003869,12005376,45,291860,99430,101500,45,44,NA
+== machine (smoke-prolly)
+os=Linux 7.2.12-orbstack-00394-gbecdd6130068
+arch=x86_64
+cpu=Intel(R) Xeon(R) W-3245 CPU @ 3.20GHz
+cpus=32
+mem_bytes=16837255168
+fs=btrfs
+rustc=rustc 1.100.0 (0ef1bc386 2026-11-09)
+commit=unknown
+page_cache=warm (not dropped)
+load_before=4.56 2.57 2.13
+load_after=3.99 2.57 2.14
+start_utc=2026-11-28T08:04:04Z
+end_utc=2026-11-28T08:04:24Z
+bench_data=smoke
+runs=1
+ks=1 10 100
+commits=2
+patterns=scatter cluster insdel
+seed=24
+scale_ns=10000 50000
+boost_vers=0_0_1 0_0_2
+== pmap07.py on the smoke files
+check A cpu_ratio=0.489 nodes_ratio=0.314 pass=0
+check B wall_ratio=54.171 pass=0
+row pattern=scatter k=1 cpu_ratio=0.785 wall_ratio=49.341 bytes_ratio=0.423 better=0 bytes_ok=1
+row pattern=scatter k=10 cpu_ratio=0.460 wall_ratio=39.108 bytes_ratio=0.276 better=0 bytes_ok=1
+row pattern=scatter k=100 cpu_ratio=0.716 wall_ratio=24.381 bytes_ratio=0.545 better=0 bytes_ok=1
+row pattern=cluster k=1 cpu_ratio=0.956 wall_ratio=27.539 bytes_ratio=0.225 better=0 bytes_ok=1
+row pattern=cluster k=10 cpu_ratio=1.178 wall_ratio=64.926 bytes_ratio=0.520 better=0 bytes_ok=1
+row pattern=cluster k=100 cpu_ratio=0.472 wall_ratio=38.899 bytes_ratio=0.392 better=0 bytes_ok=1
+row pattern=insdel k=1 cpu_ratio=0.684 wall_ratio=81.355 bytes_ratio=0.254 better=0 bytes_ok=1
+row pattern=insdel k=10 cpu_ratio=0.724 wall_ratio=37.718 bytes_ratio=0.429 better=0 bytes_ok=1
+row pattern=insdel k=100 cpu_ratio=0.902 wall_ratio=66.248 bytes_ratio=0.435 better=0 bytes_ok=1
+check C rows=9 pass=0
+info presync_ms_median_prolly=0.554
+info flat_cpu_ms_median=1.810 prolly_cpu_ms_median=0.885 flat_wall_ms_median=4.778 prolly_wall_ms_median=258.830
+info insdel k=1 cpu_s_flat=0.0023 cpu_s_prolly=0.0016 wall_ms_flat=3.920 wall_ms_prolly=318.913
+info insdel k=10 cpu_s_flat=0.0050 cpu_s_prolly=0.0036 wall_ms_flat=10.631 wall_ms_prolly=400.978
+info insdel k=100 cpu_s_flat=0.0082 cpu_s_prolly=0.0074 wall_ms_flat=12.058 wall_ms_prolly=798.816
+info pattern=setup k=0 cpu_ratio=0.588 wall_ratio=106.387 bytes_ratio=0.161
+info pattern=version k=0 cpu_ratio=0.417 wall_ratio=27.140 bytes_ratio=0.360
+verdict pmap07=fail
