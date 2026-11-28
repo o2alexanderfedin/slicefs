@@ -28,7 +28,8 @@ and cpu_ms (no verdict).
 
 Exit codes: 0 with a verdict or a summary; 2 (message on stderr) on a missing
 file, a missing column, a non-number, an NA where a check needs a number,
-fewer than 11 samples of a tree, a tree label that is on both sides or on
+fewer than 22 samples of a tree for a verdict (two rounds; 11 for
+--summary), a tree label that is on both sides or on
 more than one side's files, or a missing gated row; 1 when the self-test fails.
 """
 
@@ -43,7 +44,8 @@ import tempfile
 # The rule. Fixed before the first measurement.
 A_LIMIT = 0.20          # check A: prolly <= 0.20 x flat (CPU and nodes)
 C_BYTES_LIMIT = 2.0     # check C: new stored bytes <= 2 x flat
-MIN_SAMPLES = 11        # samples of a tree needed by a check or a summary
+MIN_SAMPLES = 11        # samples of one round of a tree; a summary needs them
+VERDICT_SAMPLES = 2 * MIN_SAMPLES   # samples of a tree for a verdict: two rounds (the rule file)
 N_FILES = 1_000_000     # files of a decision run
 GATED_PATTERNS = ("scatter", "cluster", "insdel")
 GATED_KS = (1, 10, 100)
@@ -92,14 +94,14 @@ def read_samples(paths):
 
 
 def by_tree(samples, n):
-    """Group the samples with n files by tree label; each tree needs MIN_SAMPLES."""
+    """Group the samples with n files by tree label; each tree needs VERDICT_SAMPLES."""
     trees = {}
     for s in samples:
         if int(num(s["n"], "n")) == n:
             trees.setdefault(s["tree"], []).append(s)
     for label, rows in trees.items():
-        if len(rows) < MIN_SAMPLES:
-            raise Refuse("tree %s has %d samples with n=%d, need %d" % (label, len(rows), n, MIN_SAMPLES))
+        if len(rows) < VERDICT_SAMPLES:
+            raise Refuse("tree %s has %d samples with n=%d, need %d" % (label, len(rows), n, VERDICT_SAMPLES))
     if not trees:
         raise Refuse("no sample with n=%d" % n)
     return trees
@@ -403,6 +405,8 @@ def self_test():
     expect("exit 2 on malformed line", rc == 2 and err)
     rc, _, err = case(sample_lines("prolly", n, 10, "60.0", "10.0", 20, 80))
     expect("exit 2 on fewer than 11 samples", rc == 2 and err)
+    rc, _, err = case(sample_lines("prolly", n, 11, "60.0", "10.0", 20, 80))
+    expect("exit 2 on one round (11 of 22 samples)", rc == 2 and "need 22" in err)
     rc, _, err = case(sample_lines("prolly", n, 22, "60.0", "10.0", "NA", "NA"))
     expect("exit 2 on NA nodes", rc == 2 and err)
     rc, _, err = case(sample_lines("flat", n, 22, "60.0", "10.0", 20, 80))
