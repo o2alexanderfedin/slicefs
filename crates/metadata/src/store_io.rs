@@ -163,13 +163,28 @@ pub struct StoreIo {
     unsynced: usize,
     /// Number of `sync_written` calls that had something to sync (for tests).
     syncs: u64,
+    /// The node cache of the metadata trees (fixed byte cap).
+    node_cache: Arc<prolly::NodeCache>,
+    /// The config of the metadata trees.
+    tree_config: prolly::Config,
 }
+
+/// Byte cap of the node cache of a `StoreIo` (26-CONTEXT.md "Node cache size").
+pub const NODE_CACHE_BYTES: usize = 64 << 20;
 
 impl StoreIo {
     /// Nodes of the store directory `root`, in `cs` (the chunk store of that
     /// directory, shared with the file content).
     pub fn new(root: impl Into<PathBuf>, cs: Arc<ChunkStore>) -> Self {
-        Self { root: root.into(), cs, failed: None, unsynced: 0, syncs: 0 }
+        Self {
+            root: root.into(),
+            cs,
+            failed: None,
+            unsynced: 0,
+            syncs: 0,
+            node_cache: Arc::new(prolly::NodeCache::new(NODE_CACHE_BYTES)),
+            tree_config: prolly::Config::DEFAULT,
+        }
     }
 
     /// Open the chunk store of `root` (in `root/packs/`) for a `StoreIo`
@@ -188,6 +203,35 @@ impl StoreIo {
     /// The chunk store.
     pub fn store(&self) -> &Arc<ChunkStore> {
         &self.cs
+    }
+
+    /// The node cache of the metadata trees (shared by the stores loaded
+    /// on this `StoreIo`).
+    pub fn node_cache(&self) -> Arc<prolly::NodeCache> {
+        Arc::clone(&self.node_cache)
+    }
+
+    /// The config of the metadata trees: the default rule with the
+    /// boundary salt of the store (see [`StoreIo::with_tree_salt`]).
+    pub fn tree_config(&self) -> prolly::Config {
+        self.tree_config
+    }
+
+    /// Use the boundary salt of the store (`None`: no salt) for every tree
+    /// this `StoreIo` writes. A salted store has salted cuts in every
+    /// tree, so a tree is the same for the same entries. Call it before
+    /// the store loads.
+    #[must_use]
+    pub fn with_tree_salt(mut self, salt: Option<[u8; 32]>) -> Self {
+        self.tree_config = prolly::Config::DEFAULT.with_salt(salt);
+        self
+    }
+
+    /// Set the byte cap of the node cache (`--meta-cache-size`): a new, empty
+    /// cache replaces the old one. Call it before the store loads, because a
+    /// store that is loaded already keeps the cache it was given.
+    pub fn set_node_cache_bytes(&mut self, cap: usize) {
+        self.node_cache = Arc::new(prolly::NodeCache::new(cap));
     }
 
     /// Nodes put since the last `sync_written`.

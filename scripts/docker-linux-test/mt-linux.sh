@@ -21,6 +21,24 @@ step mkdir-mv 10 bash -c "mkdir $R/mnt/d && mv $R/mnt/r1.bin $R/mnt/d/"
 step chmod 10 bash -c "chmod 600 $R/mnt/e.txt && [ \$(stat -c %a $R/mnt/e.txt) = 600 ]"
 step truncate 10 bash -c "truncate -s 1 $R/mnt/e.txt && [ \$(stat -c %s $R/mnt/e.txt) = 1 ]"
 step xattr 10 bash -c "setfattr -n user.k -v v $R/mnt/e.txt && [ \"\$(getfattr --only-values -n user.k $R/mnt/e.txt)\" = v ]"
+# A 60,000-byte value (above the inline limit, so spilled), 300 names on
+# one file, then a remove: all through the kernel (size query, then read).
+head -c 60000 /dev/urandom > $R/xv
+step xattr-big 30 bash -c "setfattr -n user.big -v 0s\$(base64 -w0 $R/xv) $R/mnt/e.txt && getfattr --only-values -n user.big $R/mnt/e.txt | cmp - $R/xv"
+step xattr-many 120 bash -c "for i in \$(seq 1 300); do setfattr -n user.n\$i -v v\$i $R/mnt/e.txt || exit 1; done; [ \$(getfattr -d $R/mnt/e.txt | grep -c '^user\.n') = 300 ]"
+step xattr-remove 10 bash -c "setfattr -x user.big $R/mnt/e.txt && ! getfattr -n user.big $R/mnt/e.txt"
+# 3,000 names in one directory: the kernel reads the listing in many
+# readdir replies, each filled from the streamed directory scan; rmdir
+# refuses the directory until it is empty.
+step readdir-many 180 bash -c "mkdir $R/mnt/big && for i in \$(seq 1 3000); do : > $R/mnt/big/f\$i || exit 1; done; [ \$(ls -f $R/mnt/big | wc -l) = 3002 ] && [ \$(ls $R/mnt/big | sort -u | wc -l) = 3000 ]"
+step rmdir-notempty 10 bash -c "! rmdir $R/mnt/big 2>/dev/null"
+step rmdir 120 bash -c "rm -f $R/mnt/big/f* && rmdir $R/mnt/big && [ ! -e $R/mnt/big ]"
+# Unlink each name while the directory is read (one open handle, no
+# rewind): the readdir cursor resumes after the last name, so no name is
+# left behind when the names before it are gone. Names of 204 bytes, so
+# the 1,000 names take many readdir replies (a kernel reply can hold as
+# many bytes as the getdents buffer).
+step readdir-unlink 180 bash -c "mkdir $R/mnt/del && printf -v p %0200d 0 && for i in \$(seq 1000 1999); do : > $R/mnt/del/\$p\$i || exit 1; done; perl -e 'opendir(D, \$ARGV[0]) or die; while (defined(my \$e = readdir D)) { next if \$e eq q(.) || \$e eq q(..); unlink(\$ARGV[0] . q(/) . \$e) or die } closedir D' $R/mnt/del && [ \$(ls -A $R/mnt/del | wc -l) = 0 ] && rmdir $R/mnt/del"
 step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done

@@ -26,11 +26,11 @@ use crate::util::ts;
 use crate::handlers::{
     handle_create, handle_flush, handle_fsync, handle_fsyncdir, handle_getattr, handle_getlk,
     handle_getxattr, handle_link, handle_listxattr, handle_lookup, handle_mkdir,
-    handle_mknod, handle_open, handle_read, handle_readdir, handle_readlink,
+    handle_mknod, handle_open, handle_read, handle_readlink,
     handle_release, handle_removexattr, handle_rename, handle_rmdir, handle_setattr,
     handle_setxattr, handle_statfs, handle_symlink, handle_unlink, handle_write_admitted, handle_write_retrying,
     AttrResult, CreateResult, DataResult, EmptyResult, EntryResult, LockResult,
-    OpenResult, ReaddirResult, StatfsResult, WriteResult, XattrResult,
+    OpenResult, StatfsResult, WriteResult, XattrResult,
 };
 
 /// True when `SLICEFS_FUSE_TRACE` is set to a value other than `0`; off by
@@ -271,22 +271,23 @@ impl Filesystem for MountedFs {
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
             fuse_trace!("[{}][FUSE] readdir: ENTRY ino={}, fh={}, offset={}", ts(), ino, fh, offset);
-            match serve(&fs, || handle_readdir(&fs, ino, offset)) {
-                ReaddirResult::Ok(entries) => {
-                    let total = entries.len();
-                    let mut returned = 0u64;
-                    for (index, (entry_ino, kind, name)) in entries.iter().enumerate() {
-                        let next_offset = offset + (index as u64) + 1;
-                        let buffer_full = reply.add(INodeNo(*entry_ino), next_offset, *kind, name);
-                        if buffer_full {
-                            break;
-                        }
-                        returned += 1;
+            // Streamed from the directory scan into the reply buffer: the
+            // scan stops at the first entry that does not fit (no list of
+            // the directory is built).
+            let r = serve(&fs, || {
+                fs.readdir_handle(ino, fh, offset, &mut |entry_ino, kind, name, next_offset| {
+                    if reply.add(INodeNo(entry_ino), next_offset, kind, name) {
+                        return std::ops::ControlFlow::Break(());
                     }
-                    fuse_trace!("[{}][FUSE] readdir: EXIT ino={} -> ok, total_entries={}, returned={}", ts(), ino, total, returned);
+                    std::ops::ControlFlow::Continue(())
+                })
+            });
+            match r {
+                Ok(()) => {
+                    fuse_trace!("[{}][FUSE] readdir: EXIT ino={} -> ok", ts(), ino);
                     reply.ok();
                 }
-                ReaddirResult::Error(errno) => {
+                Err(errno) => {
                     fuse_trace!("[{}][FUSE] readdir: EXIT ino={} -> error {}", ts(), ino, errno);
                     reply.error(Errno::from_i32(errno));
                 }
@@ -401,7 +402,7 @@ impl Filesystem for MountedFs {
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
             fuse_trace!("[{}][FUSE] releasedir: ENTRY ino={}, fh={}, flags={:#x}", ts(), ino, fh, flags);
-            serve(&fs, || ());
+            serve(&fs, || fs.release_dir_handle(fh));
             fuse_trace!("[{}][FUSE] releasedir: EXIT ino={} -> ok", ts(), ino);
             reply.ok();
         });
@@ -528,15 +529,17 @@ impl Filesystem for MountedFs {
         ino: INodeNo,
         name: &OsStr,
         size: u32,
+        position: u32,
         reply: ReplyXattr,
     ) {
         let ino = ino.0;
         let name = name.to_os_string();
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
-            fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino, name, size);
+            fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}, position={}", ts(), ino, name, size, position);
             let name_str = name.to_str().unwrap_or("");
-            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size)) {
+            // `position` is set on macOS only (the resource fork, fuser patch 4).
+            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size, position)) {
                 XattrResult::Size(sz) => {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> size_query, value_len={}", ts(), ino, name, sz);
                     reply.size(sz);
@@ -545,9 +548,15 @@ impl Filesystem for MountedFs {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> ok, value_len={}", ts(), ino, name, value.len());
                     reply.data(&value);
                 }
-                XattrResult::Error(_) => {
+                // An absent name: ENODATA on Linux, ENOATTR on macOS.
+                XattrResult::Error(e) if e == libc::ENODATA => {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> NO_XATTR", ts(), ino, name);
                     reply.error(Errno::NO_XATTR);
+                }
+                // ERANGE, EINVAL, E2BIG, EIO as they are.
+                XattrResult::Error(e) => {
+                    fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> error {}", ts(), ino, name, e);
+                    reply.error(Errno::from_i32(e));
                 }
             }
         });

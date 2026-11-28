@@ -1,13 +1,13 @@
 //! InodeMeta binary serialization for SliceFS.
 //!
-//! Provides 56/72-byte little-endian pack/unpack of `InodeMeta`, plus
-//! `intern_inode` and `load_inode`, which store and load it as one node
-//! (`crate::store_io::NodeWrite` / `NodeRead`).
+//! Provides 56/72-byte little-endian pack/unpack of `InodeMeta`. The record
+//! is the value of the inode's entry in the `inode_data` prolly tree, inline
+//! and with no tag byte (store format 8): the length tells the two forms
+//! apart. No inode is stored as an object of its own.
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
-use slicefs_traits::key::{ObjectKey};
 
-/// Serialize `InodeMeta` to a little-endian buffer of 56 or 60 bytes.
+/// Serialize `InodeMeta` to a little-endian buffer of 56 or 72 bytes.
 ///
 /// Layout (all little-endian):
 ///   [0..8]   ino        u64  (8 bytes)
@@ -25,10 +25,10 @@ use slicefs_traits::key::{ObjectKey};
 ///   [60..68] atime_sec  i64  (8 bytes)
 ///   [68..72] atime_nsec u32  (4 bytes)
 ///
-/// Inodes without rdev/atime keep the original 56-byte encoding (and their
-/// CAS digests), so stores written before the extension load unchanged.
+/// Inodes without rdev/atime use the 56-byte form (a smaller inline value
+/// in the inode tree).
 pub fn serialize_inode(meta: &InodeMeta) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(60);
+    let mut buf = Vec::with_capacity(72);
     buf.extend_from_slice(&meta.ino.to_le_bytes());
     buf.extend_from_slice(&meta.mode.to_le_bytes());
     buf.extend_from_slice(&meta.uid.to_le_bytes());
@@ -74,21 +74,18 @@ pub fn deserialize_inode(buf: &[u8]) -> Result<InodeMeta, MetaError> {
     })
 }
 
-/// Serialize an inode and store it as a node (`NodeWrite`).
-///
-/// Returns the `ObjectKey` key that can later be passed to `load_inode`.
-pub fn intern_inode(storage: &mut impl crate::store_io::NodeWrite, meta: &InodeMeta) -> ObjectKey {
-    let bytes = serialize_inode(meta);
-    (storage).put_node(&bytes)
-}
+/// An inode record (`inode_data`): `serialize_inode` bytes, 56 or 72.
+impl crate::pmap::TreeValue for InodeMeta {
+    fn encode(&self) -> Vec<u8> {
+        serialize_inode(self)
+    }
 
-/// Read and deserialize an inode node (`NodeRead`).
-///
-/// Returns `MetaError::Corrupted` if the key is not found or the data is wrong length.
-pub fn load_inode(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<InodeMeta, MetaError> {
-    let bytes = (io).get_node(key)
-        .map_err(|e| crate::store_io::node_err("inode node", key, e))?;
-    deserialize_inode(&bytes)
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        deserialize_inode(bytes).map_err(|e| match e {
+            MetaError::Corrupted(m) => format!("inode record: {m}"),
+            e => e.to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -246,22 +243,5 @@ mod tests {
         let meta = InodeMeta::new_file(2, 1000, 1000, 0o644);
         assert_eq!(meta.nlinks, 1);
         assert_eq!(meta.size, 0);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_intern_and_load_roundtrip() {
-        use crate::store_io::StoreIo;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let mut io = StoreIo::open(dir.path()).unwrap();
-        let original = sample_meta();
-        let key = {
-            let mut fsa = &mut io;
-            intern_inode(&mut fsa, &original)
-        };
-        let recovered = load_inode(&mut io, &key).expect("load_inode failed");
-        assert_eq!(original, recovered);
     }
 }

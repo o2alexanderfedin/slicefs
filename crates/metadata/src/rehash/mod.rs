@@ -5,24 +5,39 @@
 //! chunks under a manifest tree (`chunk_store::file`). The engine has two
 //! primitives:
 //!
-//! - **Byte copy of a value.** File content and the inode, directory and
-//!   xattr nodes hold no content address, so their bytes stay the same.
+//! - **Byte copy of a value.** File content and the spilled xattr values
+//!   hold no content address, so their bytes stay the same.
 //!   They are streamed from a [`FileReader`] (every object read is
 //!   verified, a read window of [`WINDOW`] bytes) into a [`FileWriter`] of
 //!   the store that is open with the target hasher and the store profile.
 //!   The new key is the key of a fresh write of the same bytes. The tree is
 //!   not translated node by node: the manifest node cuts depend on the IDs
-//!   (`is_cut`), so only the real writer gives the fresh-write key. A
-//!   directory entry holds the BLAKE3-256 of its name, not a content
-//!   address; it is inside the copied bytes and does not change.
-//! - **Translation of a key-carrying node.** The manifest lists, the four
-//!   `u64 -> key` maps, the inode map, the refcount table and the root
-//!   record are read in windows of whole records; each key is replaced by
-//!   its new key, and the node is written again through a `FileWriter`.
-//!   These nodes are always translated, also when their own key has the
-//!   target tag: they can list keys of another tag. The refcount rows are
-//!   sorted by their new keys with the external sorter of the chunk store,
-//!   and rows that get one new key are merged.
+//!   (`is_cut`), so only the real writer gives the fresh-write key.
+//! - **Translation of a key-carrying node.** The manifest lists and the
+//!   root record are read in windows of whole records; each key is replaced
+//!   by its new key, and the node is written again through a `FileWriter`. These nodes are always
+//!   translated, also when their own key has the target tag: they can list
+//!   keys of another tag.
+//! - **Rebuild of a map tree** (the `manifest_data`, `refcounts`,
+//!   `xattr_data`, `inode_data` and `dir_data` prolly trees). A tree
+//!   node holds the IDs of its children, so every node ID changes with the
+//!   hash. The old tree is read in key order with a cursor (one path of
+//!   nodes, no cache; every object read is verified with the hasher of its
+//!   tag), each value is translated (a manifest key through the manifest
+//!   list translation; a spilled xattr value through the byte copy, an
+//!   inline one copied; an inode record and a directory entry copied, they
+//!   hold no key), and the entries go into a `prolly::Builder` of the
+//!   target store with the store's boundary salt (`RehashOptions::tree_salt`).
+//!   The manifest and inode keys (inode numbers) and the xattr and
+//!   directory keys (inode number and name) do not change, so their order
+//!   does not either. The refcount keys are content keys and do change: the rows
+//!   are sorted by their new keys with the external sorter of the chunk
+//!   store, and rows that get one new key are merged (saturating sum).
+//!   A tree is always rebuilt, also when every node already has the target
+//!   tag (the build then gives the same IDs): to know that its values need
+//!   no translation, all of its leaves must be read anyway, and the rebuild
+//!   costs only the puts of nodes that dedup drops. A dry run reads and
+//!   translates the same way and writes no node.
 //!
 //! A value whose own key and every object of its tree already have the
 //! target tag is kept as it is: its nodes are read to check the tags, its
@@ -33,7 +48,8 @@
 //!
 //! RAM does not grow with the object count: per value one read window, one
 //! reader and one writer (one path of nested values at a time: root record,
-//! map, manifest list, content); the map cache of
+//! manifest list, content); per tree one path of the cursor and one
+//! node per level of the builder; the map cache of
 //! `map::CACHE_SLOTS * map::SLOT` bytes (about 1.1 MB); the fixed buffers
 //! of the sorter (a 4 MiB sort chunk, 32 merge inputs of 64 KiB). No value
 //! and no map is read into RAM whole (only the root record, which has a
@@ -50,7 +66,7 @@ use chunk_store::{ChunkStore, ObjectHasher};
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 
 use crate::snapshot::SnapshotEntry;
-use crate::store::{root_rec, MAP_ENTRY};
+use crate::store::root_rec;
 use crate::store_io::{to_id, to_key};
 
 pub mod map;
@@ -92,6 +108,9 @@ pub struct RehashOptions<'a> {
     /// many rewritten values, with no sync and no cleanup.
     #[doc(hidden)]
     pub stop_after_values: Option<u64>,
+    /// The boundary salt of the store (`prolly::Config::with_salt`): the
+    /// rebuilt trees cut as the store's writers do.
+    pub tree_salt: Option<[u8; 32]>,
 }
 
 /// Counts of a run.
@@ -143,49 +162,6 @@ pub enum RehashError {
 /// identical rows.
 const REF_ROW: usize = KEY_BYTES + 16;
 
-/// A key-carrying node of records.
-#[derive(Clone, Copy)]
-enum Blob {
-    /// A manifest list: content keys.
-    ManifestList,
-    /// A `u64 -> key` map of inode, directory or xattr nodes.
-    ValueMap(&'static str),
-    /// The `u64 -> key` map of manifest lists.
-    ManifestMap,
-}
-
-impl Blob {
-    fn kind(self) -> Kind {
-        match self {
-            Blob::ManifestList => Kind::ManifestList,
-            Blob::ValueMap(_) => Kind::ValueMap,
-            Blob::ManifestMap => Kind::ManifestMap,
-        }
-    }
-
-    fn what(self) -> &'static str {
-        match self {
-            Blob::ManifestList => "manifest list",
-            Blob::ValueMap(_) | Blob::ManifestMap => "u64-key map",
-        }
-    }
-
-    /// Bytes of the count before the records (0: no count).
-    fn head(self) -> usize {
-        match self {
-            Blob::ManifestList => 0,
-            Blob::ValueMap(_) | Blob::ManifestMap => 8,
-        }
-    }
-
-    fn record(self) -> usize {
-        match self {
-            Blob::ManifestList => KEY_BYTES,
-            Blob::ValueMap(_) | Blob::ManifestMap => MAP_ENTRY,
-        }
-    }
-}
-
 struct Walker<'c, 'a> {
     cs: &'c ChunkStore,
     target: &'static dyn ObjectHasher,
@@ -198,6 +174,7 @@ struct Walker<'c, 'a> {
     every: Duration,
     last: Instant,
     stop_after: Option<u64>,
+    tree_salt: Option<[u8; 32]>,
 }
 
 impl Walker<'_, '_> {
@@ -256,6 +233,12 @@ impl Walker<'_, '_> {
                 old
             }
         };
+        self.mapped(kind, old, new)
+    }
+
+    /// Record `old -> new` and end the value (the stop of crash tests, the
+    /// progress call).
+    fn mapped(&mut self, kind: Kind, old: ObjectKey, new: ObjectKey) -> Result<ObjectKey, RehashError> {
         self.map.insert(kind, &old, &new)?;
         if let Some(n) = self.stop_after
             && self.stats.values_rewritten == n
@@ -267,8 +250,180 @@ impl Walker<'_, '_> {
         Ok(new)
     }
 
-    /// The new key of the value `old` (file content or an inode, directory
-    /// or xattr node): its bytes streamed into a new writer.
+    /// The new root of the manifest tree `old`: rebuilt under the target
+    /// hash with each manifest list translated (see the module doc). In a
+    /// dry run the old root, with the tree nodes of another tag counted.
+    fn manifest_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::ManifestTree;
+        if let Some(new) = self.hit(kind, &old)? {
+            return Ok(new);
+        }
+        let cs = self.cs;
+        let what = "manifest tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
+        let cfg = prolly::Config::DEFAULT.with_salt(self.tree_salt);
+        let mut b = (!self.dry()).then(|| prolly::Builder::new(cs, cfg));
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if k.len() != 8 || v.len() != KEY_BYTES {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
+            }
+            let new = self.manifest_list(ObjectKey::read(&v, 0))?;
+            if let Some(b) = b.as_mut() {
+                b.push(&k, &new.0).map_err(werr)?;
+            }
+        }
+        self.stats.values_read += 1;
+        let new = match b {
+            Some(b) => {
+                let (root, _) = b.finish().map_err(werr)?;
+                self.stats.values_rewritten += 1;
+                to_key(root)
+            }
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                    other += u64::from(n.id.tag() != tag);
+                    true
+                })
+                .map_err(err)?;
+                self.stats.other_tag_objects += other;
+                old
+            }
+        };
+        self.mapped(kind, old, new)
+    }
+
+    /// The new root of the xattr tree `old`: read in key order with a
+    /// cursor (the keys hold no content address and do not change), an
+    /// inline value copied, a spilled value byte-copied (`value`, once per
+    /// old key), and the entries pushed into a `prolly::Builder` of the
+    /// target store. In a dry run the old root, with the tree nodes of
+    /// another tag counted.
+    fn xattr_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        use crate::pmap::TreeValue;
+        use crate::xattr::XattrValue;
+        let kind = Kind::XattrTree;
+        if let Some(new) = self.hit(kind, &old)? {
+            return Ok(new);
+        }
+        let cs = self.cs;
+        let what = "xattr tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
+        let cfg = prolly::Config::DEFAULT.with_salt(self.tree_salt);
+        let mut b = (!self.dry()).then(|| prolly::Builder::new(cs, cfg));
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            let corrupt = |m: String| RehashError::Corrupt(format!("{what} {}: {m}", old.to_hex()));
+            if k.len() < 9 {
+                return Err(corrupt(format!("entry of a {}-byte key", k.len())));
+            }
+            let new = match XattrValue::decode(&v).map_err(corrupt)? {
+                XattrValue::Spilled(key) => Some(XattrValue::Spilled(self.value("xattr value", key)?).encode()),
+                XattrValue::Inline(_) => None,
+            };
+            if let Some(b) = b.as_mut() {
+                b.push(&k, new.as_deref().unwrap_or(&v)).map_err(werr)?;
+            }
+        }
+        self.stats.values_read += 1;
+        let new = match b {
+            Some(b) => {
+                let (root, _) = b.finish().map_err(werr)?;
+                self.stats.values_rewritten += 1;
+                to_key(root)
+            }
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                    other += u64::from(n.id.tag() != tag);
+                    true
+                })
+                .map_err(err)?;
+                self.stats.other_tag_objects += other;
+                old
+            }
+        };
+        self.mapped(kind, old, new)
+    }
+
+    /// The new root of a tree `old` whose entries hold no key (the inode
+    /// tree, the directory tree): read in key order with a cursor, each
+    /// entry checked with `ok` (key, value) and copied as it is, and pushed
+    /// into a `prolly::Builder` of the target store; only the node IDs
+    /// change. In a dry run the old root, with the tree nodes of another tag
+    /// counted.
+    fn copy_tree(&mut self, kind: Kind, what: &'static str, ok: fn(&[u8], &[u8]) -> bool, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        if let Some(new) = self.hit(kind, &old)? {
+            return Ok(new);
+        }
+        let cs = self.cs;
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
+        let cfg = prolly::Config::DEFAULT.with_salt(self.tree_salt);
+        let mut b = (!self.dry()).then(|| prolly::Builder::new(cs, cfg));
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if !ok(&k, &v) {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
+            }
+            if let Some(b) = b.as_mut() {
+                b.push(&k, &v).map_err(werr)?;
+            }
+        }
+        self.stats.values_read += 1;
+        let new = match b {
+            Some(b) => {
+                let (root, _) = b.finish().map_err(werr)?;
+                self.stats.values_rewritten += 1;
+                to_key(root)
+            }
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                    other += u64::from(n.id.tag() != tag);
+                    true
+                })
+                .map_err(err)?;
+                self.stats.other_tag_objects += other;
+                old
+            }
+        };
+        self.mapped(kind, old, new)
+    }
+
+    /// The new key of the value `old` (file content or a spilled xattr
+    /// value): its bytes streamed into a new writer.
     fn value(&mut self, what: &'static str, old: ObjectKey) -> Result<ObjectKey, RehashError> {
         if let Some(new) = self.hit(Kind::Value, &old)? {
             return Ok(new);
@@ -300,45 +455,28 @@ impl Walker<'_, '_> {
         self.done(Kind::Value, what, old, len, w)
     }
 
-    /// The new key of a key-carrying node of records: each key translated,
-    /// the records in the same order.
-    fn blob(&mut self, b: Blob, old: ObjectKey) -> Result<ObjectKey, RehashError> {
-        let kind = b.kind();
+    /// The new key of the manifest list `old`: each content key translated,
+    /// in the same order.
+    fn manifest_list(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::ManifestList;
         if let Some(new) = self.hit(kind, &old)? {
             return Ok(new);
         }
         let cs = self.cs;
-        let what = b.what();
+        let what = "manifest list";
         let corrupt = |m: String| RehashError::Corrupt(format!("{what} {}: {m}", old.to_hex()));
         let err = |source| RehashError::Read { what, key: old, source };
         let mut r = FileReader::open(cs, to_id(&old)).map_err(err)?;
         let len = r.len();
-        let (head, rec) = (b.head(), b.record());
+        let rec = KEY_BYTES;
         let mut w = (!self.dry()).then(FileWriter::new);
-        let count = if head == 0 {
-            if !len.is_multiple_of(rec as u64) {
-                return Err(corrupt(format!("{len} bytes is not a multiple of {rec}")));
-            }
-            len / rec as u64
-        } else {
-            let h = if len >= 8 { r.read(cs, 0, 8).map_err(err)? } else { Vec::new() };
-            if h.len() != 8 {
-                return Err(corrupt(format!("{len} bytes, no count")));
-            }
-            let count = u64::from_le_bytes(h[..8].try_into().unwrap());
-            let want = count.checked_mul(rec as u64).and_then(|n| n.checked_add(8));
-            if want != Some(len) {
-                return Err(corrupt(format!("{len} bytes cannot hold {count} records")));
-            }
-            if let Some(w) = w.as_mut() {
-                w.write(cs, &h).map_err(RehashError::Write)?;
-            }
-            count
-        };
+        if !len.is_multiple_of(rec as u64) {
+            return Err(corrupt(format!("{len} bytes is not a multiple of {rec}")));
+        }
+        let count = len / rec as u64;
         let per = (WINDOW / rec) as u64;
-        let mut off = head as u64;
+        let mut off = 0u64;
         let mut done = 0u64;
-        let mut last_ino: Option<u64> = None;
         let mut out = Vec::new();
         while done < count {
             let n = per.min(count - done);
@@ -348,23 +486,7 @@ impl Walker<'_, '_> {
             }
             out.clear();
             for one in buf.chunks_exact(rec) {
-                let new = match b {
-                    Blob::ManifestList => self.value("file content", ObjectKey::read(one, 0))?,
-                    _ => {
-                        let ino = u64::from_le_bytes(one[..8].try_into().unwrap());
-                        if last_ino.is_some_and(|p| ino <= p) {
-                            return Err(corrupt(format!("inode {ino} out of order")));
-                        }
-                        last_ino = Some(ino);
-                        out.extend_from_slice(&one[..8]);
-                        let key = ObjectKey::read(one, 8);
-                        match b {
-                            Blob::ValueMap(node) => self.value(node, key)?,
-                            Blob::ManifestMap => self.blob(Blob::ManifestList, key)?,
-                            _ => self.value("inode node", key)?,
-                        }
-                    }
-                };
+                let new = self.value("file content", ObjectKey::read(one, 0))?;
                 out.extend_from_slice(&new.0);
             }
             if let Some(w) = w.as_mut() {
@@ -378,26 +500,28 @@ impl Walker<'_, '_> {
         self.done(kind, what, old, len, w)
     }
 
-    /// The new key of a refcount table: each key translated, the rows
-    /// sorted by new key, the counts of one new key summed.
-    fn refcounts(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
-        if let Some(new) = self.hit(Kind::Refcounts, &old)? {
+    /// The new root of the refcount tree `old`: read in key order with a
+    /// cursor, each content key translated (a row whose content is missing
+    /// is stale and dropped), the rows sorted by their new keys with the
+    /// external sorter, the counts of one new key summed (saturating), and
+    /// the rows pushed into a `prolly::Builder` of the target store. In a
+    /// dry run the old root, with the tree nodes of another tag counted.
+    fn refcount_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::RefcountTree;
+        if let Some(new) = self.hit(kind, &old)? {
             return Ok(new);
         }
         let cs = self.cs;
-        let what = "refcount table";
-        let corrupt = |m: String| RehashError::Corrupt(format!("{what} {}: {m}", old.to_hex()));
-        let err = |source| RehashError::Read { what, key: old, source };
-        let mut r = FileReader::open(cs, to_id(&old)).map_err(err)?;
-        let len = r.len();
-        let h = if len >= 8 { r.read(cs, 0, 8).map_err(err)? } else { Vec::new() };
-        if h.len() != 8 {
-            return Err(corrupt(format!("{len} bytes, no count")));
-        }
-        let count = u64::from_le_bytes(h[..8].try_into().unwrap());
-        if count.checked_mul(MAP_ENTRY as u64).and_then(|n| n.checked_add(8)) != Some(len) {
-            return Err(corrupt(format!("{len} bytes cannot hold {count} rows")));
-        }
+        let what = "refcount tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
         let mut sorter = if self.dry() {
             None
         } else {
@@ -405,64 +529,52 @@ impl Walker<'_, '_> {
             let cfg = SortCfg { chunk_records: extsort::SORT_CHUNK_BYTES / REF_ROW, fan_in: extsort::MERGE_FAN_IN };
             Some(Sorter::<REF_ROW>::new(tmp, "refcounts", cfg))
         };
-        let per = (WINDOW / MAP_ENTRY) as u64;
-        let (mut off, mut done, mut row) = (8u64, 0u64, 0u64);
-        while done < count {
-            let n = per.min(count - done);
-            let buf = r.read(cs, off, n as usize * MAP_ENTRY).map_err(err)?;
-            if buf.len() != n as usize * MAP_ENTRY {
-                return Err(corrupt(format!("short read at {off}")));
+        let mut row = 0u64;
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if k.len() != KEY_BYTES || v.len() != 8 {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
             }
-            for one in buf.as_chunks::<MAP_ENTRY>().0 {
-                let key = ObjectKey::read(one, 0);
-                let new = match self.value("file content", key) {
-                    Ok(new) => new,
-                    // No manifest of this root uses it (the manifests
-                    // were translated first): a stale count.
-                    Err(RehashError::Read { source: chunk_store::Error::Missing(_), .. }) => {
-                        self.stats.stale_refcounts += 1;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
-                if let Some(s) = sorter.as_mut() {
-                    let mut rec = [0u8; REF_ROW];
-                    rec[..KEY_BYTES].copy_from_slice(&new.0);
-                    rec[KEY_BYTES..KEY_BYTES + 8].copy_from_slice(&u64::from_le_bytes(one[KEY_BYTES..].try_into().unwrap()).to_be_bytes());
-                    rec[KEY_BYTES + 8..].copy_from_slice(&row.to_be_bytes());
-                    s.push(rec)?;
+            let new = match self.value("file content", ObjectKey::read(&k, 0)) {
+                Ok(new) => new,
+                // No manifest of this root uses it (the manifests were
+                // translated first): a stale count.
+                Err(RehashError::Read { source: chunk_store::Error::Missing(_), .. }) => {
+                    self.stats.stale_refcounts += 1;
+                    continue;
                 }
-                row += 1;
+                Err(e) => return Err(e),
+            };
+            if let Some(s) = sorter.as_mut() {
+                let mut rec = [0u8; REF_ROW];
+                rec[..KEY_BYTES].copy_from_slice(&new.0);
+                rec[KEY_BYTES..KEY_BYTES + 8].copy_from_slice(&u64::from_le_bytes(v[..8].try_into().unwrap()).to_be_bytes());
+                rec[KEY_BYTES + 8..].copy_from_slice(&row.to_be_bytes());
+                s.push(rec)?;
             }
-            off += buf.len() as u64;
-            done += n;
+            row += 1;
         }
         self.stats.values_read += 1;
-        self.stats.bytes_read += len;
         let Some(sorter) = sorter else {
-            return self.done(Kind::Refcounts, what, old, len, None);
+            let tag = self.target.tag();
+            let mut other = 0u64;
+            prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                other += u64::from(n.id.tag() != tag);
+                true
+            })
+            .map_err(err)?;
+            self.stats.other_tag_objects += other;
+            return self.mapped(kind, old, old);
         };
+        // One pass: the rows of one new key are next to each other.
         let sorted = sorter.finish()?;
-        // Pass 1: the count of distinct new keys.
-        let mut distinct = 0u64;
-        let mut prev: Option<[u8; KEY_BYTES]> = None;
-        let mut rd = sorted.reader()?;
-        while let Some(rec) = rd.next_rec()? {
-            let k: [u8; KEY_BYTES] = rec[..KEY_BYTES].try_into().unwrap();
-            if prev != Some(k) {
-                distinct += 1;
-                prev = Some(k);
-            }
-        }
-        // Pass 2: one row per new key with the sum of its counts.
-        let mut w = FileWriter::new();
-        w.write(cs, &distinct.to_le_bytes()).map_err(RehashError::Write)?;
-        let mut out = Vec::new();
+        let mut b = prolly::Builder::new(cs, prolly::Config::DEFAULT.with_salt(self.tree_salt));
         let mut cur: Option<([u8; KEY_BYTES], u64)> = None;
         let mut rd = sorted.reader()?;
         loop {
-            let rec = rd.next_rec()?;
-            let next = rec.map(|rec| {
+            let next = rd.next_rec()?.map(|rec| {
                 let k: [u8; KEY_BYTES] = rec[..KEY_BYTES].try_into().unwrap();
                 (k, u64::from_be_bytes(rec[KEY_BYTES..KEY_BYTES + 8].try_into().unwrap()))
             });
@@ -470,12 +582,7 @@ impl Walker<'_, '_> {
                 (Some((k, sum)), Some((nk, c))) if k == nk => cur = Some((k, sum.saturating_add(c))),
                 (c, n) => {
                     if let Some((k, sum)) = c {
-                        out.extend_from_slice(&k);
-                        out.extend_from_slice(&sum.to_le_bytes());
-                        if out.len() >= WINDOW {
-                            w.write(cs, &out).map_err(RehashError::Write)?;
-                            out.clear();
-                        }
+                        b.push(&k, &sum.to_le_bytes()).map_err(werr)?;
                     }
                     if n.is_none() {
                         break;
@@ -484,11 +591,12 @@ impl Walker<'_, '_> {
                 }
             }
         }
-        w.write(cs, &out).map_err(RehashError::Write)?;
-        self.done(Kind::Refcounts, what, old, len, Some(w))
+        let (root, _) = b.finish().map_err(werr)?;
+        self.stats.values_rewritten += 1;
+        self.mapped(kind, old, to_key(root))
     }
 
-    /// The new key of a root record: its six keys translated, the other
+    /// The new key of a root record: its five keys translated, the other
     /// fields copied.
     fn root(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
         if let Some(new) = self.hit(Kind::Root, &old)? {
@@ -506,18 +614,34 @@ impl Walker<'_, '_> {
         }
         drop(r);
         let at = |rec: &[u8], o: usize| ObjectKey::read(rec, o);
+        enum Field {
+            Manifest,
+            Refcount,
+            Xattr,
+            Inode,
+            Dir,
+        }
+        // An inode entry: an 8-byte ino and a 56- or 72-byte inline record.
+        let inode_ok = |k: &[u8], v: &[u8]| k.len() == 8 && (v.len() == 56 || v.len() == 72);
+        // A directory entry: a directory ino and a name, a 9-byte value.
+        let dir_ok = |k: &[u8], v: &[u8]| k.len() >= 9 && v.len() == 9;
+        // The manifests before the refcounts: a refcount row that no
+        // manifest uses is stale.
         let fields = [
-            (root_rec::INODE_DATA, Some(Blob::ValueMap("inode node"))),
-            (root_rec::DIR_DATA, Some(Blob::ValueMap("directory node"))),
-            (root_rec::XATTR_DATA, Some(Blob::ValueMap("xattr node"))),
-            (root_rec::MANIFEST_DATA, Some(Blob::ManifestMap)),
-            (root_rec::REFCOUNTS, None),
+            (root_rec::INODE_DATA, Field::Inode),
+            (root_rec::DIR_DATA, Field::Dir),
+            (root_rec::XATTR_DATA, Field::Xattr),
+            (root_rec::MANIFEST_DATA, Field::Manifest),
+            (root_rec::REFCOUNTS, Field::Refcount),
         ];
-        for (o, b) in fields {
+        for (o, f) in fields {
             let key = at(&rec, o);
-            let new = match b {
-                Some(b) => self.blob(b, key)?,
-                None => self.refcounts(key)?,
+            let new = match f {
+                Field::Manifest => self.manifest_tree(key)?,
+                Field::Refcount => self.refcount_tree(key)?,
+                Field::Xattr => self.xattr_tree(key)?,
+                Field::Inode => self.copy_tree(Kind::InodeTree, "inode tree", inode_ok, key)?,
+                Field::Dir => self.copy_tree(Kind::DirTree, "directory tree", dir_ok, key)?,
             };
             rec[o..o + KEY_BYTES].copy_from_slice(&new.0);
         }
@@ -562,6 +686,7 @@ pub fn rehash_roots(cs: &ChunkStore, roots: &RootSet, opts: RehashOptions<'_>) -
         every: opts.progress_every,
         last: Instant::now(),
         stop_after: opts.stop_after_values,
+        tree_salt: opts.tree_salt,
     };
     let mut new = Vec::with_capacity(1 + roots.snapshots.len());
     for root in std::iter::once(roots.current).chain(roots.snapshots.iter().map(|s| s.root)) {
@@ -597,7 +722,7 @@ mod tests {
     use chunk_store::{Blake3_256, Options};
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
-    use crate::store::{content_keys, referenced_roots, DictMetadataStore};
+    use crate::store::{content_keys, referenced_roots, tree_nodes, DictMetadataStore};
     use crate::store_io::{get_value, put_value, to_id, NodeReader, StoreIo};
 
     const KEYED: &dyn ObjectHasher = &TestKeyedBlake3;
@@ -635,6 +760,7 @@ mod tests {
             progress_every: Duration::from_secs(3600),
             progress: None,
             stop_after_values: None,
+            tree_salt: None,
         }
     }
 
@@ -724,6 +850,12 @@ mod tests {
                 assert_eq!(id.tag(), tag, "object {id:?} of {k:?}");
             }
         }
+        // A tree node is one object (not a file value).
+        let nodes = tree_nodes(&mut nr, root).unwrap();
+        assert!(!nodes.is_empty());
+        for k in &nodes {
+            assert_eq!(k.tag(), tag, "tree node {k:?}");
+        }
     }
 
     #[test]
@@ -754,6 +886,68 @@ mod tests {
         let objects = cs.stats().objects;
         assert_eq!(load(&cs, &new.current).commit().unwrap(), new.current);
         assert_eq!(cs.stats().objects, objects);
+    }
+
+    /// An xattr tree with many inline names over several files and one
+    /// spilled value is rebuilt under the target tag: every object has it
+    /// (the spilled value's chunks too), and the xattrs read the same.
+    #[test]
+    fn an_xattr_tree_rehashes_with_its_spilled_values() {
+        let mem = MemIo::new();
+        let big = noise(9, 100 << 10);
+        let (root, old) = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let files: Vec<u64> = (0..6).map(|i| add_file(&m, &cs, m.root_ino(), &format!("x{i}"), b"data").0).collect();
+            for i in 0..300usize {
+                m.set_xattr(files[i % files.len()], &format!("user.n{i:03}"), format!("value {i}").as_bytes()).unwrap();
+            }
+            m.set_xattr(files[2], "user.big", &big).unwrap();
+            let root = m.commit().unwrap();
+            let m = load(&cs, &root);
+            (root, tree(&m, &cs))
+        };
+        let cs = open(&mem, KEYED);
+        let dir = tempfile::tempdir().unwrap();
+        let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+        assert_ne!(new.current, root);
+        assert_one_tag(&cs, &new.current, KEYED.tag());
+        let m = load(&cs, &new.current);
+        assert_eq!(tree(&m, &cs), old);
+        let with_big = old.values().filter(|n| n.1.iter().any(|(k, v)| k == "user.big" && *v == big)).count();
+        assert_eq!(with_big, 1, "the spilled value is in the tree");
+    }
+
+    /// A manifest tree of more than one level is rebuilt under the target
+    /// tag: every node has it, the new tree has the same entries (with
+    /// the new manifest keys), and a store loaded from the new root reads
+    /// every manifest.
+    #[test]
+    fn a_manifest_tree_rehashes_under_the_target_tag() {
+        let mem = MemIo::new();
+        let (files, root) = {
+            let cs = open(&mem, BLAKE3);
+            let m = DictMetadataStore::new(io(&cs));
+            let files: Vec<u64> = (0..1_500).map(|i| add_file(&m, &cs, m.root_ino(), &format!("f{i}"), format!("{i}").as_bytes()).0).collect();
+            (files, m.commit().unwrap())
+        };
+        let cs = open(&mem, KEYED);
+        let height = |root: &ObjectKey| {
+            let rec = get_value(&cs, root).unwrap();
+            let tree = to_id(&ObjectKey::read(&rec, root_rec::MANIFEST_DATA));
+            prolly::height(&prolly::Ctx::uncached(&cs), &tree).unwrap()
+        };
+        assert!(height(&root) >= 2, "a tree of more than one level");
+        let dir = tempfile::tempdir().unwrap();
+        let (new, _) = rehash_roots(&cs, &one(root), rewrite(KEYED, dir.path())).unwrap();
+        assert_eq!(height(&new.current), height(&root));
+        assert_one_tag(&cs, &new.current, KEYED.tag());
+        let m = load(&cs, &new.current);
+        for (i, f) in files.iter().enumerate() {
+            let keys = m.get_manifest(*f).unwrap();
+            assert_eq!(keys[0].tag(), KEYED.tag());
+            assert_eq!(get_value(&cs, &keys[0]).unwrap(), format!("{i}").into_bytes());
+        }
     }
 
     #[test]
@@ -902,6 +1096,7 @@ mod tests {
             progress_every: Duration::from_secs(3600),
             progress: None,
             stop_after_values: None,
+            tree_salt: None,
         }
     }
 

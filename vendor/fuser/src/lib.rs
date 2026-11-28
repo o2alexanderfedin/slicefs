@@ -1096,8 +1096,21 @@ pub trait Filesystem: Send + Sync + 'static {
     /// If `size` is 0, the size of the value should be sent with `reply.size()`.
     /// If `size` is not 0, and the value fits, send it with `reply.data()`, or
     /// `reply.error(ERANGE)` if it doesn't.
-    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        warn!("[Not Implemented] getxattr(ino: {ino:#x?}, name: {name:?}, size: {size})");
+    /// `position` is the offset to read from. Only macOS sets it (for the resource
+    /// fork, which is read in parts); it is 0 on other systems (local patch 4).
+    fn getxattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        size: u32,
+        position: u32,
+        reply: ReplyXattr,
+    ) {
+        warn!(
+            "[Not Implemented] getxattr(ino: {ino:#x?}, name: {name:?}, size: {size}, \
+            position: {position})"
+        );
         reply.error(Errno::ENOSYS);
     }
 

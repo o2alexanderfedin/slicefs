@@ -1,8 +1,10 @@
 //! Build and read a tree: the streaming builder, `get`.
 
+use crate::cache::Ctx;
 use crate::node::{self, encode_internal, encode_leaf, internal_entry_len, leaf_entry_len, Child, Node};
 use crate::{Config, Error, Result, Splitter};
 use chunk_store::{ChunkStore, ObjectId};
+use std::sync::Arc;
 
 /// A node just written: what its parent entry needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -331,36 +333,44 @@ where
 /// node of the path is checked against its parent entry; a bad node that
 /// is not on the path is not seen.
 pub fn get(store: &ChunkStore, root: &ObjectId, key: &[u8]) -> Result<Option<Vec<u8>>> {
-    let (mut n, _) = node::load(store, &READ_CFG, root, None)?;
+    get_in(&Ctx::uncached(store), root, key)
+}
+
+/// `get` through a `Ctx` (nodes may come from its cache).
+pub fn get_in(ctx: &Ctx, root: &ObjectId, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut n = node::load(ctx, &READ_CFG, root, None)?.node;
     let mut lo: Option<Vec<u8>> = None;
     loop {
-        match n {
-            Node::Internal { level, mut children } => {
+        let next = match &*n {
+            Node::Internal { level, children } => {
                 let i = children.partition_point(|c| c.last_key.as_slice() < key);
                 if i >= children.len() {
                     return Ok(None);
                 }
                 if i > 0 {
-                    lo = Some(std::mem::take(&mut children[i - 1].last_key));
+                    lo = Some(children[i - 1].last_key.clone());
                 }
-                n = node::load_child(store, &READ_CFG, level - 1, &children[i], lo.as_deref())?.0;
+                node::load_child(ctx, &READ_CFG, level - 1, &children[i], lo.as_deref())?.node
             }
             Node::Leaf(entries) => {
                 return Ok(entries.binary_search_by(|(k, _)| k.as_slice().cmp(key)).ok().map(|i| entries[i].1.clone()));
             }
-        }
+        };
+        n = next;
     }
 }
 
-/// An ordered iterator over the entries of a tree. It holds one path of
-/// nodes (one per level), never the map. Each node is checked against its
-/// parent entry when it is loaded.
+/// An ordered iterator over the entries of a tree (or of a key range, see
+/// `range`). It holds one path of nodes (one per level), never the map.
+/// Each node is checked against its parent entry when it is loaded.
 pub struct Cursor<'s> {
-    store: &'s ChunkStore,
+    ctx: Ctx<'s>,
     /// Per node of the path: the node, the next entry, and the bound that
     /// its first key must be above (`None` on the leftmost path).
-    stack: Vec<(Node, usize, Option<Vec<u8>>)>,
+    stack: Vec<(Arc<Node>, usize, Option<Vec<u8>>)>,
     max_held: usize,
+    /// The iteration stops at the first key at or above this.
+    end: Option<Vec<u8>>,
     done: bool,
 }
 
@@ -373,8 +383,50 @@ impl Cursor<'_> {
 
 /// A cursor at the first entry of the tree `root`.
 pub fn iter<'s>(store: &'s ChunkStore, root: &ObjectId) -> Result<Cursor<'s>> {
-    let (n, _) = node::load(store, &READ_CFG, root, None)?;
-    Ok(Cursor { store, stack: vec![(n, 0, None)], max_held: 1, done: false })
+    iter_in(&Ctx::uncached(store), root)
+}
+
+/// `iter` through a `Ctx`.
+pub fn iter_in<'s>(ctx: &Ctx<'s>, root: &ObjectId) -> Result<Cursor<'s>> {
+    let n = node::load(ctx, &READ_CFG, root, None)?.node;
+    Ok(Cursor { ctx: *ctx, stack: vec![(n, 0, None)], max_held: 1, end: None, done: false })
+}
+
+/// A cursor at the first entry with a key at or above `start`, that stops
+/// at the first key at or above `end`. The descent holds one path and
+/// checks each child against its parent entry.
+pub(crate) fn seek_in<'s>(ctx: &Ctx<'s>, root: &ObjectId, start: &[u8], end: Option<&[u8]>) -> Result<Cursor<'s>> {
+    let mut n = node::load(ctx, &READ_CFG, root, None)?.node;
+    let mut lo: Option<Vec<u8>> = None;
+    let mut stack = Vec::new();
+    let mut max_held = 1;
+    loop {
+        let (next, child_lo) = match &*n {
+            Node::Leaf(entries) => {
+                let at = entries.partition_point(|(k, _)| k.as_slice() < start);
+                stack.push((n, at, lo));
+                break;
+            }
+            Node::Internal { level, children } => {
+                let i = children.partition_point(|c| c.last_key.as_slice() < start);
+                if i >= children.len() {
+                    // Nothing at or above `start` below this node.
+                    let len = children.len();
+                    stack.push((n, len, lo));
+                    break;
+                }
+                let child_lo = if i > 0 { Some(children[i - 1].last_key.clone()) } else { lo.clone() };
+                let child = node::load_child(ctx, &READ_CFG, level - 1, &children[i], child_lo.as_deref())?.node;
+                stack.push((n.clone(), i + 1, lo));
+                (child, child_lo)
+            }
+        };
+        n = next;
+        lo = child_lo;
+        max_held = max_held.max(stack.len() + 1);
+    }
+    max_held = max_held.max(stack.len());
+    Ok(Cursor { ctx: *ctx, stack, max_held, end: end.map(<[u8]>::to_vec), done: false })
 }
 
 impl Iterator for Cursor<'_> {
@@ -387,11 +439,15 @@ impl Iterator for Cursor<'_> {
                 self.done = true;
                 break;
             };
-            match n {
+            match &**n {
                 Node::Leaf(entries) => {
-                    if let Some(e) = entries.get_mut(*i) {
+                    if let Some(e) = entries.get(*i) {
+                        if self.end.as_deref().is_some_and(|end| e.0.as_slice() >= end) {
+                            self.done = true;
+                            break;
+                        }
                         *i += 1;
-                        return Some(Ok(std::mem::take(e)));
+                        return Some(Ok(e.clone()));
                     }
                     self.stack.pop();
                 }
@@ -402,9 +458,9 @@ impl Iterator for Cursor<'_> {
                     };
                     let child_lo = if *i > 0 { Some(children[*i - 1].last_key.clone()) } else { lo.clone() };
                     *i += 1;
-                    match node::load_child(self.store, &READ_CFG, *level - 1, c, child_lo.as_deref()) {
-                        Ok((child, _)) => {
-                            self.stack.push((child, 0, child_lo));
+                    match node::load_child(&self.ctx, &READ_CFG, *level - 1, c, child_lo.as_deref()) {
+                        Ok(l) => {
+                            self.stack.push((l.node, 0, child_lo));
                             self.max_held = self.max_held.max(self.stack.len());
                         }
                         Err(e) => {
@@ -438,32 +494,33 @@ pub struct NodeInfo {
 /// right, holding one path of nodes. Each node is checked against its
 /// parent entry when it is loaded.
 pub fn walk(store: &ChunkStore, root: &ObjectId, mut f: impl FnMut(&NodeInfo)) -> Result<()> {
-    let (n, bytes) = node::load(store, &READ_CFG, root, None)?;
-    walk_node(store, n, bytes, None, true, &mut f)
+    let ctx = Ctx::uncached(store);
+    let l = node::load(&ctx, &READ_CFG, root, None)?;
+    walk_node(&ctx, &l.node, l.bytes, None, true, &mut f)
 }
 
 /// Visits the loaded node `n` and its subtree; `lo` is the bound that the
 /// first key of `n` was checked against.
 fn walk_node<F: FnMut(&NodeInfo)>(
-    store: &ChunkStore,
-    n: Node,
+    ctx: &Ctx,
+    n: &Node,
     bytes: usize,
     lo: Option<&[u8]>,
     last_of_level: bool,
     f: &mut F,
 ) -> Result<()> {
-    let (level, entries, last_key) = match &n {
+    let (level, entries, last_key) = match n {
         Node::Leaf(e) => (0, e.len(), e.last().map(|(k, _)| k.clone()).unwrap_or_default()),
         Node::Internal { level, children } => {
             (*level, children.len(), children.last().map(|c| c.last_key.clone()).unwrap_or_default())
         }
     };
     f(&NodeInfo { level, entries, bytes, last_key, last_of_level });
-    if let Node::Internal { level, children } = &n {
+    if let Node::Internal { level, children } = n {
         for (i, c) in children.iter().enumerate() {
             let child_lo = if i > 0 { Some(children[i - 1].last_key.as_slice()) } else { lo };
-            let (child, child_bytes) = node::load_child(store, &READ_CFG, level - 1, c, child_lo)?;
-            walk_node(store, child, child_bytes, child_lo, last_of_level && i + 1 == children.len(), f)?;
+            let l = node::load_child(ctx, &READ_CFG, level - 1, c, child_lo)?;
+            walk_node(ctx, &l.node, l.bytes, child_lo, last_of_level && i + 1 == children.len(), f)?;
         }
     }
     Ok(())

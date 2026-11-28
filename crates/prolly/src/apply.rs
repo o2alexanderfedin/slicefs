@@ -21,14 +21,18 @@
 //!
 //! Memory is O(changes x depth) plus the batch: one path of decoded nodes
 //! per level pass, one old node and one writer buffer, and the sorted
-//! edits of the next level in a `Vec`. There is no node cache (D-17) and
-//! no keyed collection of nodes.
+//! edits of the next level in a `Vec`. Node reads go through the
+//! optional fixed-cap cache of the `Ctx` (D-17 forbids a cache that grows
+//! with the map, not a fixed one); there is no keyed collection of nodes
+//! besides it.
 
+use crate::cache::Ctx;
 use crate::node::{self, leaf_entry_len, Child, Node};
 use crate::tree::{empty_root, BuildStats, Builder, LevelWriter, NodeRef};
 use crate::{Config, Error, Result};
 use chunk_store::{ChunkStore, ObjectId, ID_LEN};
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 /// One edit of a batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,8 +55,11 @@ impl Edit {
 /// Counts of one `apply`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ApplyStats {
-    /// Nodes read from the store.
+    /// Nodes loaded, from the store or from the cache (so the count
+    /// measures work, not cache luck).
     pub nodes_read: u64,
+    /// Of `nodes_read`, the nodes the cache gave.
+    pub cache_hits: u64,
     /// Nodes passed to `ChunkStore::put` (dedup may store fewer).
     pub nodes_written: u64,
     /// Bytes passed to `ChunkStore::put`.
@@ -89,10 +96,11 @@ fn op_bytes(ops: &[Op]) -> usize {
 
 /// The store, the counts and the memory high water of one `apply`.
 struct Work<'s> {
-    store: &'s ChunkStore,
+    ctx: Ctx<'s>,
     cfg: Config,
     writes: BuildStats,
     reads: u64,
+    hits: u64,
     high: usize,
 }
 
@@ -101,16 +109,22 @@ impl Work<'_> {
     /// entries are written again, so each must fit the config (no key above
     /// `max_key`, no entry above `max_entry`), else the size bound of the
     /// new nodes would not hold.
-    fn load(&mut self, id: &ObjectId, want: Option<u8>) -> Result<(Node, usize)> {
-        self.reads += 1;
-        node::load(self.store, &self.cfg, id, want)
+    fn load(&mut self, id: &ObjectId, want: Option<u8>) -> Result<(Arc<Node>, usize)> {
+        let l = node::load(&self.ctx, &self.cfg, id, want)?;
+        Ok(self.count(l))
     }
 
     /// Loads the child `entry` at `level` and checks it against the entry
     /// (`node::load_child`), with the limits of the apply's config.
-    fn load_child(&mut self, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<(Node, usize)> {
+    fn load_child(&mut self, level: u8, entry: &Child, lo: Option<&[u8]>) -> Result<(Arc<Node>, usize)> {
+        let l = node::load_child(&self.ctx, &self.cfg, level, entry, lo)?;
+        Ok(self.count(l))
+    }
+
+    fn count(&mut self, l: node::Loaded) -> (Arc<Node>, usize) {
         self.reads += 1;
-        node::load_child(self.store, &self.cfg, level, entry, lo)
+        self.hits += l.hit as u64;
+        (l.node, l.bytes)
     }
 
     fn note(&mut self, held: usize) {
@@ -120,6 +134,7 @@ impl Work<'_> {
     fn stats(&self) -> ApplyStats {
         ApplyStats {
             nodes_read: self.reads,
+            cache_hits: self.hits,
             nodes_written: self.writes.nodes_written,
             bytes_written: self.writes.bytes_written,
             high_water_bytes: self.high,
@@ -131,7 +146,7 @@ impl Work<'_> {
 /// The decoded old root.
 struct Root {
     id: ObjectId,
-    node: Node,
+    node: Arc<Node>,
     bytes: usize,
 }
 
@@ -168,8 +183,8 @@ struct LevelCursor {
     path: Vec<Frame>,
 }
 
-fn children_of(n: Node) -> Result<Vec<Child>> {
-    match n {
+fn children_of(n: Arc<Node>) -> Result<Vec<Child>> {
+    match Arc::try_unwrap(n).unwrap_or_else(|a| (*a).clone()) {
         Node::Internal { children, .. } => Ok(children),
         Node::Leaf(_) => Err(Error::Corrupt("prolly node: leaf where an internal node must be".into())),
     }
@@ -269,8 +284,8 @@ impl LevelCursor {
 }
 
 /// The entries of a node as (key, payload).
-fn entries(n: Node) -> Vec<(Vec<u8>, Payload)> {
-    match n {
+fn entries(n: Arc<Node>) -> Vec<(Vec<u8>, Payload)> {
+    match Arc::try_unwrap(n).unwrap_or_else(|a| (*a).clone()) {
         Node::Leaf(es) => es.into_iter().map(|(k, v)| (k, Payload::Value(v))).collect(),
         Node::Internal { children, .. } => {
             children.into_iter().map(|c| (c.last_key, Payload::Child { id: c.id, count: c.count })).collect()
@@ -280,8 +295,8 @@ fn entries(n: Node) -> Vec<(Vec<u8>, Payload)> {
 
 fn push(w: &mut Work, lw: &mut LevelWriter, key: Vec<u8>, p: Payload) -> Result<Option<NodeRef>> {
     match p {
-        Payload::Value(v) => lw.push_leaf(w.store, &w.cfg, &key, &v, &mut w.writes),
-        Payload::Child { id, count } => lw.push_child(w.store, &w.cfg, Child { last_key: key, id, count }, &mut w.writes),
+        Payload::Value(v) => lw.push_leaf(w.ctx.store, &w.cfg, &key, &v, &mut w.writes),
+        Payload::Child { id, count } => lw.push_child(w.ctx.store, &w.cfg, Child { last_key: key, id, count }, &mut w.writes),
     }
 }
 
@@ -360,7 +375,7 @@ fn rewrite_level(w: &mut Work, root: &Root, level: u8, ops: &[Op]) -> Result<Rew
             out_bytes += c.last_key.len() + ID_LEN + 8;
             out.old.push(c);
             if !cur.advance(w)? {
-                if let Some(r) = lw.flush(w.store, &mut w.writes)? {
+                if let Some(r) = lw.flush(w.ctx.store, &mut w.writes)? {
                     out.new.push(r);
                 }
                 break;
@@ -432,11 +447,19 @@ fn check(cfg: &Config, batch: &[Edit]) -> Result<()> {
 /// to the next resync point and their paths are written; every other node
 /// keeps its ID. The new root equals the `build` root of the final set.
 pub fn apply(store: &ChunkStore, cfg: Config, root: &ObjectId, batch: &[Edit]) -> Result<(ObjectId, ApplyStats)> {
+    apply_in(&Ctx::uncached(store), cfg, root, batch)
+}
+
+/// `apply` with the old nodes read through a `Ctx` (they may come from its
+/// cache). A cached node is checked against `cfg` like a node read from
+/// the store. New nodes are written to the store, not to the cache.
+pub fn apply_in(ctx: &Ctx, cfg: Config, root: &ObjectId, batch: &[Edit]) -> Result<(ObjectId, ApplyStats)> {
+    let store = ctx.store;
     check(&cfg, batch)?;
     if batch.is_empty() {
         return Ok((*root, ApplyStats::default()));
     }
-    let mut w = Work { store, cfg, writes: BuildStats::default(), reads: 0, high: 0 };
+    let mut w = Work { ctx: *ctx, cfg, writes: BuildStats::default(), reads: 0, hits: 0, high: 0 };
     let (node, bytes) = w.load(root, None)?;
     let top = node.level();
     let old_root = Root { id: *root, node, bytes };

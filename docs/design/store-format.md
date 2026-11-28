@@ -354,6 +354,7 @@ write.
 | M16 | `seed` or `mount` with `--chunk-profile` that differs from the profile of the store (also a read-only mount). Nothing in the store changes. | `{store} has the chunk profile {have}; --chunk-profile {want} is another profile. The chunk profile of a store is fixed when the store is made.` |
 | M17 | The format number is 7 (a store of release v2.3.0). | `{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
 | M18 | `seed` with `--boundary-salt` on an existing store whose salt differs (also a store with no salt, and always for `random`). Nothing in the store changes. | `{store} has {have}; --boundary-salt {want} is another salt. The boundary salt of a store is fixed when the store is made.` |
+| M19 | A mount (writable, read-only or of a snapshot) of a format 8 store whose root record fields are not prolly trees (a store of an interim build with flat maps). Nothing in the store changes (a mount with `--hash` records that hash in FORMAT before the store loads, as for any store). | `{store} was made by a development build of SliceFS (store format 8 with flat metadata maps). This SliceFS reads store format 8 with prolly metadata maps only. Copy the files into a new store with the steps in docs/user/upgrade.md.` |
 
 The values in the texts:
 
@@ -464,15 +465,73 @@ The layout is **a: five maps, five prolly trees.** The maps are
 `inode_data`, `dir_data`, `manifest_data`, `xattr_data` and `refcounts`.
 Each map key of the root record points to the root of its own tree.
 
-Key grammar of layout a:
+Key grammar and value encodings of layout a (`||` joins bytes; the code
+is `crates/metadata/src/inode.rs`, `dirent.rs`, `xattr.rs` and `store.rs`):
 
 | Map | Key | Value |
 | --- | --- | --- |
-| `inode_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
-| `dir_data` | `ino` of the directory, 8 bytes, big endian | 33-byte `ObjectKey` |
-| `manifest_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
-| `xattr_data` | `ino`, 8 bytes, big endian | 33-byte `ObjectKey` |
-| `refcounts` | the 33-byte content key | 8-byte count |
+| `inode_data` | `ino`, 8 bytes, big endian | the inode record, inline, no tag byte (see below) |
+| `dir_data` | `ino` of the directory, 8 bytes, big endian, `\|\|` the entry name bytes | child `ino` (8 bytes, little endian) `\|\|` type (1 byte, see below) |
+| `manifest_data` | `ino`, 8 bytes, big endian | the 33-byte `ObjectKey` of the file's manifest |
+| `xattr_data` | `ino`, 8 bytes, big endian, `\|\|` the xattr name bytes | tag (1 byte) `\|\|` the inline value or the 33-byte `ObjectKey` of a spilled value (see below) |
+| `refcounts` | the 33-byte content key | count, `u64`, 8 bytes, little endian |
+
+All keys of one map compare as bytes, so the entries of one directory (or
+the xattrs of one inode) are one key range: `ino BE .. (ino + 1) BE`.
+
+**`inode_data` value.** The inode record of `serialize_inode`, little
+endian, 56 or 72 bytes; the length tells the two forms apart:
+
+| Bytes | Field |
+| --- | --- |
+| 0..8 | `ino`, `u64` |
+| 8..12 | `mode`, `u32` |
+| 12..16 | `uid`, `u32` |
+| 16..20 | `gid`, `u32` |
+| 20..24 | `nlinks`, `u32` |
+| 24..32 | `size`, `u64` |
+| 32..40 | `mtime_sec`, `i64` |
+| 40..44 | `mtime_nsec`, `u32` |
+| 44..52 | `ctime_sec`, `i64` |
+| 52..56 | `ctime_nsec`, `u32` |
+| 56..60 | `rdev`, `u32` (72-byte form only) |
+| 60..68 | `atime_sec`, `i64` (72-byte form only) |
+| 68..72 | `atime_nsec`, `u32` (72-byte form only) |
+
+The 72-byte form is written only when `rdev` or the atime is not zero. No
+inode is stored as an object of its own.
+
+**`dir_data` entries.** One entry per name. The name is UTF-8, 1 to 255
+bytes, so a key is at most 263 bytes. The value is 9 bytes: the child `ino`,
+then the type (1 byte, `(mode & S_IFMT) >> 12`, the Linux `DT_*` value: 4 a
+directory, 8 a regular file, 10 a symlink; 0 when the child had no inode
+when the name was linked). A value of another length is corrupt.
+
+- `.` (the directory itself) and `..` (its parent; the root's `..` is 1)
+  are entries of every directory, so an empty directory has two entries.
+  "Is a directory" is one read of `ino || "."`.
+- A hard link is one more entry: another name with the same child `ino`.
+- Readdir is a range scan of the directory prefix, in name byte order (the
+  flat maps of format 7 listed in name hash order).
+- The names of a directory decide where the node boundaries of its range
+  fall, so a user who picks the names of one directory can move them. The
+  cost is bounded by `NODE_MAX` and the forced cuts; the boundary salt
+  (below) makes the boundaries hard to guess.
+
+**`xattr_data` entries.** One entry per xattr name; no xattr set object
+exists. The name is UTF-8, 1 to 255 bytes (Linux `XATTR_NAME_MAX`). The
+value is a tag byte, then:
+
+- tag 0 then the value bytes, when the leaf entry (4 + key + 1 + value
+  bytes, that is 4 + 8 + name + 1 + value) fits `MAX_ENTRY` (2,048);
+- tag 1 then the 33-byte `ObjectKey` of the value, else. The value is
+  stored like file content (FastCDC chunks and a manifest) and read by
+  range.
+
+The tag depends only on the name and value lengths, so equal xattrs give
+equal trees. listxattr is a range scan of the inode prefix, in name byte
+order. A spilled value is metadata: the GC mark reaches it through the
+xattr tree, and it has no `refcounts` row.
 
 The decision came from three layouts, tested on the same edit scripts:
 
@@ -481,11 +540,9 @@ The decision came from three layouts, tested on the same edit scripts:
   2 manifest, 3 xattr) and `0x02 || content key` for refcounts.
 - **c:** the same namespace tree, but the refcounts in their own tree.
 
-Room for a name: a later combined key may add a name suffix,
-`0x01 || ino || kind || name`. The longest such key is 8 + 255 + 2 = 265
-bytes, below `MAX_KEY` (1,024). Whether directory entries are stored by name
-(one entry per name, in place of one list per directory) is decided with the
-commit path (issue #215). It is not decided in this section.
+Directory entries are stored by name (owner decision of Phase 26, issue
+#215): one entry per name, in place of one list object per directory. The
+longest key is 263 bytes, below `MAX_KEY` (1,024).
 
 Refcounts are a prolly map like the others (D-04). Issue #165 may remove the
 map later.
@@ -537,13 +594,15 @@ The root record of this build has 197 bytes (little endian, fixed width):
 
 There is one inode map. The duplicate `inode_map` of earlier builds is gone
 (D-06); `NEXT_INO` stays in the record. Each of the five 33-byte fields is the
-key of a serialized flat map in this build.
+`ObjectId` of the root node of its prolly tree. The empty tree is the empty
+leaf, so every field always has a root. (Layout b would have had 65 bytes and
+layout c 98 bytes.)
 
-When the maps become prolly trees, layout a keeps the same record: the same
-nine fields and 197 bytes. Each of the five fields is then the 33-byte
-`ObjectId` of the root of a tree. The empty tree is the empty leaf, so every
-field always has a root. (Layout b would have had 65 bytes and layout c 98
-bytes.)
+At load, the root object of each of the five fields must start with the
+node magic `SPT1` (one read per field). A record of another size, or a field
+that is not a tree root, is refused. A store of an interim build of format 8
+had flat maps in these fields; a mount refuses it with M19 and writes
+nothing to its segments or packs. There is no read path for flat maps.
 
 ### Node format
 
@@ -720,22 +779,26 @@ lines of `decision.txt`):
 | Total | | | | 23,479,915 |
 
 The entry counts follow the mix of the synthetic base tree (2 refcount keys
-per file). The refcount line is from synthetic data only. At the Dolt config
-the same method gives 47,291,816 nodes.
+per file). The table was measured with the key grammar of Phase 25 (one
+`dir_data` entry per directory, 33-byte values); with the final grammar
+above (one entry per name, inline inode records) the node counts differ.
+They were not measured again. The refcount line is from synthetic data
+only. At the Dolt config the same method gives 47,291,816 nodes.
 
 One change at 10,000,000 files touches 52 nodes (median of 10 commits, nodes
 read and written; Dolt config: 63).
 
 ### This build and the prolly maps
 
-This build writes store format 8 with flat maps and the 197-byte root record
-above. The prolly maps of this section replace the flat maps before release
-v2.4.0 (issue #215). No release comes between, so no user store has the
-interim form. A store written by this build is not readable after that change
-(there is no backward compatibility, and no migration).
+This build keeps the five maps in the prolly trees of this section
+(`crates/prolly`, used through `crates/metadata/src/pmap.rs`) in the commit,
+read, GC and rehash paths. The pending edits of each map are in an overlay
+in RAM until a flush or a commit applies them to the tree; reads go through
+a node cache with a byte cap (`--meta-cache-size`, default 64 MiB). The
+protocol is in [Metadata maps](metadata-maps.md).
 
-The crate `crates/prolly` holds the node format, the rule and the constants of
-this section. The commit, read and GC paths of this build do not use it yet.
+An interim build before it wrote format 8 with flat maps. No release had
+that form, and this build refuses it (M19).
 
 ## Format policy
 

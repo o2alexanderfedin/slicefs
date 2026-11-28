@@ -1,0 +1,63 @@
+== cargo test -p prolly-bench
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+warning: `fuser` (lib) generated 5 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-6910e6429e506881)
+running 5 tests
+test synth::tests::an_inserted_refcount_key_sorts_next_to_its_slot ... ok
+test layout::tests::a_combined_key_sorts_by_ino_then_kind_and_refcounts_last ... ok
+test synth::tests::the_streams_are_sorted_and_their_counts_match ... ok
+test synth::tests::the_permutation_is_a_bijection_with_an_inverse ... ok
+test layout::tests::every_layout_replay_matches_the_model ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+     Running tests/smoke.rs (target/debug/deps/smoke-6d24f60009e4cef4)
+running 3 tests
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test synth_smoke ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.59s
+rc=0
+== bench.sh smoke (host, SMOKE=1 RUNS=1)
+bench.sh SMOKE=1 RUNS=1 on the host: whole median rows 8; scale median rows 8
+rc=0
+== layout.sh smoke (host, LAYOUT_SMOKE=1)
+row synth-20000-c-8192-32768
+layout.csv 180 rows, shape.csv 96 rows, build.csv 18 rows, checks.txt 18 lines
+results: layout.csv, shape.csv, build.csv, checks.txt, machine.txt and rows/ in <scratch> failed rows: 0
+checks not ok=1: 0
+rc=0
+== cargo test --workspace
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests cas_local
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests chunk_store
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests metadata
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests prolly
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests slicefs_cli
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+   Doc-tests slicefs_traits
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+rc=0

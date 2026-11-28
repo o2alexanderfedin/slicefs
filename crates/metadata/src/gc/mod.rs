@@ -17,7 +17,7 @@ use chunk_store::{ChunkStore, ExactMark, GcPacer, LiveFilter, NoPacer, ObjectId,
 use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-use crate::store::{for_each_referenced, referenced_estimate};
+use crate::store::{for_each_referenced, referenced_estimate, Ref};
 use crate::store_io::{to_id, NodeRead, NodeReader};
 
 use crate::segment::compaction::{compact_segment, SegmentError};
@@ -150,8 +150,12 @@ const WALK_STOP_EVERY: u64 = 1 << 12;
 /// sort of a large store. `pacer` runs before each root and each value (safe points: nothing is deleted during the
 /// mark, and the objects put or read meanwhile go to the touched set).
 ///
-/// RAM does not grow with the file or root count (#207): every key of the
-/// walk (each root can give the same keys again) goes to an external sorter
+/// The nodes of the map trees (`Ref::Tree`) go to `add` at once: each is
+/// one object, and the read-back opens file values only (a tree node is
+/// not one). They bypass the sorter; the walk holds one path of each tree.
+///
+/// RAM does not grow with the file or root count (#207): every other key of
+/// the walk (each root can give the same keys again) goes to an external sorter
 /// in `<store>/gc-tmp` (`ChunkStore::gc_sorter`), and the sorted keys
 /// without duplicates are read back one at a time. Up to
 /// `ChunkStore::gc_sort_chunk_records` keys (4 MiB) the sort stays in RAM and
@@ -178,13 +182,16 @@ fn mark(
             return Ok(false);
         }
         let (mut n, mut stopped) = (0u64, false);
-        let walked = for_each_referenced(&mut io, root, &mut |_, k| {
+        let walked = for_each_referenced(&mut io, root, &mut |r, k| {
             n += 1;
             if n.is_multiple_of(WALK_STOP_EVERY) && stop() {
                 stopped = true;
                 return Err(MetaError::Io(std::io::Error::other("GC stopped")));
             }
-            keys.push(k.0).map_err(MetaError::Io)
+            match r {
+                Ref::Tree => add(to_id(&k)),
+                Ref::Node | Ref::Content => keys.push(k.0).map_err(MetaError::Io),
+            }
         });
         if stopped {
             return Ok(false);
@@ -353,7 +360,7 @@ mod tests {
     use slicefs_traits::metadata::{InodeMeta, MetadataStore};
 
     use super::*;
-    use crate::store::{content_keys, referenced_roots, DictMetadataStore};
+    use crate::store::{content_keys, referenced_roots, tree_nodes, DictMetadataStore};
     use crate::store_io::{put_value, StoreIo};
 
     /// A chunk store whose GC sorter spills every 3 keys and merges 2 runs
@@ -440,13 +447,17 @@ mod tests {
         .unwrap();
         assert!(done);
         let vals = values(&cs, &roots, &[open_file]);
-        let want: BTreeSet<ObjectId> = vals.iter().flat_map(|k| file_objects(&cs, to_id(k)).unwrap()).collect();
+        let mut want: BTreeSet<ObjectId> = vals.iter().flat_map(|k| file_objects(&cs, to_id(k)).unwrap()).collect();
+        // The tree nodes of every root, added as they are walked (once per root).
+        let mut io = NodeReader(Arc::clone(&cs));
+        let trees: Vec<ObjectKey> = roots.iter().flat_map(|r| tree_nodes(&mut io, r).unwrap()).collect();
+        want.extend(trees.iter().map(to_id));
         assert_eq!(got, want);
         assert!(got.len() > 50, "{} objects", got.len());
         // Each distinct value once: one safe point per root and per value.
         assert_eq!(pacer.n.load(Ordering::Relaxed), roots.len() + vals.len());
         let per_value: usize = vals.iter().map(|k| file_objects(&cs, to_id(k)).unwrap().len()).sum();
-        assert_eq!(adds, per_value as u64, "no value is walked twice");
+        assert_eq!(adds, (per_value + trees.len()) as u64, "no value is walked twice");
         assert_eq!(tmp_entries(dir.path()), 0, "the temp files are removed");
         // The public marks agree.
         let live = live_objects(&cs, &roots, &[open_file], &stop).unwrap().unwrap();

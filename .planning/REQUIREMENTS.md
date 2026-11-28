@@ -10,12 +10,12 @@
 
 - [x] **PMAP-01**: The map layout is decided and written down: one prolly map per metadata map, or one combined namespace map (Q-2 of #19).
 - [x] **PMAP-02**: The `inode_map` / `inode_data` duplication is removed; the root record holds only one of them.
-- [ ] **PMAP-03**: The commit and read paths use prolly maps; a commit with one change does work proportional to the change, not to the store size.
+- [x] **PMAP-03**: The commit and read paths use prolly maps; a commit with one change does work proportional to the change, not to the store size.
 - [x] **PMAP-04**: The boundary rule uses a fixed-point table (no float test) and carries a version byte; the rule and its constants are in `docs/design/store-format.md`, together with the prolly node format.
 - [x] **PMAP-05**: Prolly stores are store format 8 (owner decision, Phase 25 discussion); an old release refuses such a store; the new build refuses format 7 with a message that points to the upgrade doc; no backward compatibility with old stores.
-- [ ] **PMAP-06**: GC mark reaches all prolly nodes with bounded memory (no whole map in RAM); online GC keeps working.
-- [ ] **PMAP-07**: The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more takes at most 1/5 of the flat time; Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance.
-- [ ] **PMAP-08**: Crash tests: a commit cut at any point replays to a consistent tree.
+- [x] **PMAP-06**: GC mark reaches all prolly nodes with bounded memory (no whole map in RAM); online GC keeps working.
+- [x] **PMAP-07**: The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more does its pre-sync work (CPU and nodes read and written, sync excluded) in at most 1/5 of the flat time, and its total wall time (sync included) is lower than flat (owner, 2026-11-27: a sync-bound total such as 0.7x is an accepted gain); Boost numbers are measured against the rubric in `docs/research/prolly-trees.md` and recorded; a Boost row where prolly is not better (for example insert/delete) is a written, accepted cost and does not block (owner, 2026-11-27: prolly is for data scalability, no early optimization); the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance.
+- [x] **PMAP-08**: Crash tests: a commit cut at any point replays to a consistent tree.
 
 ### Store format migration (#155)
 
@@ -64,12 +64,12 @@
 |-------------|-------|--------|
 | PMAP-01 | Phase 25 | Complete |
 | PMAP-02 | Phase 25 | Complete |
-| PMAP-03 | Phase 26 | Pending |
+| PMAP-03 | Phase 26 | Complete |
 | PMAP-04 | Phase 25 | Complete |
 | PMAP-05 | Phase 25 | Complete |
-| PMAP-06 | Phase 26 | Pending |
-| PMAP-07 | Phase 26 | Pending |
-| PMAP-08 | Phase 26 | Pending |
+| PMAP-06 | Phase 26 | Complete |
+| PMAP-07 | Phase 26 | Complete |
+| PMAP-08 | Phase 26 | Complete |
 | MIGR-01 | Phase 27 | Pending |
 | MIGR-02 | Phase 27 | Pending |
 | MIGR-03 | Phase 27 | Pending |

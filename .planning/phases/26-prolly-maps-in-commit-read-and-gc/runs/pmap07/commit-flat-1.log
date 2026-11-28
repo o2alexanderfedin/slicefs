@@ -1,0 +1,63 @@
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+MemAvailable:   14563916 kB
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vdb1       712G  139G  573G  20% /work
+warning: unused workspace dependency `anyhow`
+  --> Cargo.toml:37:1
+   |
+37 | anyhow     = "1"
+   | ^^^^^^
+   |
+   = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `anyhow`
+warning: unused workspace dependency `bincode`
+  --> Cargo.toml:26:1
+   |
+26 | bincode    = "2"
+   | ^^^^^^^
+   |
+help: consider removing the workspace dependency `bincode`
+warning: unused workspace dependency `criterion`
+  --> Cargo.toml:28:1
+   |
+28 | criterion  = { version = "0.5", features = ["html_reports"] }
+   | ^^^^^^^^^
+   |
+help: consider removing the workspace dependency `criterion`
+warning: unused workspace dependency `redb`
+  --> Cargo.toml:33:1
+   |
+33 | redb       = "3.1"
+   | ^^^^
+   |
+help: consider removing the workspace dependency `redb`
+warning: unused workspace dependency `tokio`
+  --> Cargo.toml:35:1
+   |
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/commit_bench.rs (/target/release/build/metadata/60123d1224454b1a/out/commit_bench-60123d1224454b1a)
+
+running 1 test
+test one_change_commit_at_scale has been running for over 60 seconds
+seed tree=flat n=1000000 dirs=10000 seed_ms=88702.830 first_commit_ms=1956.844
+sample tree=flat n=1000000 seq=0 wall_ms=552.482 cpu_ms=522.978 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=1 wall_ms=503.123 cpu_ms=498.361 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=2 wall_ms=549.315 cpu_ms=531.787 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=3 wall_ms=642.824 cpu_ms=636.600 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=4 wall_ms=572.153 cpu_ms=563.994 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=5 wall_ms=532.054 cpu_ms=527.284 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=6 wall_ms=508.412 cpu_ms=504.140 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=7 wall_ms=550.570 cpu_ms=544.938 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=8 wall_ms=518.167 cpu_ms=489.014 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=9 wall_ms=514.612 cpu_ms=507.964 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat n=1000000 seq=10 wall_ms=525.209 cpu_ms=498.916 nodes_read=0 nodes_written=14181 presync_ms=NA
+summary tree=flat n=1000000 samples=11 wall_ms_median=532.054 cpu_ms_median=522.978
+test one_change_commit_at_scale ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 97.68s
+

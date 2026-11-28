@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use fuser::FileAttr;
 
-use crate::filesystem::{clear_store_busy, inode_to_file_attr, take_store_busy, Admit, SliceFsFilesystem};
+use crate::filesystem::{clear_store_busy, inode_to_file_attr, take_store_busy, Admit, SliceFsFilesystem, XattrReply};
 use crate::util::ts;
 use metadata::wal::Lsn;
 use slicefs_traits::metadata::InodeMeta;
@@ -38,6 +38,10 @@ pub enum EntryResult {
 }
 
 /// Result for `readdir` — on success, a list of `(ino, FileType, name)` tuples.
+///
+/// For tests only (a whole listing in RAM): the FUSE callback streams
+/// through `SliceFsFilesystem::readdir_handle`.
+#[doc(hidden)]
 #[derive(Debug)]
 pub enum ReaddirResult {
     Ok(Vec<(u64, fuser::FileType, String)>),
@@ -155,6 +159,10 @@ pub fn handle_lookup(fs: &SliceFsFilesystem, parent: u64, name: &str) -> EntryRe
 }
 
 /// Handle `readdir`: list entries in directory `ino` starting at `offset`.
+///
+/// For tests only (a whole listing in RAM): the FUSE callback streams
+/// through `SliceFsFilesystem::readdir_handle`.
+#[doc(hidden)]
 pub fn handle_readdir(
     fs: &SliceFsFilesystem,
     ino: u64,
@@ -249,42 +257,37 @@ pub fn handle_statfs(fs: &SliceFsFilesystem) -> StatfsResult {
     StatfsResult::Ok(blocks, bfree, bavail, files, ffree, bsize)
 }
 
-/// Handle `getxattr`: retrieve extended attribute `name` for inode `ino`.
-/// When `size == 0` the caller asks for the attribute size only.
+/// Handle `getxattr`: the xattr `name` of `ino` (`getxattr_reply`).
+/// `size == 0` asks for the length (no value byte is read); a value above
+/// `size` is ERANGE before any value read; `position` reads the macOS
+/// resource fork in parts (EINVAL on another name). An absent name is
+/// ENODATA. Memory is bounded by the request, not by the value.
 pub fn handle_getxattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     name: &str,
     size: u32,
+    position: u32,
 ) -> XattrResult {
-    match fs.test_getxattr(ino, name) {
-        Ok(value) => {
-            if size == 0 {
-                XattrResult::Size(value.len() as u32)
-            } else {
-                XattrResult::Data(value)
-            }
-        }
-        Err(_) => XattrResult::Error(libc::ENODATA),
-    }
+    xattr_result(fs.getxattr_reply(ino, name, size, position))
 }
 
-/// Handle `listxattr`: list all extended attribute names for inode `ino`.
-/// When `size == 0` the caller asks for the total buffer size only.
+/// Handle `listxattr`: the xattr names of `ino`, streamed from the store
+/// into the reply (`listxattr_reply`). `size == 0` asks for the total
+/// length; a list above `size` is ERANGE (the scan stops there).
 pub fn handle_listxattr(
     fs: &SliceFsFilesystem,
     ino: u64,
     size: u32,
 ) -> XattrResult {
-    match fs.test_listxattr(ino) {
-        Ok(buf) => {
-            if size == 0 {
-                XattrResult::Size(buf.len() as u32)
-            } else {
-                XattrResult::Data(buf)
-            }
-        }
-        Err(errno) => XattrResult::Error(errno),
+    xattr_result(fs.listxattr_reply(ino, size))
+}
+
+fn xattr_result(r: Result<XattrReply, i32>) -> XattrResult {
+    match r {
+        Ok(XattrReply::Size(n)) => XattrResult::Size(n),
+        Ok(XattrReply::Data(v)) => XattrResult::Data(v),
+        Err(e) => XattrResult::Error(e),
     }
 }
 
@@ -928,7 +931,7 @@ mod tests {
     #[test]
     fn test_handle_getxattr_missing_returns_error() {
         let (fs, _dir) = fresh_fs();
-        let result = handle_getxattr(&fs, 1, "user.nosuchattr", 128);
+        let result = handle_getxattr(&fs, 1, "user.nosuchattr", 128, 0);
         assert!(matches!(result, XattrResult::Error(_)));
     }
 
@@ -938,7 +941,7 @@ mod tests {
         let (ino, fh) = fs.test_create(1, "x.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
         fs.test_setxattr(ino, "user.mykey", b"myvalue").unwrap();
-        match handle_getxattr(&fs, ino, "user.mykey", 128) {
+        match handle_getxattr(&fs, ino, "user.mykey", 128, 0) {
             XattrResult::Data(data) => assert_eq!(data, b"myvalue"),
             other => panic!("unexpected: {:?}", other),
         }
@@ -950,7 +953,7 @@ mod tests {
         let (ino, fh) = fs.test_create(1, "xs.txt", 0o644, 0, 0, 0).unwrap();
         fs.test_release_full(ino, fh).unwrap();
         fs.test_setxattr(ino, "user.k", b"12345").unwrap();
-        match handle_getxattr(&fs, ino, "user.k", 0) {
+        match handle_getxattr(&fs, ino, "user.k", 0, 0) {
             XattrResult::Size(sz) => assert_eq!(sz, 5),
             other => panic!("unexpected: {:?}", other),
         }
@@ -999,6 +1002,137 @@ mod tests {
         }
     }
 
+    /// A file with no xattrs (closed, so its inode exists in the store).
+    fn xattr_file(fs: &SliceFsFilesystem, name: &str) -> u64 {
+        let (ino, fh) = fs.test_create(1, name, 0o644, 0, 0, 0).unwrap();
+        fs.test_release_full(ino, fh).unwrap();
+        ino
+    }
+
+    /// Bytes that differ at every offset of a large range.
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8 ^ (i / 251) as u8).collect()
+    }
+
+    #[test]
+    fn getxattr_size_query_gives_the_length() {
+        let (fs, _dir) = fresh_fs();
+        let ino = xattr_file(&fs, "big.txt");
+        let v = pattern(60_000);
+        fs.test_setxattr(ino, "user.big", &v).unwrap();
+        match handle_getxattr(&fs, ino, "user.big", 0, 0) {
+            XattrResult::Size(sz) => assert_eq!(sz, 60_000),
+            other => panic!("unexpected: {:?}", other),
+        }
+        match handle_getxattr(&fs, ino, "user.big", 65_536, 0) {
+            XattrResult::Data(data) => assert!(data == v, "value read back differs"),
+            other => panic!("unexpected: {:?}", other),
+        }
+        // Exactly the value length fits.
+        assert!(matches!(handle_getxattr(&fs, ino, "user.big", 60_000, 0), XattrResult::Data(d) if d.len() == 60_000));
+    }
+
+    #[test]
+    fn getxattr_too_small_buffer_is_erange() {
+        let (fs, _dir) = fresh_fs();
+        let ino = xattr_file(&fs, "small.txt");
+        fs.test_setxattr(ino, "user.k", b"12345").unwrap();
+        assert!(matches!(handle_getxattr(&fs, ino, "user.k", 3, 0), XattrResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_getxattr(&fs, ino, "user.k", 4, 0), XattrResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_getxattr(&fs, ino, "user.k", 5, 0), XattrResult::Data(d) if d == b"12345"));
+        assert!(matches!(handle_getxattr(&fs, ino, "user.absent", 3, 0), XattrResult::Error(e) if e == libc::ENODATA));
+        assert!(matches!(handle_getxattr(&fs, ino, "user.absent", 0, 0), XattrResult::Error(e) if e == libc::ENODATA));
+        // A spilled value too: ERANGE from its length.
+        fs.test_setxattr(ino, "user.big", &pattern(10_000)).unwrap();
+        assert!(matches!(handle_getxattr(&fs, ino, "user.big", 9_999, 0), XattrResult::Error(e) if e == libc::ERANGE));
+    }
+
+    #[test]
+    fn getxattr_name_errors() {
+        let (fs, _dir) = fresh_fs();
+        let ino = xattr_file(&fs, "names.txt");
+        let long = format!("user.{}", "n".repeat(300));
+        assert!(matches!(handle_getxattr(&fs, ino, &long, 16, 0), XattrResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_getxattr(&fs, ino, "", 16, 0), XattrResult::Error(e) if e == libc::EINVAL));
+        // The same errno on set and remove (Linux: ERANGE on all three).
+        assert!(matches!(handle_setxattr(&fs, ino, &long, b"v"), EmptyResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_removexattr(&fs, ino, &long), EmptyResult::Error(e) if e == libc::ERANGE));
+    }
+
+    #[test]
+    fn resource_fork_reads_by_position() {
+        let (fs, _dir) = fresh_fs();
+        let ino = xattr_file(&fs, "fork.txt");
+        let v = pattern(1 << 20);
+        fs.test_setxattr(ino, crate::filesystem::RESOURCE_FORK, &v).unwrap();
+        let rf = crate::filesystem::RESOURCE_FORK;
+        match handle_getxattr(&fs, ino, rf, 4_096, 524_288) {
+            XattrResult::Data(d) => assert!(d == v[524_288..524_288 + 4_096], "middle slice differs"),
+            other => panic!("unexpected: {:?}", other),
+        }
+        // Position 0 with a small buffer: the first part, no ERANGE.
+        match handle_getxattr(&fs, ino, rf, 4_096, 0) {
+            XattrResult::Data(d) => assert!(d == v[..4_096], "first slice differs"),
+            other => panic!("unexpected: {:?}", other),
+        }
+        // The last part is short; past the end is empty.
+        match handle_getxattr(&fs, ino, rf, 4_096, (1 << 20) - 100) {
+            XattrResult::Data(d) => assert!(d == v[(1 << 20) - 100..], "last slice differs"),
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(matches!(handle_getxattr(&fs, ino, rf, 4_096, (1 << 20) + 1), XattrResult::Data(d) if d.is_empty()));
+        assert!(matches!(handle_getxattr(&fs, ino, rf, 0, 0), XattrResult::Size(n) if n == 1 << 20));
+    }
+
+    #[test]
+    fn a_position_on_another_name_is_einval() {
+        let (fs, _dir) = fresh_fs();
+        let ino = xattr_file(&fs, "pos.txt");
+        fs.test_setxattr(ino, "user.k", b"value").unwrap();
+        assert!(matches!(handle_getxattr(&fs, ino, "user.k", 128, 10), XattrResult::Error(e) if e == libc::EINVAL));
+        assert!(matches!(handle_getxattr(&fs, ino, "user.k", 0, 10), XattrResult::Error(e) if e == libc::EINVAL));
+    }
+
+    /// 300 names `user.n1` .. `user.n300` on a new file; their list in name
+    /// byte order (NUL-separated) and its length.
+    fn many_names(fs: &SliceFsFilesystem) -> (u64, Vec<u8>) {
+        let ino = xattr_file(fs, "many.txt");
+        let mut names: Vec<String> = (1..=300).map(|i| format!("user.n{i}")).collect();
+        for n in &names {
+            fs.test_setxattr(ino, n, b"v").unwrap();
+        }
+        names.sort();
+        let mut want = Vec::new();
+        for n in &names {
+            want.extend_from_slice(n.as_bytes());
+            want.push(0);
+        }
+        (ino, want)
+    }
+
+    #[test]
+    fn listxattr_size_query_sums_the_names() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, want) = many_names(&fs);
+        match handle_listxattr(&fs, ino, 0) {
+            XattrResult::Size(sz) => assert_eq!(sz as usize, want.len()),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn listxattr_too_small_buffer_is_erange() {
+        let (fs, _dir) = fresh_fs();
+        let (ino, want) = many_names(&fs);
+        let n = want.len() as u32;
+        assert!(matches!(handle_listxattr(&fs, ino, n - 1), XattrResult::Error(e) if e == libc::ERANGE));
+        assert!(matches!(handle_listxattr(&fs, ino, 1), XattrResult::Error(e) if e == libc::ERANGE));
+        match handle_listxattr(&fs, ino, n) {
+            XattrResult::Data(buf) => assert!(buf == want, "list differs"),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
     // ── handle_setxattr ───────────────────────────────────────────────────────
 
     #[test]
@@ -1026,7 +1160,7 @@ mod tests {
             EmptyResult::Ok
         ));
         // Most-recent value wins
-        match handle_getxattr(&fs, ino, "user.key", 128) {
+        match handle_getxattr(&fs, ino, "user.key", 128, 0) {
             XattrResult::Data(data) => assert_eq!(data, b"second"),
             other => panic!("unexpected: {:?}", other),
         }

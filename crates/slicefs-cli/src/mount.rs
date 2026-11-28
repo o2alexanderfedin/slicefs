@@ -30,8 +30,9 @@ use metadata::gc::background::spawn_background_gc;
 use metadata::mount_lock::{acquire_mount_lock, MountLock, MountLockError};
 use metadata::segment::load_store_from_segments;
 use metadata::store::DictMetadataStore;
-use metadata::store_io::StoreIo;
+use metadata::store_io::{StoreIo, NODE_CACHE_BYTES};
 use metadata::wal::{WalConfig, create_wal};
+use slicefs_traits::metadata::MetaError;
 use crate::filesystem::{DirtyConfig, SliceFsFilesystem};
 use crate::header;
 use crate::util::ts;
@@ -77,6 +78,17 @@ pub fn load_store(
     store_path: &Path,
     wal_config: WalConfig,
     hash: Option<&str>,
+) -> Result<LoadedStore, Box<dyn std::error::Error>> {
+    load_store_with(store_path, wal_config, hash, NODE_CACHE_BYTES)
+}
+
+/// [`load_store`] with the byte cap of the metadata node cache
+/// (`--meta-cache-size`).
+pub fn load_store_with(
+    store_path: &Path,
+    wal_config: WalConfig,
+    hash: Option<&str>,
+    meta_cache_size: usize,
 ) -> Result<LoadedStore, Box<dyn std::error::Error>> {
     // Step 1: Reject legacy format — migration path removed.
     if store_path.join("dictionary.bin").exists() {
@@ -132,9 +144,12 @@ pub fn load_store(
     // write hash of `--hash` (recorded now, under the lock).
     crate::content::select_hash(store_path, hash)?;
     chunk_store::retry::LOG_SYNCS.store(true, std::sync::atomic::Ordering::Relaxed);
-    let io = Arc::new(Mutex::new(crate::content::store_io(store_path)?));
+    let mut node_io = crate::content::store_io(store_path)?;
+    // The cache cap is set before the store loads: the store keeps the cache it is given.
+    node_io.set_node_cache_bytes(meta_cache_size);
+    let io = Arc::new(Mutex::new(node_io));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
-        .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+        .map_err(|e| load_error(store_path, "failed to reconstruct metadata store", e))?;
 
     // Restore snapshot list from segment replay.
     meta.set_snapshots(snapshots);
@@ -163,6 +178,16 @@ pub fn load_store_read_only(
     store_path: &Path,
     flag: &header::Flag,
 ) -> Result<ReadOnlyStore, Box<dyn std::error::Error>> {
+    load_store_read_only_with(store_path, flag, NODE_CACHE_BYTES)
+}
+
+/// [`load_store_read_only`] with the byte cap of the metadata node cache
+/// (`--meta-cache-size`).
+pub fn load_store_read_only_with(
+    store_path: &Path,
+    flag: &header::Flag,
+    meta_cache_size: usize,
+) -> Result<ReadOnlyStore, Box<dyn std::error::Error>> {
     if store_path.join("mount.lock").exists() {
         return Err(header::msg_lock_present(store_path, flag).into());
     }
@@ -186,11 +211,25 @@ pub fn load_store_read_only(
     let root = last_root.ok_or_else(|| {
         format!("no committed state found in segments at {}", segs_dir.display())
     })?;
-    let io = Arc::new(Mutex::new(crate::content::store_io_read_only(store_path)?));
+    let mut node_io = crate::content::store_io_read_only(store_path)?;
+    node_io.set_node_cache_bytes(meta_cache_size);
+    let io = Arc::new(Mutex::new(node_io));
     let mut meta = DictMetadataStore::load_from_root(io.clone(), &root)
-        .map_err(|e| format!("failed to reconstruct metadata store: {}", e))?;
+        .map_err(|e| load_error(store_path, "failed to reconstruct metadata store", e))?;
     meta.set_snapshots(snapshots);
     Ok((meta, io))
+}
+
+/// The text of a failed `load_from_root` of the store `store_path`: M19
+/// for a root record whose maps are not prolly trees (a store of an interim
+/// build), else `what: <error>`.
+fn load_error(store_path: &Path, what: &str, e: MetaError) -> String {
+    match &e {
+        MetaError::Corrupted(s) if s.starts_with(metadata::store::FLAT_MAPS_REFUSED) => {
+            header::msg_interim_flat_maps(store_path)
+        }
+        _ => format!("{what}: {e}"),
+    }
 }
 
 /// Determine the next segment ID by scanning existing segment files.
@@ -362,6 +401,9 @@ pub struct StartArgs {
     pub chunk_profile: Option<ChunkProfile>,
     /// The dirty-data values (checked by the caller before any side effect).
     pub dirty: DirtyConfig,
+    /// `--meta-cache-size`: the byte cap of the metadata node cache (`None`:
+    /// the default of 64 MiB, `NODE_CACHE_BYTES`).
+    pub meta_cache_size: Option<usize>,
 }
 
 /// A mount after its setup: the file system, its FUSE configuration, and
@@ -435,16 +477,19 @@ pub fn start(
     // error below (`?`) they drop after it, the store lock last (#201).
     let store_lock: Option<header::StoreLock>;
     let mount_lock: Option<MountLock>;
+    // A snapshot mount reads through the same node store (and cache) as the
+    // current root, so one cap serves both.
+    let meta_cache_size = args.meta_cache_size.unwrap_or(NODE_CACHE_BYTES);
     let (meta, io) = match &access {
         header::Access::ReadWrite => {
-            let (meta, io, locks) = load_store(store_path, wal_config, args.hash.as_deref())?;
+            let (meta, io, locks) = load_store_with(store_path, wal_config, args.hash.as_deref(), meta_cache_size)?;
             store_lock = Some(locks.store);
             mount_lock = Some(locks.mount);
             (meta, io)
         }
         header::Access::ReadOnly(flag) => {
             let lock = header::lock_read_mount(store_path)?;
-            let (meta, io) = load_store_read_only(store_path, flag)?;
+            let (meta, io) = load_store_read_only_with(store_path, flag, meta_cache_size)?;
             println!("{}", header::msg_mount_read_only(store_path, flag));
             store_lock = Some(lock);
             mount_lock = None;
@@ -464,7 +509,7 @@ pub fn start(
         println!("Mounting snapshot {} (read-only)", snap.version);
         let snap_io: Arc<Mutex<StoreIo>> = io.clone();
         let snap_meta = DictMetadataStore::load_from_root(snap_io.clone(), &snap.root)
-            .map_err(|e| -> Box<dyn std::error::Error> { format!("failed to load snapshot root: {}", e).into() })?;
+            .map_err(|e| -> Box<dyn std::error::Error> { load_error(store_path, "failed to load snapshot root", e).into() })?;
         let mut cfg = build_mount_options(args.noatime, args.allow_other, None);
         cfg.mount_options.push(MountOption::RO);
         (snap_meta, snap_io, cfg)
@@ -628,7 +673,8 @@ impl Started {
 /// or `slicefs unmount`). The steps: pre-flight, [`start`], the signal
 /// handlers and the panic hook, `fuser::mount`, [`Started::stop`].
 ///
-/// `_cache_size` is accepted but unused (there is no read cache).
+/// `_cache_size` (`--cache-size`) is accepted but unused (there is no read
+/// cache); `--meta-cache-size` is the byte cap of the metadata node cache.
 /// `allow_other` passes the `allow_other` FUSE mount option (multi-user access).
 /// `snapshot_ref` mounts a specific snapshot read-only (by version number or name).
 /// `auto_snapshot` enables auto-snapshot on clean unmount (--auto-snapshot flag).
@@ -657,6 +703,7 @@ pub fn run_mount(
     chunk_profile: Option<ChunkProfile>,
     dirty: DirtyConfig,
     workers: Option<usize>,
+    meta_cache_size: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The allocator first, before any thread of the mount starts (Phase 21 [Allocator]).
     let mmap_threshold = crate::alloc_tune::tune_at_start();
@@ -723,6 +770,7 @@ pub fn run_mount(
         hash: hash.map(str::to_string),
         chunk_profile,
         dirty,
+        meta_cache_size: Some(meta_cache_size),
     };
     #[cfg(target_os = "macos")]
     let started = start(store_path, &args, Some(&selected_backend))?;
@@ -893,10 +941,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mnt = dir.path().join("mnt");
         let cfg = DirtyConfig { budget: 8 << 20, limit: 16 << 20, ..DirtyConfig::default() };
-        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, None, cfg, None);
+        let r = run_mount(&dir.path().join("no-store"), &mnt, true, false, 0, None, None, false, None, false, 0, 0, 0, None, None, cfg, None, NODE_CACHE_BYTES);
         let err = r.expect_err("run_mount refuses the dirty values").to_string();
         assert!(!mnt.exists(), "the mount point was not made ({err})");
         assert!(err.contains("16777216") && err.contains("8388608"), "{err}");
+    }
+
+    /// `--meta-cache-size` reaches the node cache of the loaded store; the
+    /// plain `load_store` keeps the default.
+    #[test]
+    fn meta_cache_size_sets_the_node_cache_cap() {
+        let store_dir = tempfile::tempdir().unwrap();
+        write_seeded_store_segments(&store_dir);
+        let cap = |io: &Arc<Mutex<StoreIo>>| io.lock().unwrap().node_cache().stats().cap;
+        {
+            let (_meta, io, _lock) = load_store_with(store_dir.path(), WalConfig::NoWal, None, 1 << 20).unwrap();
+            assert_eq!(cap(&io), 1 << 20);
+        }
+        let (_meta, io, _lock) = load_store(store_dir.path(), WalConfig::NoWal, None).unwrap();
+        assert_eq!(cap(&io), NODE_CACHE_BYTES);
     }
 
     #[test]

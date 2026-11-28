@@ -1,127 +1,197 @@
-//! Extended attribute (xattr) storage for SliceFS.
+//! Extended attributes (xattrs): one entry per name in the `xattr_data`
+//! prolly tree (store format 8).
 //!
-//! Xattrs are stored as a flat list of (name, value) pairs serialized as a
-//! concatenated byte stream and stored as one node in the chunk store. Its
-//! `ObjectKey` acts as the identity key for the entire xattr set of a given
-//! inode.
+//! - **Key:** the inode number (8 bytes, big endian), then the name bytes
+//!   (UTF-8, 1 to [`XATTR_NAME_MAX`] bytes). The names of one inode are the
+//!   key range `ino BE .. (ino + 1) BE` ([`xattr_range`]), in name byte order.
+//! - **Value:** a 1-byte tag, then
+//!   - tag 0 ([`TAG_INLINE`]): the value bytes, when the leaf entry fits
+//!     `prolly::MAX_ENTRY` ([`fits_inline`]);
+//!   - tag 1 ([`TAG_SPILLED`]): the 33-byte `ObjectKey` of the value, stored
+//!     like file content (FastCDC chunks and a manifest,
+//!     `chunk_store::file::FileWriter`).
 //!
-//! Entry wire format (little-endian):
-//! ```text
-//! for each attribute:
-//!   [name_len:  u32 LE]
-//!   [name:      name_len bytes (UTF-8)]
-//!   [value_len: u32 LE]
-//!   [value:     value_len bytes]
-//! ```
-//! An empty attribute set is represented by an empty byte sequence and is stored
-//! in the Dictionary as the canonical empty-content `ObjectKey`.
+//!   The choice depends only on the name and value lengths, so equal xattrs
+//!   give equal trees.
+//!
+//! No xattr set object exists. A get, set or remove touches one entry
+//! (O(tree height) nodes); a spilled value is read by range
+//! (`FileReader::read(offset, size)`: only the manifest nodes and chunks of
+//! the range), and its length comes from the manifest root. Memory per call
+//! is one request, not the size or count of the xattrs of a file.
 
-use slicefs_traits::key::ObjectKey;
+use std::ops::Range;
+
+use chunk_store::file::{FileReader, FileWriter};
+use chunk_store::ChunkStore;
+use slicefs_traits::key::{ObjectKey, KEY_BYTES};
 use slicefs_traits::metadata::MetaError;
 
-// ─── serialization helpers ────────────────────────────────────────────────────
+use crate::pmap::{shard_of, TreeKey, TreeValue};
+use crate::store_io::{node_err, to_id, to_key};
 
-fn serialize_xattrs(xattrs: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for (name, value) in xattrs {
-        let name_bytes = name.as_bytes();
-        buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(name_bytes);
-        buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        buf.extend_from_slice(value);
+/// Longest xattr name in bytes (Linux `XATTR_NAME_MAX`).
+pub const XATTR_NAME_MAX: usize = 255;
+
+/// Tag of a value stored in the leaf entry.
+pub const TAG_INLINE: u8 = 0;
+/// Tag of a value stored like file content (its key follows).
+pub const TAG_SPILLED: u8 = 1;
+
+/// Leaf entry bytes of an xattr other than the name and the value: the
+/// prolly leaf entry header (4), the inode number (8) and the tag (1).
+pub const XATTR_ENTRY_OVERHEAD: usize = 4 + 8 + 1;
+
+/// An empty name is invalid; a name above [`XATTR_NAME_MAX`] bytes is too long.
+pub fn check_name(name: &str) -> Result<(), MetaError> {
+    if name.is_empty() {
+        return Err(MetaError::InvalidName("empty xattr name".into()));
     }
-    buf
+    if name.len() > XATTR_NAME_MAX {
+        return Err(MetaError::NameTooLong(name.len()));
+    }
+    Ok(())
 }
 
-fn deserialize_xattrs(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
-    let mut result = Vec::new();
-    let mut i = 0;
+/// True when a value of `value_len` bytes under a name of `name_len` bytes
+/// is stored inline (its leaf entry fits `prolly::MAX_ENTRY`).
+pub fn fits_inline(name_len: usize, value_len: usize) -> bool {
+    XATTR_ENTRY_OVERHEAD
+        .saturating_add(name_len)
+        .saturating_add(value_len)
+        <= prolly::MAX_ENTRY
+}
 
-    while i < bytes.len() {
-        // name_len
-        if i + 4 > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at name_len".into()));
-        }
-        let name_len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
-        i += 4;
+/// The key of one xattr: inode number and name bytes.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct XattrKey {
+    pub ino: u64,
+    pub name: Box<[u8]>,
+}
 
-        // name bytes
-        if i + name_len > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at name bytes".into()));
-        }
-        let name = String::from_utf8(bytes[i..i + name_len].to_vec())
-            .map_err(|_| MetaError::Corrupted("xattr name not utf-8".into()))?;
-        i += name_len;
-
-        // value_len
-        if i + 4 > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at value_len".into()));
-        }
-        let value_len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
-        i += 4;
-
-        // value bytes
-        if i + value_len > bytes.len() {
-            return Err(MetaError::Corrupted("xattr: truncated at value bytes".into()));
-        }
-        let value = bytes[i..i + value_len].to_vec();
-        i += value_len;
-
-        result.push((name, value));
+impl XattrKey {
+    pub fn new(ino: u64, name: &str) -> Self {
+        XattrKey { ino, name: name.as_bytes().into() }
     }
 
-    Ok(result)
-}
-
-// ─── public CAS-backed functions ──────────────────────────────────────────────
-
-/// Serialize all xattr pairs and store them as a node (`NodeWrite`).
-///
-/// Returns the `ObjectKey` key that can later be passed to `load_xattrs`.
-/// An empty list serializes to an empty byte sequence which produces a
-/// canonical empty-content `ObjectKey`.
-pub fn intern_xattrs(storage: &mut impl crate::store_io::NodeWrite, xattrs: &[(String, Vec<u8>)]) -> ObjectKey {
-    let bytes = serialize_xattrs(xattrs);
-    (storage).put_node(&bytes)
-}
-
-/// Read and deserialize an xattr node (`NodeRead`).
-///
-/// Returns `MetaError::Corrupted` if the stored bytes cannot be parsed.
-pub fn load_xattrs(io: &mut impl crate::store_io::NodeRead, key: &ObjectKey) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
-    let bytes = (io).get_node(key)
-        .map_err(|e| crate::store_io::node_err("xattr node", key, e))?;
-    deserialize_xattrs(&bytes)
-}
-
-// ─── in-memory list helpers ───────────────────────────────────────────────────
-
-/// Insert or replace the value for `name` in an xattr list.
-pub fn set_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str, value: &[u8]) {
-    if let Some(entry) = xattrs.iter_mut().find(|(k, _)| k == name) {
-        entry.1 = value.to_vec();
-    } else {
-        xattrs.push((name.to_string(), value.to_vec()));
+    /// The key of the encoded tree key `k` (at least 9 bytes, else corrupt).
+    pub fn from_encoded(k: &[u8]) -> Result<Self, MetaError> {
+        if k.len() < 9 {
+            return Err(MetaError::Corrupted(format!("xattr_data tree: key of {} bytes", k.len())));
+        }
+        Ok(XattrKey { ino: u64::from_be_bytes(k[..8].try_into().unwrap()), name: k[8..].into() })
     }
 }
 
-/// Look up the value for `name` in an xattr list.
-pub fn get_xattr_entry(xattrs: &[(String, Vec<u8>)], name: &str) -> Option<Vec<u8>> {
-    xattrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+/// The names of one inode share its 8-byte prefix, so they are in one
+/// overlay shard (a range scan of one inode reads one shard).
+impl TreeKey for XattrKey {
+    fn encode(&self) -> Vec<u8> {
+        let mut k = Vec::with_capacity(8 + self.name.len());
+        k.extend_from_slice(&self.ino.to_be_bytes());
+        k.extend_from_slice(&self.name);
+        k
+    }
+
+    fn shard(&self) -> usize {
+        shard_of(self.ino)
+    }
 }
 
-/// Return all attribute names in an xattr list.
-pub fn list_xattr_names(xattrs: &[(String, Vec<u8>)]) -> Vec<String> {
-    xattrs.iter().map(|(k, _)| k.clone()).collect()
+/// The tree key range of the xattrs of `ino`: `ino BE .. (ino + 1) BE`
+/// (no end for `u64::MAX`).
+pub fn xattr_range(ino: u64) -> (Vec<u8>, Option<Vec<u8>>) {
+    (ino.to_be_bytes().to_vec(), ino.checked_add(1).map(|n| n.to_be_bytes().to_vec()))
 }
 
-/// Remove the entry for `name` from an xattr list.
-///
-/// Returns `true` if an entry was removed, `false` if `name` was not present.
-pub fn remove_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str) -> bool {
-    let before = xattrs.len();
-    xattrs.retain(|(k, _)| k != name);
-    xattrs.len() < before
+/// The name of the encoded tree key `k`: at least 9 bytes, valid UTF-8
+/// after the 8-byte inode number, else corrupt.
+pub fn name_of(k: &[u8]) -> Result<&str, MetaError> {
+    if k.len() < 9 {
+        return Err(MetaError::Corrupted(format!("xattr_data tree: key of {} bytes", k.len())));
+    }
+    std::str::from_utf8(&k[8..]).map_err(|_| MetaError::Corrupted("xattr_data tree: name not UTF-8".into()))
+}
+
+/// The value of one xattr entry.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum XattrValue {
+    /// The value bytes, in the leaf entry (tag 0).
+    Inline(Vec<u8>),
+    /// The key of the value, stored like file content (tag 1).
+    Spilled(ObjectKey),
+}
+
+impl TreeValue for XattrValue {
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            XattrValue::Inline(v) => {
+                let mut b = Vec::with_capacity(1 + v.len());
+                b.push(TAG_INLINE);
+                b.extend_from_slice(v);
+                b
+            }
+            XattrValue::Spilled(k) => {
+                let mut b = Vec::with_capacity(1 + KEY_BYTES);
+                b.push(TAG_SPILLED);
+                b.extend_from_slice(&k.0);
+                b
+            }
+        }
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        match bytes.split_first() {
+            None => Err("empty xattr value".into()),
+            Some((&TAG_INLINE, v)) => Ok(XattrValue::Inline(v.to_vec())),
+            Some((&TAG_SPILLED, k)) => k
+                .try_into()
+                .map(|k| XattrValue::Spilled(ObjectKey(k)))
+                .map_err(|_| format!("spilled xattr value of {} key bytes, not {KEY_BYTES}", k.len())),
+            Some((t, _)) => Err(format!("xattr value tag {t}")),
+        }
+    }
+}
+
+/// Store `value` like file content (chunks and a manifest) and give its
+/// key. Run it with no store lock held.
+pub fn spill(cs: &ChunkStore, value: &[u8]) -> Result<ObjectKey, MetaError> {
+    let io = |e: chunk_store::Error| MetaError::Io(std::io::Error::other(e.to_string()));
+    let mut w = FileWriter::new();
+    w.write(cs, value).map_err(io)?;
+    w.finish(cs).map(to_key).map_err(io)
+}
+
+/// The length of `v`: an inline value's length, or for a spilled value the
+/// length in its manifest root (no value byte is read).
+pub fn value_len(cs: &ChunkStore, v: &XattrValue) -> Result<u64, MetaError> {
+    match v {
+        XattrValue::Inline(b) => Ok(b.len() as u64),
+        XattrValue::Spilled(k) => FileReader::open(cs, to_id(k)).map(|r| r.len()).map_err(|e| node_err("xattr value", k, e)),
+    }
+}
+
+/// Up to `size` bytes of `v` from `offset` (fewer at the end, none past
+/// it). A spilled value reads only the manifest nodes and chunks of the
+/// range; never the whole-value readers (`store_io::get_value`).
+pub fn read_range(cs: &ChunkStore, v: &XattrValue, offset: u64, size: usize) -> Result<Vec<u8>, MetaError> {
+    match v {
+        XattrValue::Inline(b) => Ok(b[clamp(b.len(), offset, size)].to_vec()),
+        XattrValue::Spilled(k) => {
+            let err = |e| node_err("xattr value", k, e);
+            let mut r = FileReader::open(cs, to_id(k)).map_err(err)?;
+            if offset >= r.len() {
+                return Ok(Vec::new());
+            }
+            r.read(cs, offset, size).map_err(err)
+        }
+    }
+}
+
+/// The byte range `offset .. offset + size` cut to `0 .. len`.
+fn clamp(len: usize, offset: u64, size: usize) -> Range<usize> {
+    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(len);
+    start..start.saturating_add(size).min(len)
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
@@ -129,213 +199,90 @@ pub fn remove_xattr_entry(xattrs: &mut Vec<(String, Vec<u8>)>, name: &str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store_io::StoreIo;
-    use tempfile::TempDir;
+    use std::sync::Arc;
 
-    fn make_io() -> (TempDir, StoreIo) {
-        let dir = TempDir::new().unwrap();
-        let io = StoreIo::open(dir.path()).unwrap();
-        (dir, io)
-    }
-
-    // ── serialize/deserialize unit tests ─────────────────────────────────────
-
-    #[test]
-    fn test_empty_round_trip() {
-        let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let bytes = serialize_xattrs(&xattrs);
-        assert!(bytes.is_empty());
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert!(recovered.is_empty());
+    fn cs() -> ChunkStore {
+        ChunkStore::open_with(Arc::new(chunk_store::mem::MemIo::new()), chunk_store::Options::default()).unwrap()
     }
 
     #[test]
-    fn test_single_attr_round_trip() {
-        let xattrs = vec![("user.key".to_string(), b"hello".to_vec())];
-        let bytes = serialize_xattrs(&xattrs);
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert_eq!(recovered, xattrs);
+    fn a_key_is_the_ino_then_the_name() {
+        let k = XattrKey::new(5, "user.a");
+        let mut want = 5u64.to_be_bytes().to_vec();
+        want.extend_from_slice(b"user.a");
+        assert_eq!(TreeKey::encode(&k), want);
+        assert_eq!(XattrKey::from_encoded(&want).unwrap(), k);
+        assert_eq!(name_of(&want).unwrap(), "user.a");
+        assert_eq!(k.shard(), shard_of(5));
+        assert_eq!(XattrKey::new(5, "other").shard(), k.shard(), "one inode, one shard");
+        assert!(name_of(&5u64.to_be_bytes()).is_err(), "no name");
+        let mut bad = 5u64.to_be_bytes().to_vec();
+        bad.push(0xff);
+        assert!(name_of(&bad).is_err(), "not UTF-8");
+        assert!(XattrKey::from_encoded(&[1, 2, 3]).is_err());
     }
 
     #[test]
-    fn test_multiple_attrs_round_trip() {
-        let xattrs = vec![
-            ("user.a".to_string(), b"alpha".to_vec()),
-            ("user.b".to_string(), b"beta".to_vec()),
-            ("security.selinux".to_string(), b"system_u:object_r:unlabeled_t:s0".to_vec()),
-        ];
-        let bytes = serialize_xattrs(&xattrs);
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert_eq!(recovered, xattrs);
+    fn the_range_of_an_inode() {
+        assert_eq!(xattr_range(5), (5u64.to_be_bytes().to_vec(), Some(6u64.to_be_bytes().to_vec())));
+        assert_eq!(xattr_range(u64::MAX), (u64::MAX.to_be_bytes().to_vec(), None));
     }
 
     #[test]
-    fn test_binary_value_round_trip() {
-        let value: Vec<u8> = (0u8..=255).collect();
-        let xattrs = vec![("user.binary".to_string(), value)];
-        let bytes = serialize_xattrs(&xattrs);
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert_eq!(recovered, xattrs);
+    fn values_round_trip_and_bad_bytes_are_refused() {
+        let largest = prolly::MAX_ENTRY - XATTR_ENTRY_OVERHEAD - 1;
+        for v in [vec![], vec![7u8], vec![9u8; largest]] {
+            let x = XattrValue::Inline(v.clone());
+            let b = x.encode();
+            assert_eq!(b[0], TAG_INLINE);
+            assert_eq!(XattrValue::decode(&b).unwrap(), x);
+        }
+        let s = XattrValue::Spilled(ObjectKey::example(3));
+        let b = s.encode();
+        assert_eq!((b[0], b.len()), (TAG_SPILLED, 1 + KEY_BYTES));
+        assert_eq!(XattrValue::decode(&b).unwrap(), s);
+        assert!(XattrValue::decode(&[]).is_err(), "empty");
+        assert!(XattrValue::decode(&[2, 1, 2]).is_err(), "tag 2");
+        assert!(XattrValue::decode(&[TAG_SPILLED; 33]).is_err(), "32 key bytes");
+        assert!(XattrValue::decode(&[TAG_SPILLED; 35]).is_err(), "34 key bytes");
     }
 
     #[test]
-    fn test_large_value_round_trip() {
-        // Value larger than 31 bytes exercises the CAS tree storage path.
-        let value: Vec<u8> = vec![0xAB; 100];
-        let xattrs = vec![("user.large".to_string(), value)];
-        let bytes = serialize_xattrs(&xattrs);
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert_eq!(recovered, xattrs);
+    fn the_inline_rule() {
+        for n in [1, 6, 255] {
+            let v = prolly::MAX_ENTRY - 13 - n;
+            assert!(fits_inline(n, v), "13 + {n} + {v} == MAX_ENTRY");
+            assert!(!fits_inline(n, v + 1), "one byte above");
+        }
+        assert!(!fits_inline(usize::MAX, 1), "no overflow");
     }
 
     #[test]
-    fn test_empty_value() {
-        let xattrs = vec![("user.empty".to_string(), vec![])];
-        let bytes = serialize_xattrs(&xattrs);
-        let recovered = deserialize_xattrs(&bytes).unwrap();
-        assert_eq!(recovered, xattrs);
-    }
-
-    // ── CAS-backed intern/load tests ──────────────────────────────────────────
-
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_intern_load_empty() {
-        let (_dir, mut io) = make_io();
-        let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
-        let recovered = load_xattrs(&mut io, &key).unwrap();
-        assert!(recovered.is_empty());
+    fn name_checks() {
+        assert!(matches!(check_name(""), Err(MetaError::InvalidName(_))));
+        assert!(matches!(check_name(&"a".repeat(256)), Err(MetaError::NameTooLong(256))));
+        check_name(&"a".repeat(255)).unwrap();
+        check_name("user.x").unwrap();
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_intern_load_single_attr() {
-        let (_dir, mut io) = make_io();
-        let xattrs = vec![("user.test".to_string(), b"testvalue".to_vec())];
-        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
-        let recovered = load_xattrs(&mut io, &key).unwrap();
-        assert_eq!(recovered, xattrs);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_intern_load_large_value() {
-        // A value larger than an inline value
-        let (_dir, mut io) = make_io();
-        let value: Vec<u8> = (0..=127u8).collect(); // 128 bytes
-        let xattrs = vec![("user.big".to_string(), value)];
-        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
-        let recovered = load_xattrs(&mut io, &key).unwrap();
-        assert_eq!(recovered, xattrs);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_intern_load_multiple_attrs() {
-        let (_dir, mut io) = make_io();
-        let xattrs = vec![
-            ("user.a".to_string(), b"val-a".to_vec()),
-            ("user.b".to_string(), b"val-b".to_vec()),
-            ("user.c".to_string(), b"val-c".to_vec()),
-        ];
-        let key = { let mut fsa = &mut io; intern_xattrs(&mut fsa, &xattrs) };
-        let recovered = load_xattrs(&mut io, &key).unwrap();
-        assert_eq!(recovered, xattrs);
-    }
-
-    // ── in-memory list helper tests ───────────────────────────────────────────
-
-    #[test]
-    fn test_set_xattr_entry_insert() {
-        let mut xattrs = vec![];
-        set_xattr_entry(&mut xattrs, "user.x", b"hello");
-        assert_eq!(xattrs.len(), 1);
-        assert_eq!(xattrs[0], ("user.x".to_string(), b"hello".to_vec()));
-    }
-
-    #[test]
-    fn test_set_xattr_entry_replace() {
-        let mut xattrs = vec![("user.x".to_string(), b"old".to_vec())];
-        set_xattr_entry(&mut xattrs, "user.x", b"new");
-        assert_eq!(xattrs.len(), 1);
-        assert_eq!(xattrs[0].1, b"new".to_vec());
-    }
-
-    #[test]
-    fn test_get_xattr_entry_found() {
-        let xattrs = vec![("user.k".to_string(), b"v".to_vec())];
-        let val = get_xattr_entry(&xattrs, "user.k");
-        assert_eq!(val, Some(b"v".to_vec()));
-    }
-
-    #[test]
-    fn test_get_xattr_entry_not_found() {
-        let xattrs = vec![("user.k".to_string(), b"v".to_vec())];
-        let val = get_xattr_entry(&xattrs, "user.missing");
-        assert_eq!(val, None);
-    }
-
-    #[test]
-    fn test_list_xattr_names() {
-        let xattrs = vec![
-            ("user.a".to_string(), b"1".to_vec()),
-            ("user.b".to_string(), b"2".to_vec()),
-        ];
-        let names = list_xattr_names(&xattrs);
-        assert_eq!(names, vec!["user.a", "user.b"]);
-    }
-
-    #[test]
-    fn test_list_xattr_names_empty() {
-        let xattrs: Vec<(String, Vec<u8>)> = vec![];
-        let names = list_xattr_names(&xattrs);
-        assert!(names.is_empty());
-    }
-
-    #[test]
-    fn test_remove_xattr_entry_removes() {
-        let mut xattrs = vec![
-            ("user.a".to_string(), b"1".to_vec()),
-            ("user.b".to_string(), b"2".to_vec()),
-        ];
-        let removed = remove_xattr_entry(&mut xattrs, "user.a");
-        assert!(removed);
-        assert_eq!(xattrs.len(), 1);
-        assert_eq!(xattrs[0].0, "user.b");
-    }
-
-    #[test]
-    fn test_remove_xattr_entry_not_found_returns_false() {
-        let mut xattrs = vec![("user.a".to_string(), b"1".to_vec())];
-        let removed = remove_xattr_entry(&mut xattrs, "user.missing");
-        assert!(!removed);
-        assert_eq!(xattrs.len(), 1);
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
-    fn test_multiple_attrs_coexist_independently() {
-        let (_dir, mut io) = make_io();
-        let xattrs1 = vec![("user.x".to_string(), b"foo".to_vec())];
-        let xattrs2 = vec![
-            ("user.x".to_string(), b"foo".to_vec()),
-            ("user.y".to_string(), b"bar".to_vec()),
-        ];
-
-        let (key1, key2) = {
-            let mut fsa = &mut io;
-            let k1 = intern_xattrs(&mut fsa, &xattrs1);
-            let k2 = intern_xattrs(&mut fsa, &xattrs2);
-            (k1, k2)
-        };
-
-        // Two different xattr sets produce different keys
-        assert_ne!(key1, key2);
-
-        let rec1 = load_xattrs(&mut io, &key1).unwrap();
-        let rec2 = load_xattrs(&mut io, &key2).unwrap();
-        assert_eq!(rec1.len(), 1);
-        assert_eq!(rec2.len(), 2);
+    fn ranged_reads_of_inline_and_spilled_values() {
+        let cs = cs();
+        let bytes: Vec<u8> = (0..100_000u32).map(|i| (i * 7 + i / 251) as u8).collect();
+        let spilled = XattrValue::Spilled(spill(&cs, &bytes).unwrap());
+        let inline = XattrValue::Inline(bytes[..50].to_vec());
+        for (v, b) in [(&spilled, &bytes[..]), (&inline, &bytes[..50])] {
+            let n = b.len() as u64;
+            assert_eq!(value_len(&cs, v).unwrap(), n);
+            assert_eq!(read_range(&cs, v, 0, 10).unwrap(), &b[..10]);
+            let mid = b.len() / 2;
+            assert_eq!(read_range(&cs, v, mid as u64, 7).unwrap(), &b[mid..mid + 7]);
+            assert_eq!(read_range(&cs, v, n - 3, 100).unwrap(), &b[b.len() - 3..], "short at the end");
+            assert!(read_range(&cs, v, n, 5).unwrap().is_empty(), "at the end");
+            assert!(read_range(&cs, v, n + 5, 5).unwrap().is_empty(), "past the end");
+            assert!(read_range(&cs, v, u64::MAX, usize::MAX).unwrap().is_empty());
+            assert_eq!(read_range(&cs, v, 0, usize::MAX).unwrap(), b, "whole");
+        }
+        assert_eq!(spill(&cs, &bytes).unwrap(), match spilled { XattrValue::Spilled(k) => k, _ => unreachable!() }, "same bytes, same key");
     }
 }

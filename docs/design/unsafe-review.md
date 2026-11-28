@@ -390,6 +390,15 @@ The `unsafe` in test code is listed here with one line per file.
   comment of the Miri test.
 - `crates/chunk-store/tests/gc_full_memory_tests.rs`: a counting
   `GlobalAlloc` that passes each call to `System`.
+- `crates/metadata/tests/gc_prolly_memory_tests.rs`: the same counting
+  allocator.
+- `crates/metadata/tests/xattr_memory_tests.rs`: the same counting
+  allocator.
+- `crates/metadata/tests/commit_bench.rs`: `clock_gettime(CLOCK_THREAD_CPUTIME_ID)`
+  in `thread_cpu_ms`, for the ignored PMAP-07 benchmark. It writes one
+  `timespec` that is valid for the whole call, with a constant clock id, and
+  the test asserts that the return value is 0. The benchmark is run by hand
+  (`scripts/prolly-bench/pmap07.sh`), not by CI.
 - `crates/slicefs-cli/tests/dirty_budget_tests.rs`: the same counting
   allocator.
 - `crates/slicefs-cli/tests/memory_bound_tests.rs`: the same counting
@@ -677,6 +686,9 @@ compares these lines with the code.
 - count: crates/chunk-store/src/pack_io.rs 12
 - count: crates/chunk-store/tests/gc_full_memory_tests.rs 9
 - count: crates/metadata/src/store.rs 2
+- count: crates/metadata/tests/commit_bench.rs 1
+- count: crates/metadata/tests/gc_prolly_memory_tests.rs 9
+- count: crates/metadata/tests/xattr_memory_tests.rs 9
 - count: crates/slicefs-cli/src/alloc_tune.rs 4
 - count: crates/slicefs-cli/src/filesystem.rs 4
 - count: crates/slicefs-cli/src/fuset_watch.rs 2

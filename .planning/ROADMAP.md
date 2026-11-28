@@ -202,7 +202,7 @@ Release `v2.3.0` (`v2.2.0` was already used). Full details: `.planning/milestone
 **Research flags** (run `/gsd-plan-phase <N> --research-phase`): Phase 25 (Q-2: one map per metadata map, or one combined namespace map; this needs an owner choice), Phase 26 (GC mark over prolly nodes, the cut points of a commit), Phase 28 (random kill and soak harness in Docker). Skip for Phases 27, 29 and 30: standard patterns.
 
 - [x] **Phase 25: Prolly format and layout** (#215) - map layout decided, `inode_map`/`inode_data` duplication removed, fixed-point boundary rule with a version byte, store format 8 (completed 2026-11-27)
-- [ ] **Phase 26: Prolly maps in commit, read and GC** (#215) - every metadata map is a prolly map, commit work in proportion to the change, GC mark with bounded memory, commit-cut replay, benchmark on the product code
+- [x] **Phase 26: Prolly maps in commit, read and GC** (#215) - every metadata map is a prolly map, commit work in proportion to the change, GC mark with bounded memory, commit-cut replay, benchmark on the product code (completed 2026-11-28)
 - [ ] **Phase 27: Store migration** (#155) - `scripts/migrate-store.sh`, a Docker test from a `v2.3.0` store to a prolly store, `docs/user/upgrade.md`
 - [ ] **Phase 28: Crash and soak tests** (#157) - random `kill -9` and container-stop rounds on a live mount, a 2-hour soak with a memory check
 - [ ] **Phase 29: Scrub damage report** (#159) - scrub names the files and snapshots that a bad object damages, `--json`, exit codes 0/1/2, bounded memory
@@ -249,8 +249,53 @@ Plans:
   2. A commit with one change does work in proportion to the change: a counter test at two store sizes shows that the nodes read and written grow at most with the tree height
   3. GC mark reaches every prolly node of the live root and of each snapshot with bounded memory (no whole map in RAM; a test caps peak memory on a large map); online GC at mount still runs, frees nodes that no root reaches, and keeps the rest
   4. A commit cut at any point replays to a consistent tree: a crash test cuts the commit at each write and sync step and checks the tree after replay
-  5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more takes at most 1/5 of the flat time (flat time measured with release `v2.3.0`); Boost numbers stay within the rubric in `docs/research/prolly-trees.md`; the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
-**Plans**: TBD
+  5. The Phase 24 benchmark on the product code shows: a one-change commit at 1,000,000 inodes or more does its pre-sync work in at most 1/5 of the flat time and its total wall time, sync included, is lower than flat (flat time measured with release `v2.3.0`; owner accepts a sync-bound total such as 0.7x); Boost numbers are measured against the rubric in `docs/research/prolly-trees.md` and recorded, and a Boost row where prolly is not better is an accepted cost (owner: prolly is for data scalability, no early optimization); the insert/delete-heavy regression is measured and recorded with a mitigation or a written acceptance
+**Plans:** 16/16 plans complete
+
+Plans:
+**Wave 1**
+- [x] 26-01-PLAN.md — PMAP-07 rule pre-registered before any run (checks A pre-sync 1/5, B total lower than flat, C Boost not drop), commit bench for both trees, early flat baseline of v2.3.0 (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 26-02-PLAN.md — prolly crate: bounded NodeCache and Ctx, range with seek, count, height, node visitor (wave 2)
+- [x] 26-03-PLAN.md — prolly-bench: retire the flat-store readers, IN-05 (--l 8192), bench.sh runs whole and scale (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 26-04-PLAN.md — Tracer: manifest_data as a prolly tree through overlay, commit, load, GC mark, rehash and the bench whole mode; IN-01 (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 26-14-PLAN.md — Commit counters (CommitStats), the manifest-tree counter and idempotency tests, counters in the bench and the PMAP-07 report (wave 4)
+- [x] 26-06-PLAN.md — Boundary salt to every tree writer and rehash; --meta-cache-size mount option (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 26-05-PLAN.md — Commit protocol on the manifest tree: fault points, requeue of every overlay, races, online GC order, crash windows (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 26-07-PLAN.md — refcounts as a tree (saturating RMW, rehash) (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [x] 26-15-PLAN.md — xattr_data by name: one entry per xattr, inline or spilled values (chunks + manifest), bounded size/offset/list calls, GC, rehash, crash and memory-bound tests (wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [x] 26-08-PLAN.md — inode_data as a tree with inline inode records; the overlay replaces the inode cache (wave 8)
+- [x] 26-16-PLAN.md — getxattr/listxattr bounded in the fs layer (size query, ERANGE, streamed list, resource fork by position), fuser patch for the getxattr position, Docker xattr smoke (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [x] 26-09-PLAN.md — dir_data by name with . and .. entries, range readdir, dir_is_empty in the fs layer (wave 9)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [x] 26-10-PLAN.md — Format switch: flat code removed, IN-02 refusal (M19), store-format doc, Docker all + pjdfstest 4 workers + verify (wave 10)
+
+**Wave 11** *(blocked on Wave 10 completion)*
+- [x] 26-11-PLAN.md — Scale tests: bulk loader, five-tree counter test at two sizes, GC peak memory, snapshots and online GC, snapshot cost record (wave 11)
+- [x] 26-12-PLAN.md — Crash matrix over all five trees with a cross-tree validator and random cut schedules (wave 11)
+
+**Wave 12** *(blocked on Wave 11 completion)*
+- [x] 26-13-PLAN.md — PMAP-07 decision runs and verdict by the rule, insert/delete record, phase gate (wave 12)
+
+**Cross-cutting constraints:** <!-- gsd:generated -->
+- `cargo test --workspace` and the lock-stats report test pass (gate log)
+- `cargo test --workspace` passes (gate log)
 
 ### Phase 27: Store migration
 
@@ -314,7 +359,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 25. Prolly format and layout | 8/8 | Complete    | 2026-11-27 |
-| 26. Prolly maps in commit, read and GC | 0/TBD | Not started | - |
+| 26. Prolly maps in commit, read and GC | 16/16 | Complete    | 2026-11-28 |
 | 27. Store migration | 0/TBD | Not started | - |
 | 28. Crash and soak tests | 0/TBD | Not started | - |
 | 29. Scrub damage report | 0/TBD | Not started | - |

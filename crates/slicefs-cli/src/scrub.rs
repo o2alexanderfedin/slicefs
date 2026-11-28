@@ -144,9 +144,10 @@ pub fn run_scrub(store_path: &Path, json: bool) -> Result<(), Box<dyn std::error
     if let Some(root) = root_opt {
         let io_arc = Arc::new(Mutex::new(StoreIo::new(store_path, Arc::clone(&cs))));
         match DictMetadataStore::load_from_root(io_arc, &root) {
-            Ok(meta) => {
-                saturated_blocks = meta.saturated_refcount_count();
-            }
+            Ok(meta) => match meta.saturated_refcount_count() {
+                Ok(n) => saturated_blocks = n,
+                Err(e) => errors.push(format!("refcount tree corrupt: {e}")),
+            },
             Err(e) => {
                 errors.push(format!("metadata tree corrupt: {}", e));
             }

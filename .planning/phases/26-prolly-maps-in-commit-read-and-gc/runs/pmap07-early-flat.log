@@ -1,0 +1,41 @@
+# feasibility check of plan 26-01; decides nothing (runs/pmap07-rule.md, Status)
+v230 head=582a41d
+== flat-100k
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+MemAvailable:   14955400 kB
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vdb1       802G  189G  614G  24% /work
+seed tree=flat-early n=100000 dirs=1000 seed_ms=2249.375 first_commit_ms=406.910
+sample tree=flat-early n=100000 seq=0 wall_ms=46.721 cpu_ms=42.206 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=1 wall_ms=50.841 cpu_ms=45.979 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=2 wall_ms=49.287 cpu_ms=45.424 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=3 wall_ms=49.119 cpu_ms=46.056 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=4 wall_ms=49.571 cpu_ms=43.876 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=5 wall_ms=49.999 cpu_ms=46.799 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=6 wall_ms=50.566 cpu_ms=45.397 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=7 wall_ms=49.969 cpu_ms=45.316 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=8 wall_ms=45.681 cpu_ms=43.481 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=9 wall_ms=49.237 cpu_ms=46.202 nodes_read=0 nodes_written=1368 presync_ms=NA
+sample tree=flat-early n=100000 seq=10 wall_ms=46.761 cpu_ms=43.569 nodes_read=0 nodes_written=1368 presync_ms=NA
+summary tree=flat-early n=100000 samples=11 wall_ms_median=49.287 cpu_ms_median=45.397
+== flat-1m
+rustc 1.100.0 (0ef1bc386 2026-11-09)
+MemAvailable:   14969960 kB
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vdb1       802G  189G  614G  24% /work
+seed tree=flat-early n=1000000 dirs=10000 seed_ms=95909.160 first_commit_ms=1955.610
+sample tree=flat-early n=1000000 seq=0 wall_ms=507.021 cpu_ms=503.447 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=1 wall_ms=521.118 cpu_ms=493.270 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=2 wall_ms=509.515 cpu_ms=504.408 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=3 wall_ms=549.551 cpu_ms=523.214 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=4 wall_ms=502.989 cpu_ms=495.556 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=5 wall_ms=538.991 cpu_ms=510.006 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=6 wall_ms=700.244 cpu_ms=692.333 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=7 wall_ms=610.970 cpu_ms=582.391 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=8 wall_ms=533.231 cpu_ms=527.975 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=9 wall_ms=602.846 cpu_ms=578.128 nodes_read=0 nodes_written=14181 presync_ms=NA
+sample tree=flat-early n=1000000 seq=10 wall_ms=497.585 cpu_ms=493.398 nodes_read=0 nodes_written=14181 presync_ms=NA
+summary tree=flat-early n=1000000 samples=11 wall_ms_median=533.231 cpu_ms_median=510.006
+== pmap07.py --summary
+summary tree=flat-early n=100000 samples=11 wall_ms_median=49.287 cpu_ms_median=45.397
+summary tree=flat-early n=1000000 samples=11 wall_ms_median=533.231 cpu_ms_median=510.006

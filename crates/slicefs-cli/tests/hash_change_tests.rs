@@ -228,11 +228,13 @@ fn all_objects(store: &Path) -> Vec<chunk_store::ObjectId> {
     let mut keys = metadata::store::referenced_roots(&mut io, &root).unwrap();
     keys.extend(metadata::store::content_keys(&mut io, &root).unwrap());
     let cs = Arc::clone(io.store());
-    let ids = keys
+    let mut ids: Vec<chunk_store::ObjectId> = keys
         .iter()
         .filter(|k| **k != ObjectKey::ZERO)
         .flat_map(|k| chunk_store::file::file_objects(&cs, content::to_id(k)).unwrap())
         .collect();
+    // A tree node is one object, not a file value.
+    ids.extend(metadata::store::tree_nodes(&mut io, &root).unwrap().iter().map(content::to_id));
     cs.close().unwrap();
     ids
 }

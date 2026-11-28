@@ -396,6 +396,7 @@ impl<'a> RequestWithSender<'a> {
                     self.request.nodeid(),
                     x.name(),
                     x.size_u32(),
+                    x.position(),
                     self.reply(),
                 );
             }

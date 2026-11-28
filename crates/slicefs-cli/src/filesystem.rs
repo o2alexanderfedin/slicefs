@@ -6,7 +6,7 @@
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
+use std::ops::{ControlFlow, Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,6 +60,21 @@ pub const REORDER_WINDOW: usize = 64 << 20;
 /// it out after the call, before the reply; a `test_*` wrapper passes
 /// `&mut |_| {}`.
 pub(crate) type LogOp<'a> = &'a mut dyn FnMut(crate::oplog::Op);
+
+/// The file type of a directory entry type byte (the Linux `DT_*`
+/// number); `None` for 0 or an unknown byte.
+fn dt_file_type(kind: u8) -> Option<FileType> {
+    Some(match kind {
+        1 => FileType::NamedPipe,
+        2 => FileType::CharDevice,
+        4 => FileType::Directory,
+        6 => FileType::BlockDevice,
+        8 => FileType::RegularFile,
+        10 => FileType::Symlink,
+        12 => FileType::Socket,
+        _ => return None,
+    })
+}
 
 /// The `create_inode` of a create: at the logged inode number in replay
 /// (`Some`), else the next free one.
@@ -1132,6 +1147,15 @@ struct HandleTable {
     orphans: HashSet<u64>,
 }
 
+/// The resume cursor of an open directory handle: the offset and the name
+/// of each entry of its last readdir reply (bounded by the reply size). The
+/// kernel asks for the next reply at the offset of the last entry it used,
+/// which is in this page also when it did not use the whole reply.
+struct DirCursor {
+    ino: u64,
+    page: Vec<(u64, String)>,
+}
+
 /// A commit after its generation switch (`SliceFsFilesystem::commit_cut_begin`),
 /// to be finished with the commit gate released (#108).
 pub struct CommitCut<'a> {
@@ -1168,6 +1192,10 @@ pub struct SliceFsFilesystem {
     /// Every open handle (read-only too), the open count of each inode and
     /// the orphans: keeps an unlinked inode alive until its last handle closes.
     handles: sync::Mutex<HandleTable>,
+    /// The resume cursor of each open directory handle that has had a
+    /// readdir reply (see `readdir_handle`); `releasedir` drops it. Never
+    /// held across a store call.
+    dir_cursors: sync::Mutex<HashMap<u64, DirCursor>>,
     /// Namespace stripes and the rename mutex (D-04): the namespace changes
     /// of one inode, its open and last-close decisions, setattr and xattr.
     ns: NamespaceLocks,
@@ -1274,6 +1302,7 @@ impl SliceFsFilesystem {
             dirty_total: AtomicUsize::new(0),
             readers: sync::Mutex::new(Rank::Short, HashMap::new()).timed(Site::Readers),
             handles: sync::Mutex::new(Rank::Short, HandleTable::default()).timed(Site::Handles),
+            dir_cursors: sync::Mutex::new(Rank::Short, HashMap::new()),
             ns: NamespaceLocks::new(),
             next_fh: AtomicU64::new(0),
             store_path,
@@ -2170,6 +2199,37 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
     }
 }
 
+/// The xattr name that macOS reads by position (the resource fork).
+pub const RESOURCE_FORK: &str = "com.apple.ResourceFork";
+
+/// The reply of `getxattr_reply` / `listxattr_reply`: a length (the
+/// request size was 0) or the bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum XattrReply {
+    Size(u32),
+    Data(Vec<u8>),
+}
+
+/// The errno of a getxattr store error: an absent name is ENODATA (the
+/// callback sends ENOATTR on macOS); the rest as `xattr_errno`.
+fn getxattr_errno(e: &MetaError) -> i32 {
+    match e {
+        MetaError::NotFound(_) => libc::ENODATA,
+        e => xattr_errno(e),
+    }
+}
+
+/// The errno of an xattr store error of getxattr, setxattr or removexattr:
+/// a name above 255 bytes is ERANGE on all three (the Linux errno; the
+/// kernel checks the length before FUSE, so this is the rare case); the
+/// rest as `meta_error_to_errno`.
+fn xattr_errno(e: &MetaError) -> i32 {
+    match e {
+        MetaError::NameTooLong(_) => libc::ERANGE,
+        e => meta_error_to_errno(e),
+    }
+}
+
 /// TTL for all fuser replies (1 second is appropriate for a write-capable snapshot).
 pub(crate) const TTL: Duration = Duration::from_secs(1);
 
@@ -2182,10 +2242,11 @@ pub(crate) const TTL: Duration = Duration::from_secs(1);
 impl SliceFsFilesystem {
     /// Allocate a unique, non-zero handle for an opened directory.
     ///
-    /// Directory handles carry no state (readdir/releasedir ignore them), but
-    /// FUSE-T's SMB backend treats handle 0 as invalid: with `fh=0` from
-    /// opendir, `mkdir` on an SMB mount fails with EIO. Share the file-handle
-    /// counter so every handle is unique.
+    /// A directory handle keeps the resume cursor of its readdir replies
+    /// (`readdir_handle`; `releasedir` drops it). FUSE-T's SMB backend
+    /// treats handle 0 as invalid: with `fh=0` from opendir, `mkdir` on an
+    /// SMB mount fails with EIO. Share the file-handle counter so every
+    /// handle is unique.
     pub(crate) fn alloc_dir_handle(&self) -> u64 {
         self.next_fh.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -2253,8 +2314,15 @@ impl SliceFsFilesystem {
         }
         let digest = self.meta.manifest_digest(ino);
         self.readers.lock().remove(&ino);
-        let _ = self.meta.delete_inode(ino);
-        digest
+        match self.meta.delete_inode(ino) {
+            Ok(()) | Err(MetaError::NotFound(_)) => digest,
+            Err(e) => {
+                eprintln!("[{}][FUSE] reclaim of inode {ino}: {e}", ts());
+                // The error came after the delete (leftover entries only):
+                // the content is released. Else the inode keeps it.
+                matches!(self.meta.get_inode(ino), Err(MetaError::NotFound(_))).then_some(digest).flatten()
+            }
+        }
     }
 
     /// Release the content of a reclaimed inode (see `reclaim_inode`): read
@@ -3159,7 +3227,9 @@ impl SliceFsFilesystem {
         let ns = self.ns.lock(&[parent, ino]);
         let linked = self.live_dir(parent).and_then(|()| self.meta.link(parent, name, ino).map_err(|e| meta_error_to_errno(&e)));
         if let Err(e) = linked {
-            let _ = self.meta.delete_inode(ino);
+            if let Err(d) = self.meta.delete_inode(ino) {
+                eprintln!("[{}][FUSE] undo of create {ino}: delete failed: {d}", ts());
+            }
             return Err(e);
         }
         let hook = self.mkdir_hook.lock().clone();
@@ -4696,14 +4766,9 @@ impl SliceFsFilesystem {
             return Err(libc::ENOTDIR);
         }
 
-        // Check emptiness: list_directory returns . and .. plus any real entries
-        let entries = self
-            .meta
-            .list_directory(ino)
-            .map_err(|e| meta_error_to_errno(&e))?;
-        // . and .. always present — anything beyond that is ENOTEMPTY
-        let real_entries = entries.iter().filter(|e| e.name != "." && e.name != "..").count();
-        if real_entries > 0 {
+        // Empty: no entry but `.` and `..` (the scan stops at the first
+        // other name; no listing).
+        if !self.meta.dir_is_empty(ino).map_err(|e| meta_error_to_errno(&e))? {
             return Err(libc::ENOTEMPTY);
         }
 
@@ -4950,11 +5015,8 @@ impl SliceFsFilesystem {
                 (false, true) => return Err(libc::EISDIR),
                 _ => {}
             }
-            if dst_is_dir {
-                let entries = self.meta.list_directory(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
-                if entries.iter().any(|e| e.name != "." && e.name != "..") {
-                    return Err(libc::ENOTEMPTY);
-                }
+            if dst_is_dir && !self.meta.dir_is_empty(dst_ino).map_err(|e| meta_error_to_errno(&e))? {
+                return Err(libc::ENOTEMPTY);
             }
             self.meta
                 .unlink(newparent_ino, newname)
@@ -5119,17 +5181,107 @@ impl SliceFsFilesystem {
 
     /// List directory entries starting at `offset`.
     /// Returns `Vec<(ino, kind, name)>` tuples.
+    ///
+    /// For tests only (a whole listing in RAM): the FUSE callback streams
+    /// through `readdir_handle`.
+    #[doc(hidden)]
     pub fn test_readdir(&self, ino: u64, offset: u64) -> Result<Vec<(u64, FileType, String)>, i32> {
-        let entries = self.meta.list_directory(ino).map_err(|e| meta_error_to_errno(&e))?;
         let mut result = Vec::new();
-        for entry in entries.iter().skip(offset as usize) {
-            let kind = match self.meta.get_inode(entry.ino) {
-                Ok(m) => inode_to_file_attr(&m).kind,
-                Err(_) => FileType::RegularFile,
-            };
-            result.push((entry.ino, kind, entry.name.clone()));
-        }
+        self.readdir_entries(ino, offset, &mut |child, kind, name, _| {
+            result.push((child, kind, name.to_string()));
+            ControlFlow::Continue(())
+        })?;
         Ok(result)
+    }
+
+    /// Call `f` with each entry of directory `ino` from entry index
+    /// `offset` on (name byte order, `.` and `..` included): the child ino,
+    /// its file type, the name and the offset of the next entry. `Break`
+    /// stops it (a full reply buffer). Streamed from the store's directory
+    /// scan: no list of the directory is built; the entries before `offset`
+    /// are scanned and skipped. The type is the stored type byte of the
+    /// entry; for a byte of 0 (linked before its inode existed) the child
+    /// inode is read.
+    pub fn readdir_entries(
+        &self,
+        ino: u64,
+        offset: u64,
+        f: &mut dyn FnMut(u64, FileType, &str, u64) -> ControlFlow<()>,
+    ) -> Result<(), i32> {
+        self.dir_page(ino, None, 0, offset, f)
+    }
+
+    /// The scan of `readdir_entries` and `readdir_handle`: the entries
+    /// after the name `after` (`None`: from the start), numbered from
+    /// `first` + 1; the entries numbered up to `skip` are scanned, not given.
+    fn dir_page(
+        &self,
+        ino: u64,
+        after: Option<&str>,
+        first: u64,
+        skip: u64,
+        f: &mut dyn FnMut(u64, FileType, &str, u64) -> ControlFlow<()>,
+    ) -> Result<(), i32> {
+        let mut index = first;
+        self.meta
+            .for_each_dir_entry_after(ino, after, &mut |name, child, kind| {
+                index += 1;
+                if index <= skip {
+                    return ControlFlow::Continue(());
+                }
+                let kind = dt_file_type(kind).unwrap_or_else(|| match self.meta.get_inode(child) {
+                    Ok(m) => inode_to_file_attr(&m).kind,
+                    Err(_) => FileType::RegularFile,
+                });
+                f(child, kind, name, index)
+            })
+            .map_err(|e| meta_error_to_errno(&e))
+    }
+
+    /// `readdir_entries` for the open directory handle `fh`, with its
+    /// resume cursor (`DirCursor`): if `offset` is the offset of an entry of
+    /// the last reply of `fh`, the scan resumes after that entry's name, and
+    /// the offsets go on from `offset`. A name created or removed between
+    /// two replies then moves no other entry, and a sequential listing
+    /// reads each entry once. Offset 0 starts at the start; any other
+    /// offset (a seekdir to an older one) skips `offset` entries from the
+    /// start (`readdir_entries`).
+    pub fn readdir_handle(
+        &self,
+        ino: u64,
+        fh: u64,
+        offset: u64,
+        f: &mut dyn FnMut(u64, FileType, &str, u64) -> ControlFlow<()>,
+    ) -> Result<(), i32> {
+        let after = if offset == 0 {
+            None
+        } else {
+            self.dir_cursors.lock().get(&fh).filter(|c| c.ino == ino).and_then(|c| {
+                c.page.iter().find(|(o, _)| *o == offset).map(|(_, name)| name.clone())
+            })
+        };
+        let mut page = Vec::new();
+        let mut keep = |child: u64, kind: FileType, name: &str, next: u64| {
+            let r = f(child, kind, name, next);
+            if r.is_continue() {
+                page.push((next, name.to_string()));
+            }
+            r
+        };
+        match &after {
+            Some(name) => self.dir_page(ino, Some(name), offset, offset, &mut keep)?,
+            None => self.dir_page(ino, None, 0, offset, &mut keep)?,
+        }
+        // The end of the directory (an empty reply) keeps the cursor.
+        if !page.is_empty() {
+            self.dir_cursors.lock().insert(fh, DirCursor { ino, page });
+        }
+        Ok(())
+    }
+
+    /// The directory handle `fh` is closed: drop its resume cursor.
+    pub(crate) fn release_dir_handle(&self, fh: u64) {
+        self.dir_cursors.lock().remove(&fh);
     }
 
     /// Open a file. Returns `(fh, is_write)` on success.
@@ -5195,6 +5347,80 @@ impl SliceFsFilesystem {
         Ok(buf)
     }
 
+    /// The reply to a getxattr request (the FUSE path). Memory is bounded
+    /// by the request, never by the value (`xattr_len`, `read_xattr`):
+    /// - `size` 0 asks for the length: no value byte is read;
+    /// - `RESOURCE_FORK` is read by `position` (macOS): up to `size` bytes
+    ///   from there, only the chunks of that range, with no ERANGE;
+    /// - another name: a value above `size` is ERANGE before any value
+    ///   read, else the value is read whole (at most `size` bytes); a
+    ///   position above 0 is EINVAL.
+    ///
+    /// An absent name is ENODATA, a name above 255 bytes ERANGE (Linux).
+    pub fn getxattr_reply(&self, ino: u64, name: &str, size: u32, position: u32) -> Result<XattrReply, i32> {
+        let fork = name == RESOURCE_FORK;
+        if position > 0 && !fork {
+            return Err(libc::EINVAL);
+        }
+        if size == 0 {
+            let len = self.meta.xattr_len(ino, name).map_err(|e| getxattr_errno(&e))?;
+            return u32::try_from(len).map(XattrReply::Size).map_err(|_| libc::E2BIG);
+        }
+        if fork {
+            let v = self.meta.read_xattr(ino, name, u64::from(position), size as usize);
+            return v.map(XattrReply::Data).map_err(|e| getxattr_errno(&e));
+        }
+        let len = self.meta.xattr_len(ino, name).map_err(|e| getxattr_errno(&e))?;
+        if len > u64::from(size) {
+            return Err(libc::ERANGE);
+        }
+        // One byte more than the buffer: a value replaced since its length
+        // was read and now too long is ERANGE, never a cut value. The read
+        // allocates at most the value length.
+        let v = self.meta.read_xattr(ino, name, 0, size as usize + 1).map_err(|e| getxattr_errno(&e))?;
+        if v.len() > size as usize {
+            return Err(libc::ERANGE);
+        }
+        Ok(XattrReply::Data(v))
+    }
+
+    /// The reply to a listxattr request (the FUSE path), from a streamed
+    /// scan of the names (`for_each_xattr_name`, name byte order); no list
+    /// of all names is built. `size` 0 gives the sum of (name length + 1)
+    /// with no buffer; else the NUL-separated names, or ERANGE as soon as
+    /// the next name does not fit (the scan stops there).
+    pub fn listxattr_reply(&self, ino: u64, size: u32) -> Result<XattrReply, i32> {
+        let mut over = false;
+        if size == 0 {
+            let mut total: u64 = 0;
+            self.meta
+                .for_each_xattr_name(ino, &mut |n| {
+                    total += n.len() as u64 + 1;
+                    if total > u64::from(u32::MAX) {
+                        over = true;
+                        return ControlFlow::Break(());
+                    }
+                    ControlFlow::Continue(())
+                })
+                .map_err(|e| meta_error_to_errno(&e))?;
+            return if over { Err(libc::E2BIG) } else { Ok(XattrReply::Size(total as u32)) };
+        }
+        // The buffer grows with the names (no allocation of `size` up front).
+        let mut buf = Vec::new();
+        self.meta
+            .for_each_xattr_name(ino, &mut |n| {
+                if buf.len() + n.len() + 1 > size as usize {
+                    over = true;
+                    return ControlFlow::Break(());
+                }
+                buf.extend_from_slice(n.as_bytes());
+                buf.push(0);
+                ControlFlow::Continue(())
+            })
+            .map_err(|e| meta_error_to_errno(&e))?;
+        if over { Err(libc::ERANGE) } else { Ok(XattrReply::Data(buf)) }
+    }
+
     /// Set an extended attribute.
     /// Under `stripe(ino)` (then its cell): the inode must still exist, so
     /// a set that loses the race with the delete of the inode leaves no
@@ -5207,7 +5433,7 @@ impl SliceFsFilesystem {
     pub(crate) fn setxattr_logged(&self, ino: u64, name: &str, value: &[u8], log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.set_xattr(ino, name, value).map_err(|e| xattr_errno(&e))?;
             log(crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
             Ok(())
         })
@@ -5222,7 +5448,7 @@ impl SliceFsFilesystem {
     pub(crate) fn removexattr_logged(&self, ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.remove_xattr(ino, name).map_err(|e| xattr_errno(&e))?;
             log(crate::oplog::Op::Removexattr { ino, name: name.to_string() });
             Ok(())
         })
@@ -5714,6 +5940,132 @@ mod tests {
         let all = fs.test_readdir(1, 0).unwrap();
         let skipped = fs.test_readdir(1, 1).unwrap();
         assert_eq!(skipped.len(), all.len() - 1);
+    }
+
+    // A readdir reply is filled from the streamed scan: from an entry
+    // index, in name byte order, each entry with the offset of the next,
+    // and the scan stops when the reply is full (`Break`).
+    #[test]
+    fn readdir_streams_from_an_offset_until_the_reply_is_full() {
+        let (fs, _dir) = fresh_fs();
+        for n in ["c", "a", "b", "d"] {
+            fs.test_create(1, n, 0o644, 0, 0, 0).unwrap();
+        }
+        let page = |offset: u64, room: usize| {
+            let mut got = Vec::new();
+            fs.readdir_entries(1, offset, &mut |_, _, name, next| {
+                if got.len() == room {
+                    return ControlFlow::Break(());
+                }
+                got.push((name.to_string(), next));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            got
+        };
+        let all = page(0, usize::MAX);
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, [".", "..", "a", "b", "c", "d"]);
+        let offsets: Vec<u64> = all.iter().map(|(_, o)| *o).collect();
+        assert_eq!(offsets, [1, 2, 3, 4, 5, 6]);
+        // Pages of two, each resumed at the offset of its last entry.
+        let mut resumed = Vec::new();
+        let mut at = 0;
+        loop {
+            let p = page(at, 2);
+            let Some((_, last)) = p.last() else { break };
+            at = *last;
+            resumed.extend(p);
+        }
+        assert_eq!(resumed, all);
+        assert!(page(6, 2).is_empty(), "past the end");
+    }
+
+    // Review 26 B-WR-01: pages of one directory handle, with names removed
+    // and created between the pages (before the cursor, the cursor's own
+    // name, after it): every name that did not change comes exactly once.
+    #[test]
+    fn readdir_pages_give_each_unchanged_name_once_across_changes() {
+        let (fs, _dir) = fresh_fs();
+        let names: Vec<String> = (0..30).map(|i| format!("n{i:02}")).collect();
+        for n in &names {
+            fs.test_create(1, n, 0o644, 0, 0, 0).unwrap();
+        }
+        let fh = fs.alloc_dir_handle();
+        let page = |offset: u64| {
+            let mut got: Vec<(String, u64)> = Vec::new();
+            fs.readdir_handle(1, fh, offset, &mut |_, _, name, next| {
+                if got.len() == 4 {
+                    return ControlFlow::Break(());
+                }
+                got.push((name.to_string(), next));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            got
+        };
+        let (mut seen, mut removed) = (Vec::new(), HashSet::new());
+        let mut at = 0;
+        for round in 0.. {
+            let p = page(at);
+            let Some((last, next)) = p.last().cloned() else { break };
+            at = next;
+            seen.extend(p.into_iter().map(|(n, _)| n));
+            match round % 3 {
+                // A name before the cursor (seen already).
+                0 => {
+                    let n = seen.iter().find(|n| n.starts_with('n') && !removed.contains(*n) && **n != last).cloned();
+                    if let Some(n) = n {
+                        fs.simulate_unlink(1, &n).unwrap();
+                        removed.insert(n);
+                    }
+                }
+                // The cursor's own name.
+                1 if last.starts_with('n') => {
+                    fs.simulate_unlink(1, &last).unwrap();
+                    removed.insert(last);
+                }
+                // A new name before the cursor and one after it.
+                _ => {
+                    for n in [format!("a{round:02}"), format!("z{round:02}")] {
+                        fs.test_create(1, &n, 0o644, 0, 0, 0).unwrap();
+                    }
+                }
+            }
+        }
+        assert!(removed.len() >= 4, "the test removed names: {removed:?}");
+        for n in [".", ".."].into_iter().map(String::from).chain(names.into_iter().filter(|n| !removed.contains(n))) {
+            assert_eq!(seen.iter().filter(|s| **s == n).count(), 1, "{n} in {seen:?}");
+        }
+    }
+
+    // The kernel can use only a part of a reply and ask again at the offset
+    // of the last entry it used: the cursor resumes there too.
+    #[test]
+    fn readdir_resumes_inside_the_last_reply() {
+        let (fs, _dir) = fresh_fs();
+        for n in ["a", "b", "c", "d", "e", "f"] {
+            fs.test_create(1, n, 0o644, 0, 0, 0).unwrap();
+        }
+        let fh = fs.alloc_dir_handle();
+        let page = |offset: u64| {
+            let mut got: Vec<(String, u64)> = Vec::new();
+            fs.readdir_handle(1, fh, offset, &mut |_, _, name, next| {
+                if got.len() == 4 {
+                    return ControlFlow::Break(());
+                }
+                got.push((name.to_string(), next));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            got
+        };
+        let first = page(0);
+        assert_eq!(first.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), [".", "..", "a", "b"]);
+        // Only `.`, `..` and `a` were used; then `a` goes.
+        fs.simulate_unlink(1, "a").unwrap();
+        let next = page(first[2].1);
+        assert_eq!(next.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["b", "c", "d", "e"]);
     }
 
     #[test]

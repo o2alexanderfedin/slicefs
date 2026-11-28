@@ -138,6 +138,16 @@ Dirty data is written file data that is not stored yet. It is kept in memory. Fo
 - `--dirty-limit` applies to a file that is changed in place (an overlay). A file that is written from start to end (a stream) can also hold writes that come out of order. These writes can use up to 64 MiB (a fixed window), whatever the limit is.
 - With a `--dirty-budget` below 64M, a stream with out-of-order writes can become an overlay when the total reaches the budget. The file then does not go back to a stream.
 
+### Metadata cache (mount option)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--meta-cache-size <SIZE>` | `64M` | The byte cap of the cache of metadata tree nodes. This is memory that the daemon may use for it, beside `--dirty-budget`. |
+
+- SIZE is bytes, or a number with K, M or G (1024-based). Any size above 0 is allowed, also below `4M`. A small cache makes metadata reads slower. It does not change any result.
+- The daemon's memory for metadata and dirty data is about `--dirty-budget` plus `--meta-cache-size`, plus small fixed buffers.
+- `--cache-size` is still accepted and has no effect.
+
 ### Request workers (mount option)
 
 | Option | Default | Meaning |

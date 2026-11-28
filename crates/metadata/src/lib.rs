@@ -1,4 +1,4 @@
-//! Metadata engine for SliceFS — inode table, directory tree, file manifests,
+//! Metadata engine for SliceFS — inode table, directory entries, file manifests,
 //! xattrs.
 //!
 //! This crate provides concrete implementations of the metadata traits defined
@@ -7,7 +7,7 @@
 
 pub mod inode;
 pub mod inode_alloc;
-pub mod directory;
+mod dirent;
 pub mod manifest;
 pub mod xattr;
 pub mod store;
@@ -18,3 +18,6 @@ pub mod mount_lock;
 pub mod gc;
 pub mod snapshot;
 pub mod rehash;
+mod pmap;
+#[doc(hidden)]
+pub mod testkit;

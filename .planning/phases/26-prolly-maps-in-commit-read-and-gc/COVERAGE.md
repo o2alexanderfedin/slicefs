@@ -1,0 +1,1 @@
+No external API integration: Phase 26 changes the in-workspace metadata store, the prolly crate, the GC mark, rehash, tests and bench scripts; "API" in the plans means Rust functions of these crates, not an external service.
