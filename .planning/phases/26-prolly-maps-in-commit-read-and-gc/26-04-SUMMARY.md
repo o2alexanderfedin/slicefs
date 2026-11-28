@@ -44,7 +44,6 @@ key-decisions:
   - "StoreIo node cache default 64 MiB (NODE_CACHE_BYTES) until plan 26-06 adds the option; tree config Config::DEFAULT"
   - "manifest_digest keeps its Option signature and logs a read error"
   - "A tree is always rebuilt by rehash, also when every node already has the target tag"
-requirements-completed: [PMAP-03, PMAP-06]
 status: complete
 metrics:
   duration: "about 1 h 30 min"
@@ -118,6 +117,8 @@ Acceptance greps: the `prolly` path dependency is in metadata's Cargo.toml once.
 - `apply_batch` returns `prolly::ApplyStats`, but `finish_inner` drops it today (`let (manifest_root, _)`). Plan 26-14 records it.
 - `tree_salt` is `None` everywhere, and `StoreIo::tree_config()` is `Config::DEFAULT` with no salt. Plan 26-06 adds the header salt and the cache size option.
 - `load_from_root` does not check that the tree field starts with `SPT1` (IN-02 is a later plan). A flat-map store from an earlier build fails at the first manifest read with a `manifest_data tree:` corrupt error.
+- Integration tests build the library without `cfg(test)`, so `TREE_FLUSH` is 16,384 there: no slicefs-cli test and no `gc_prolly_tests` test reaches the hot-path flush. Only the unit tests in `store.rs` and `pmap.rs` do (limit 8). Crash windows (26-05) must write more than `TREE_FLUSH` entries, or get a test knob, to cover a flush.
+- PMAP-03 and PMAP-06 are done for one map of five; the other four maps are still flat and still cloned in `begin_commit`.
 - `manifest_digest` can now read a tree node under the fs namespace stripes (`reclaim_inode`); this is in its doc comment.
 
 ## Known Stubs
