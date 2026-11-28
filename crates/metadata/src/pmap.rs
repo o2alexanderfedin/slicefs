@@ -348,8 +348,14 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
     /// The value of `k` and the tree generation read before the tree read
     /// (for a read-modify-write: see the module doc).
     pub(crate) fn read_with_generation(&self, io: &TreeIo, k: &K) -> Result<(Option<V>, u64), MetaError> {
+        // The generation before the overlay lookup: read after it, an
+        // install and settle between the two would pair the pending value
+        // with a newer generation, and `modify` would take a stale value as
+        // current (a lost update). An older generation only makes `modify`
+        // retry.
+        let before = self.generation();
         if let Some(edit) = self.overlay.get(k) {
-            return Ok((edit, self.generation()));
+            return Ok((edit, before));
         }
         let (root, generation) = self.tree.root_generation();
         let got = prolly::get_in(&io.ctx(), &root, &k.encode()).map_err(|e| tree_err(self.name, e))?;
