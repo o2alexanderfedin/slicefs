@@ -45,6 +45,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(kani)'] }
 # Registers a second hasher (`chunk_store::hash::TestKeyedBlake3`) for tests
 # of a change of the write hash.
 chunk-store = { path = "../chunk-store", features = ["test-hasher"] }
+# The metadata trees are rebuilt in `boundary_salt_tests` to check their
+# cuts against the salt of the store.
+prolly = { path = "../prolly" }
 # Content hashes of the store tree in the read-only mount tracer.
 blake3 = { workspace = true }
 # Latency histograms of the stress harness (`tests/stress_harness.rs`).

@@ -4,7 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-use chunk_store::DEFAULT_HASHER;
+use chunk_store::{ChunkStore, DEFAULT_HASHER, ObjectId, Options};
+use metadata::segment::load_store_from_segments;
+use metadata::store_io::get_value;
+use slicefs_cli::content::{self, store_io, store_io_read_only};
+use slicefs_cli::rehash::{rehash_report_with, RehashArgs};
+use slicefs_traits::key::KEY_BYTES;
 use slicefs_cli::content::SaltOpt;
 use slicefs_cli::header::{self, BOUNDARY_SALT_FLAG, BOUNDARY_SALT_RELEASE, FORMAT_FILE};
 use slicefs_cli::seed;
@@ -162,4 +167,104 @@ fn stats_lists_the_boundary_salt_flag() {
     assert_eq!((flags[0].name.as_str(), flags[0].release.as_str(), flags[0].known), (BOUNDARY_SALT_FLAG, BOUNDARY_SALT_RELEASE, true));
     let v = serde_json::to_value(&stats).unwrap();
     assert_eq!(v["flags"]["ro_compat"][0]["name"], BOUNDARY_SALT_FLAG);
+}
+
+/// Offset of the manifest tree root in the root record (pinned by the
+/// `root_record_layout` unit test of `metadata`): root dir ino, next ino,
+/// then the inode and directory maps.
+const MANIFEST_DATA: usize = 8 + 8 + 2 * KEY_BYTES;
+
+/// A source directory with enough files that the manifest tree has several
+/// leaves (one 41-byte entry per file, a leaf is about 8 KiB).
+fn big_source(dir: &Path) -> PathBuf {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for i in 0..1_500u32 {
+        std::fs::write(src.join(format!("f{i:04}")), format!("file {i}")).unwrap();
+    }
+    src
+}
+
+/// The (key, value) entries of a tree, in key order.
+type Entries = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// The manifest tree of the current root of `store`: its root and its
+/// entries in key order.
+fn manifest_tree(store: &Path) -> (ObjectId, Entries) {
+    let (root, _) = load_store_from_segments(&store.join("segments")).unwrap();
+    let cs = content::open_read_only(store).unwrap();
+    let rec = get_value(&cs, &root.unwrap()).unwrap();
+    let tree = ObjectId(rec[MANIFEST_DATA..MANIFEST_DATA + KEY_BYTES].try_into().unwrap());
+    let entries = prolly::iter(&cs, &tree).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert!(prolly::height(&prolly::Ctx::uncached(&cs), &tree).unwrap() >= 2, "a tree of several nodes");
+    (tree, entries)
+}
+
+/// The root of `entries` built with `salt`, with the write hash `hash`, in
+/// a scratch store.
+fn built_root(entries: &[(Vec<u8>, Vec<u8>)], salt: Option<[u8; 32]>, hash: &str) -> ObjectId {
+    let dir = TempDir::new().unwrap();
+    let hasher = chunk_store::hash::hasher_by_name(hash).unwrap();
+    let cs = ChunkStore::open(dir.path(), Options { hasher, ..Options::default() }).unwrap();
+    let cfg = prolly::Config::DEFAULT.with_salt(salt);
+    prolly::build(&cs, cfg, entries.iter().map(|(k, v)| (k, v))).unwrap().0
+}
+
+fn salt_a() -> [u8; 32] {
+    header::parse_salt_hex(HEX_A).unwrap()
+}
+
+/// A salted store writes salted trees: the manifest tree is the one that
+/// `prolly::build` makes for its entries with the salt, and not the one
+/// with no salt.
+#[test]
+fn a_salted_store_writes_salted_trees() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("store");
+    seed::run_seed_with_salt(&store, &big_source(dir.path()), None, None, Some(value(HEX_A))).unwrap();
+    let (root, entries) = manifest_tree(&store);
+    assert!(entries.len() >= 1_500, "{}", entries.len());
+    assert_eq!(root, built_root(&entries, Some(salt_a()), "blake3-256"));
+    assert_ne!(root, built_root(&entries, None, "blake3-256"));
+}
+
+/// A store with no salt writes the unsalted trees.
+#[test]
+fn an_unsalted_store_writes_unsalted_trees() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("store");
+    seed::run_seed_with_salt(&store, &big_source(dir.path()), None, None, None).unwrap();
+    let (root, entries) = manifest_tree(&store);
+    assert_eq!(root, built_root(&entries, None, "blake3-256"));
+    assert_ne!(root, built_root(&entries, Some(salt_a()), "blake3-256"));
+}
+
+/// Both ways to open the node store of a store give it the salt of the
+/// header (every writer of a tree opens it this way).
+#[test]
+fn the_node_store_has_the_salt_of_the_header() {
+    let dir = TempDir::new().unwrap();
+    let (salted, plain) = (dir.path().join("salted"), dir.path().join("plain"));
+    seed::run_seed_with_salt(&salted, &source(dir.path()), None, None, Some(value(HEX_A))).unwrap();
+    seed::run_seed_with_salt(&plain, &source(dir.path()), None, None, None).unwrap();
+    assert_eq!(store_io(&salted).unwrap().tree_config().salt(), Some(&salt_a()));
+    assert_eq!(store_io_read_only(&salted).unwrap().tree_config().salt(), Some(&salt_a()));
+    assert_eq!(store_io(&plain).unwrap().tree_config().salt(), None);
+    assert_eq!(store_io_read_only(&plain).unwrap().tree_config().salt(), None);
+}
+
+/// A rehash of a salted store rebuilds its manifest tree with the salt:
+/// the new tree is the salted build of its own entries.
+#[test]
+fn a_rehash_keeps_salted_trees() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("store");
+    seed::run_seed_with_salt(&store, &big_source(dir.path()), None, None, Some(value(HEX_A))).unwrap();
+    let (before, _) = manifest_tree(&store);
+    rehash_report_with(&RehashArgs::new(&store, "sha256", false), &mut |_| {}).unwrap();
+    let (root, entries) = manifest_tree(&store);
+    assert_ne!(root, before);
+    assert_eq!(root.tag(), 0x12, "a tree of the target hash");
+    assert_eq!(root, built_root(&entries, Some(salt_a()), "sha256"));
+    assert_ne!(root, built_root(&entries, None, "sha256"));
 }

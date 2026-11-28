@@ -1122,6 +1122,7 @@ dependencies = [
  "loom",
  "metadata",
  "parking_lot",
+ "prolly",
  "serde",
  "serde_json",
  "slicefs-traits",

@@ -211,9 +211,27 @@ impl StoreIo {
         Arc::clone(&self.node_cache)
     }
 
-    /// The config of the metadata trees.
+    /// The config of the metadata trees: the default rule with the
+    /// boundary salt of the store (see [`StoreIo::with_tree_salt`]).
     pub fn tree_config(&self) -> prolly::Config {
         self.tree_config
+    }
+
+    /// Use the boundary salt of the store (`None`: no salt) for every tree
+    /// this `StoreIo` writes. A salted store has salted cuts in every
+    /// tree, so a tree is the same for the same entries. Call it before
+    /// the store loads.
+    #[must_use]
+    pub fn with_tree_salt(mut self, salt: Option<[u8; 32]>) -> Self {
+        self.tree_config = prolly::Config::DEFAULT.with_salt(salt);
+        self
+    }
+
+    /// Set the byte cap of the node cache (`--meta-cache-size`): a new, empty
+    /// cache replaces the old one. Call it before the store loads, because a
+    /// store that is loaded already keeps the cache it was given.
+    pub fn set_node_cache_bytes(&mut self, cap: usize) {
+        self.node_cache = Arc::new(prolly::NodeCache::new(cap));
     }
 
     /// Nodes put since the last `sync_written`.
