@@ -1,7 +1,7 @@
 ---
 phase: 26
 depth: standard
-status: issues_found
+status: fixed
 findings:
   critical: 0
   warning: 4
@@ -11,6 +11,8 @@ findings:
 # Phase 26 code review
 
 Two parts: A (store.rs, pmap.rs) and B (other product code). IDs are prefixed A- and B-.
+
+Fix status (2026-11-28): all 11 findings are fixed, on branch `exec/26-fix`. Each finding has a "Fix status" line.
 
 # Part A
 
@@ -76,6 +78,8 @@ self.flush_trees();
 xr.and(dr)
 ```
 
+**Fix status:** fixed in `6d81c0f`. The counts change in the same step as the inode delete, both scans run, and the error is returned. `reclaim_inode` and both undo paths log the error; `reclaim_inode` releases the content only if the inode is gone. Test: `a_failed_delete_scan_still_counts_the_delete` (failed before the fix).
+
 ### WR-02: A refcount tree read error drops the change silently, and the "next commit fails" safeguard is used up after the install
 
 **File:** `crates/metadata/src/store.rs:482-491` (with `948-954` and `1244-1263`)
@@ -84,6 +88,8 @@ xr.and(dr)
 (a) Keep the error in the overlay: write a marker, or keep the digest in a "retry" set that the commit's take processes again, so the change is applied when the tree can be read.
 (b) Make the error sticky. Do not `take()` it in `begin_put_sync`. Clear it only after a check (for example a scrub recount).
 (c) At minimum, check `put_error` in `finish_inner` *before* the install block. The commit then requeues instead of installing, and the error is reported where the doc says.
+
+**Fix status:** fixed in `3b0d4d6` (a sticky error, option b with the check of option c). The error goes into a new field `refcount_error`, which is never cleared. `finish_commit` checks it before any node write or install, so every later commit of the store fails and its edits are dirty again. A reload replays the write log on the last good root. `put_error` (node put errors) is not changed. Test: `a_dropped_refcount_change_is_never_committed` (failed before the fix).
 
 ### WR-03: `MapTree::for_each_value` reads the root before the overlay, which breaks the read rule in the module doc
 
@@ -95,6 +101,8 @@ let pending: HashMap<Vec<u8>, Option<V>> = self.overlay.pending().into_iter().ma
 let root = self.tree.root();
 ```
 
+**Fix status:** fixed in `379e8f4`. The overlay is copied first, then the root is read; the doc texts are updated. Test: `for_each_value_sees_each_key_once_across_a_flush` (a test read hook flushes between the two reads; failed before the fix).
+
 ## Info
 
 ### IN-01: The inode number in an inline inode record is not checked against its tree key
@@ -103,11 +111,15 @@ let root = self.tree.root();
 **Issue:** The inline record carries its own `ino` field. `load_meta` and `read_modify_write` return the decoded record without checking that `m.ino` equals the key. A corrupt record (ino 7 stored under key 5) has two effects. (a) In debug builds, `modify_inode`'s `debug_assert_eq!(m.ino, ino)` at 809 panics on bad on-disk data. (b) In release builds, `get_inode(5)` returns `ino: 7`. A caller that does `update_inode(&meta)` then changes inode 7, which makes the corruption worse. `inode_leaf` (1888-1895) in the GC walk checks only the lengths.
 **Fix:** In `MapTree<u64, InodeMeta>` reads (or in a store wrapper around `inodes.read` / `read_modify_write`), return `MetaError::Corrupted("inode_data tree: record of ino X under key Y")` when `m.ino != key`. Replace the `debug_assert` with that error.
 
+**Fix status:** fixed in `b42becf`. `checked_inode` returns `Corrupted` for a record of another number; `get_inode`, `modify_inode`, `delete_inode` and `link` use it. The `debug_assert` stays, but only checks that the closure keeps the number. The GC leaf check is not changed (a wrong number does not change what is reachable). Test: `an_inode_record_under_another_key_is_corrupt`.
+
 ### IN-02: `tree_nodes` is a public function that builds an O(nodes) list of every tree node, and only tests call it
 
 **File:** `crates/metadata/src/store.rs:1807-1827`
 **Issue:** `tree_nodes` collects the ID of every node of all five trees into one `Vec` (each node once per parent). At the 1B-inode design target this list holds tens of millions of keys, which breaks the "no whole map in RAM" rule. Its only callers are in `#[cfg(test)]` modules (`gc/mod.rs:453`, `rehash/mod.rs:854`). But it is exported as `pub`, so product code can start to use it without any warning.
 **Fix:** Make it `#[cfg(test)] pub(crate)` (or `#[doc(hidden)]` with a doc line saying it is O(nodes) and for tests only), or build it on top of `for_each_referenced` with a callback.
+
+**Fix status:** fixed in `b42becf`. Integration tests in `crates/metadata/tests` and `crates/slicefs-cli/tests` use it, so it cannot be `cfg(test)`. It is now `#[doc(hidden)]` with a tests-only doc line.
 
 ---
 
@@ -247,6 +259,8 @@ returned, or put the cookie in a stable 63-bit hash of the name. Then start
 `scan_keys` just after that name (`name` + `\0`). Until that is done, record
 the behavior with the known limits.
 
+**Fix status:** fixed in `cadb30f`. Each open directory handle keeps a resume cursor: the offset and name of each entry of its last reply (the whole reply, because the kernel can use part of it). A readdir at one of those offsets resumes the scan after that name; offset 0 starts at the start, and any other offset uses the old skip. `releasedir` drops the cursor. Docs updated (`limits.md`, `metadata-maps.md`). Tests: `readdir_pages_give_each_unchanged_name_once_across_changes` (failed before the fix), `readdir_resumes_inside_the_last_reply`, and the new `mt-linux.sh` step `readdir-unlink` (passed in Docker).
+
 ## Info
 
 ### IN-01: The doc comment of `new_inode` is now on `dt_file_type`
@@ -257,6 +271,8 @@ the behavior with the known limits.
 `new_inode` has no doc.
 **Fix:** Move lines 64-65 ("The `create_inode` of a create ...") down, to
 just above `fn new_inode` (line 81).
+
+**Fix status:** fixed in `05b40ae`.
 
 ### IN-02: `handle_readdir` and `ReaddirResult` are left without a product caller, and they build a whole listing
 
@@ -269,6 +285,8 @@ O(entries) listing.
 **Fix:** Mark `handle_readdir`, `ReaddirResult` and `test_readdir`
 `#[cfg(test)]`, or move them into the test modules.
 
+**Fix status:** fixed in `05b40ae`. Integration tests and the stress harness use them, so they are `#[doc(hidden)]` with a tests-only doc line, not `cfg(test)`.
+
 ### IN-03: The errnos of a long xattr name are not the same on get and set
 
 **File:** `crates/slicefs-cli/src/filesystem.rs:2202-2208`
@@ -279,6 +297,8 @@ name length before FUSE, so this is rarely seen.
 **Fix:** Choose the errno per platform (ERANGE on Linux, ENAMETOOLONG on
 macOS) in one helper, and use that helper for all four xattr calls.
 
+**Fix status:** fixed in `05b40ae`. One helper, `xattr_errno`, gives ERANGE for a long name on getxattr, setxattr and removexattr (the Linux errno, as asked; not per platform). `getxattr_name_errors` checks all three.
+
 ### IN-04: Comments in `inode.rs` are out of date after the move to inline records
 
 **File:** `crates/metadata/src/inode.rs:28-31`
@@ -287,6 +307,8 @@ so stores written before the extension load unchanged". Inode records are now
 inline tree values with no digest, and format 8 does not read older stores.
 The buffer is `Vec::with_capacity(60)`, but the record has 56 or 72 bytes.
 **Fix:** Remove the CAS sentence. Use `with_capacity(72)`.
+
+**Fix status:** fixed in `05b40ae`.
 
 ### IN-05: pmap07.py accepts 11 samples per tree, but the rule asks for 22
 
@@ -299,6 +321,8 @@ each of 4 files), so the verdict stands.
 **Fix:** None is needed for this phase, because the script is frozen. If
 the script is used again, require `MIN_SAMPLES * 2` samples per side, or
 check that the samples come from two rounds.
+
+**Fix status:** fixed in `e588729`. A verdict needs 22 samples per tree (`--summary` still needs 11). The script run again on `runs/pmap07` gives output identical to `verdict.txt`, so the recorded verdict (pass) does not change.
 
 ---
 
