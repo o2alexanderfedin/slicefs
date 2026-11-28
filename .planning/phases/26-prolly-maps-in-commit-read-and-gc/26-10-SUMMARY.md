@@ -36,18 +36,18 @@ key-decisions:
   - "Only the three mount paths map to M19; stats, scrub, gc and the snapshot commands keep 'failed to reconstruct metadata store: root record: the metadata maps are not prolly trees: ...'"
 status: complete
 metrics:
-  completed: 2026-11-28
+  completed: 2026-11-27
 actuals:
-  tokens: 33000
+  tokens: 15100
   tasks: 3
-  commits: 3
+  commits: 5
 plan_head_before: 799349c6da1446b0006ef66ac2c08c47b7137962
-plan_head_after: fc04fc24b2e877a49c5179009a60e6999aa7d97f
+plan_head_after: 5ef08c9e0488cb8f0b90011a8976b20393c3b264
 ---
 
 # Phase 26 Plan 10: final format docs and the M19 refusal of interim flat-map stores Summary
 
-A store with a format 8 header whose root record fields are flat maps (a store of the interim build) is now refused at mount with M19, and nothing in it changes. `load_from_root` reads the root object of each of the five fields. Each one must start with `SPT1`, else the result is `MetaError::Corrupted` that starts with `FLAT_MAPS_REFUSED`. `docs/design/store-format.md` now has the final key grammar and value encodings of the five trees and the M19 row. `docs/design/metadata-maps.md` and `docs/design/limits.md` describe the trees as built. Docker `all`, pjdfstest with 4 workers and `verify` pass on prolly stores (ROADMAP criterion 1).
+A store with a format 8 header whose root record fields are flat maps (a store of the interim build) is now refused at mount with M19. Nothing is written to its segments or packs (a mount with `--hash` records that hash in `FORMAT` first, as for any store). `load_from_root` reads the root object of each of the five fields. Each one must start with `SPT1`, else the result is `MetaError::Corrupted` that starts with `FLAT_MAPS_REFUSED`. `docs/design/store-format.md` now has the final key grammar and value encodings of the five trees and the M19 row. `docs/design/metadata-maps.md` and `docs/design/limits.md` describe the trees as built. Docker `all`, pjdfstest with 4 workers and `verify` pass on prolly stores (ROADMAP criterion 1).
 
 ## What was built
 
@@ -149,7 +149,10 @@ Plan acceptance greps:
 - `280e506` docs(26-10): final key grammar and value encodings, M19, tree protocol
 - `fc04fc2` chore(26-10): gate log
 
-`commits: 3` counts the commits from `799349c` to `fc04fc2`. The docs commit of this SUMMARY is not in the count.
+- `0821bca` docs(26-10): summary
+- `5ef08c9` docs(26-10): M19 and --hash, scale table grammar note (docs only: the M19 text about `--hash`, and a note that the 1B-inode scale table used the Phase 25 grammar)
+
+`commits: 5` counts the commits from `799349c` to `5ef08c9` (the first summary commit included). The commit that updates this SUMMARY is not in the count. `tokens` is chars/4 of the plan's diff.
 
 ## Notes for 26-11 and 26-12 (they run next, in parallel)
 
@@ -157,6 +160,7 @@ Plan acceptance greps:
 - A test that builds a root record by hand must put real tree roots in all five fields. A plain value in any field is refused with `FLAT_MAPS_REFUSED`.
 - `metadata-maps.md` "GC mark" says that plan 26-11 records the measured cost of the full snapshot walk. 26-11 can add the number there, or in its own run file.
 - `metadata-maps.md` "Commit" lists the steps and failure rules as built. If 26-12 widens the crash matrix or the test hooks (`test_fail_next_flush`, the flush hook) to all trees, the text needs no change unless a rule changes.
+- The "Scale at 1,000,000,000 inodes" table of `store-format.md` was measured with the Phase 25 key grammar (one `dir_data` entry per directory). The doc now says so. If 26-11 measures tree sizes on the product code, it can replace the table.
 - Not fixed, and outside this plan's files:
   - `crates/metadata/src/inode.rs`: the doc of `serialize_inode` still says "56 or 60 bytes", and says the 56-byte form keeps old "CAS digests". The code and the format doc say 56 or 72 bytes.
   - `docs/user/upgrade.md` covers format 7 only. M19 points to it, and its copy steps (issue #155) also apply to an interim store.
@@ -170,11 +174,11 @@ None.
 
 None beyond the plan's register:
 
-- T-26-29: the magic check of all five fields at load, M19 on the three mount paths, and nothing written. Covered by the store-level and CLI-level tests.
+- T-26-29: the magic check of all five fields at load and M19 on the three mount paths. The CLI test shows that the whole store tree is unchanged with no `--hash`. With `--hash`, `select_hash` records the hash in `FORMAT` before the load: this is the existing order of `load_store_with`, it is not tested here, and the M19 row says so.
 - T-26-30: the docs were written from `inode.rs`, `dirent.rs`, `xattr.rs`, `pmap.rs`, `store.rs` and `gc/mod.rs` as they are at `799349c`.
 - T-26-31: Docker `all`, pjdfstest with 4 workers and `verify` passed.
 - T-26-SC: no package was added.
 
 ## Self-Check: PASSED
 
-The gate log and this SUMMARY exist. Commits `9c2e1d0`, `280e506` and `fc04fc2` are ancestors of HEAD. The gate log has 10 `rc=0` lines, no `rc=[1-9]` line, and no home, user or scratch paths.
+The gate log and this SUMMARY exist. Commits `9c2e1d0`, `280e506`, `fc04fc2`, `0821bca` and `5ef08c9` are ancestors of HEAD. The gate log has 10 `rc=0` lines, no `rc=[1-9]` line, and no home, user or scratch paths.
