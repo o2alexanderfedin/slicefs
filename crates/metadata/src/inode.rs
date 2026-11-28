@@ -7,7 +7,7 @@
 
 use slicefs_traits::metadata::{InodeMeta, MetaError};
 
-/// Serialize `InodeMeta` to a little-endian buffer of 56 or 60 bytes.
+/// Serialize `InodeMeta` to a little-endian buffer of 56 or 72 bytes.
 ///
 /// Layout (all little-endian):
 ///   [0..8]   ino        u64  (8 bytes)
