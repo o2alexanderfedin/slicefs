@@ -536,7 +536,7 @@ impl Filesystem for MountedFs {
         self.run(0, move || {
             fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino, name, size);
             let name_str = name.to_str().unwrap_or("");
-            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size)) {
+            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size, 0)) {
                 XattrResult::Size(sz) => {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> size_query, value_len={}", ts(), ino, name, sz);
                     reply.size(sz);
@@ -545,9 +545,15 @@ impl Filesystem for MountedFs {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> ok, value_len={}", ts(), ino, name, value.len());
                     reply.data(&value);
                 }
-                XattrResult::Error(_) => {
+                // An absent name: ENODATA on Linux, ENOATTR on macOS.
+                XattrResult::Error(e) if e == libc::ENODATA => {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> NO_XATTR", ts(), ino, name);
                     reply.error(Errno::NO_XATTR);
+                }
+                // ERANGE, EINVAL, E2BIG, EIO as they are.
+                XattrResult::Error(e) => {
+                    fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> error {}", ts(), ino, name, e);
+                    reply.error(Errno::from_i32(e));
                 }
             }
         });
