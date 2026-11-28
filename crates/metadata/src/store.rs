@@ -15,6 +15,8 @@
 //!   briefly: never across the write-log cut or a return to the file system.
 //!   A flush is never called with a shard lock held; it holds `apply_lock`
 //!   (`try_lock`) across its node reads and puts.
+//!   The test flush hook of a tree (`pmap`, `Rank::Store`) is a leaf: it is
+//!   cloned out and called with no tree lock held.
 //!   The commit stats lock (`last_stats`, `Rank::Store`, untimed) is a leaf: it
 //!   is set once at the end of a successful commit and cloned by
 //!   `last_commit_stats`; no other store-rank lock and no I/O runs under it.
@@ -279,10 +281,20 @@ impl<T> Drop for Shard<'_, T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CommitFault {
-    /// The nodes are written, nothing is synced.
+    /// The nodes are written, nothing is synced. The root record is put; the
+    /// trees have no new roots yet (the commit fails, its edits are requeued).
     BeforeSync = 1,
     /// The nodes and the content are synced, the root is not logged.
     BeforeRoot = 2,
+    /// Every tree has applied its edits (nodes written), the root record is
+    /// not put. The trees have no new roots yet.
+    AfterApply = 3,
+    /// The trees have their new roots and the overlays are settled; the chunk
+    /// store is not synced. The edits are in the working roots: a failure here
+    /// loses nothing, and the next commit syncs and logs them.
+    AfterInstall = 4,
+    /// The chunk store is synced, the file content (pre-root sync) is not.
+    BeforePreRootSync = 5,
 }
 
 /// The work one commit did on one map tree (see [`CommitStats`]).
@@ -360,12 +372,7 @@ pub struct PreparedCommit<'a> {
 impl Drop for PreparedCommit<'_> {
     fn drop(&mut self) {
         if !self.done {
-            if !self.installed {
-                self.store.manifest.requeue();
-                self.store.end_prepared();
-            }
-            self.store.inode_live.requeue();
-            self.store.dir_live.requeue();
+            self.store.requeue_all(self.installed);
         }
     }
 }
@@ -401,6 +408,9 @@ pub struct DictMetadataStore {
     /// error since then: the next commit syncs them, or fails with the error
     /// (the `StoreIo` lock is not on the hot path).
     unsynced_puts: AtomicU64,
+    /// Dirty entries of a map tree at which the hot path flushes it
+    /// (`TREE_FLUSH`; tests lower it with `test_set_tree_flush`).
+    tree_flush: AtomicUsize,
     put_error: sync::Mutex<Option<std::io::Error>>,
     /// Inode-number allocator.
     inode_alloc: sync::Mutex<InodeAlloc>,
@@ -539,6 +549,7 @@ impl DictMetadataStore {
             io,
             cs,
             unsynced_puts: AtomicU64::new(0),
+            tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(put_error),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
@@ -1110,6 +1121,34 @@ impl DictMetadataStore {
         self.commit_fault.store(at as u8, Ordering::SeqCst);
     }
 
+    /// Flush a map tree on the hot path at `n` dirty entries instead of
+    /// `TREE_FLUSH` (integration tests build the library without `cfg(test)`,
+    /// where the limit is 16,384).
+    #[doc(hidden)]
+    pub fn test_set_tree_flush(&self, n: usize) {
+        self.tree_flush.store(n.max(1), Ordering::Relaxed);
+    }
+
+    /// Make the next hot-path flush of a map tree fail (its entries are
+    /// requeued and the next commit fails with the error).
+    #[doc(hidden)]
+    pub fn test_fail_next_flush(&self) {
+        self.manifest.fail_next_flush();
+    }
+
+    /// Run `f` in every flush of a map tree, between the install of the new
+    /// root and the settle of the overlay (with the apply lock held).
+    #[doc(hidden)]
+    pub fn test_set_flush_hook(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.manifest.set_flush_hook(Some(Arc::new(f)));
+    }
+
+    /// Remove the hook of `test_set_flush_hook`.
+    #[doc(hidden)]
+    pub fn test_clear_flush_hook(&self) {
+        self.manifest.set_flush_hook(None);
+    }
+
     fn injected_fault(&self, at: CommitFault) -> Result<(), MetaError> {
         if self.commit_fault.compare_exchange(at as u8, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             return Err(MetaError::Corrupted(format!("injected commit fault {at:?}")));
@@ -1123,6 +1162,21 @@ impl DictMetadataStore {
         drop(self.commit_lock.lock());
     }
 
+    /// A commit that took the overlays and live caches failed (or was
+    /// dropped). What it took is dirty again, so the next commit writes it.
+    /// `trees_installed`: the commit already installed the roots of the map
+    /// trees (their edits are in the working roots, nothing to requeue, and
+    /// the prepared state ended). Every map with an overlay is requeued here:
+    /// plans that add a tree add it to this function.
+    fn requeue_all(&self, trees_installed: bool) {
+        if !trees_installed {
+            self.manifest.requeue();
+            self.end_prepared();
+        }
+        self.inode_live.requeue();
+        self.dir_live.requeue();
+    }
+
     /// End the prepared state of a commit (flushes may run again).
     fn end_prepared(&self) {
         let _apply = self.apply_lock.lock();
@@ -1134,7 +1188,7 @@ impl DictMetadataStore {
     /// or a commit is prepared (the commit takes the entries). A failed
     /// apply leaves the entries dirty and fails the next commit.
     fn flush_trees(&self) {
-        if self.manifest.dirty() < TREE_FLUSH {
+        if self.manifest.dirty() < self.tree_flush.load(Ordering::Relaxed) {
             return;
         }
         let Some(apply) = self.apply_lock.try_lock() else { return };
@@ -1273,6 +1327,7 @@ impl DictMetadataStore {
                 apply: manifest_apply,
             }
         };
+        self.injected_fault(CommitFault::AfterApply)?;
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
         let refcount_data_digest = intern_key_u64_map(&mut w, &p.refcounts);
@@ -1319,6 +1374,7 @@ impl DictMetadataStore {
             }
         }
 
+        self.injected_fault(CommitFault::AfterInstall)?;
         let presync_ms = p.begin_ms + finish_started.elapsed().as_secs_f64() * 1000.0;
         // Make every object written since the last commit durable before the
         // root that refers to them is logged: after that, log rotation deletes
@@ -1330,6 +1386,7 @@ impl DictMetadataStore {
         lock_stats::lock(&self.io, Site::Io).begin_commit_sync()
             .map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
         cs.sync().map_err(|e| MetaError::Corrupted(format!("commit: object sync failed: {e}")))?;
+        self.injected_fault(CommitFault::BeforePreRootSync)?;
         // The file content that the root refers to must be durable too.
         let pre = self.pre_root_sync.lock().clone();
         if let Some(f) = pre {
@@ -2109,6 +2166,7 @@ impl DictMetadataStore {
             io,
             cs,
             unsynced_puts: AtomicU64::new(0),
+            tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(None),
             inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inode_data: lk(inode_data).timed(Site::InodeData),
@@ -3679,5 +3737,319 @@ mod tests {
         let again = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert_eq!(again.get_manifest(files[2]).unwrap(), vec![ObjectKey::example(4)]);
         assert_eq!(again.get_manifest(files[1]).unwrap(), vec![ObjectKey::example(3)]);
+    }
+
+    /// The manifest key of file `ino` at version `v` (the tests set these).
+    fn mkey(ino: u64, v: u32) -> ObjectKey {
+        ObjectKey::example(ino as u32 * 1000 + v)
+    }
+
+    /// `n` files linked under the root as `f<ino>`, each with its manifest at version 0.
+    fn files_with_manifests(store: &DictMetadataStore, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|_| {
+                let ino = store.create_inode(&new_file_meta()).unwrap();
+                store.link(1, &format!("f{ino}"), ino).unwrap();
+                store.set_manifest(ino, &[mkey(ino, 0)]).unwrap();
+                ino
+            })
+            .collect()
+    }
+
+    /// A store of the root `root` in the same chunk store as `store`.
+    fn reload(store: &DictMetadataStore, root: &ObjectKey) -> DictMetadataStore {
+        DictMetadataStore::load_from_root(Arc::clone(store.io()), root).unwrap()
+    }
+
+    // A commit that fails before its roots are installed (at AfterApply and
+    // at BeforeSync) leaves every change dirty again: the manifest tree
+    // overlay, the inodes and the directories. The next commit writes them.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_failed_commit_before_install_requeues_every_overlay() {
+        for fault in [CommitFault::AfterApply, CommitFault::BeforeSync] {
+            let mem = chunk_store::mem::MemIo::new();
+            let (_io, store) = mem_store(&mem);
+            let files = files_with_manifests(&store, 12);
+            store.commit().unwrap();
+            // Changes of every kind: a manifest, a delete, a create, an inode.
+            for f in &files[..5] {
+                store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+            }
+            store.unlink(1, &format!("f{}", files[11])).unwrap();
+            store.delete_inode(files[11]).unwrap();
+            let new = store.create_inode(&new_file_meta()).unwrap();
+            store.link(1, "new", new).unwrap();
+            store.set_manifest(new, &[mkey(new, 1)]).unwrap();
+            store.modify_inode(files[7], |m| m.size = 77).unwrap();
+
+            store.test_fail_next_commit_at(fault);
+            assert!(store.commit().is_err(), "{fault:?}");
+            assert!(store.has_uncommitted_changes(), "{fault:?}");
+            assert!(store.manifest.dirty() > 0, "{fault:?}: the manifest overlay is dirty again");
+            assert!(store.inode_live.dirty() > 0 && store.dir_live.dirty() > 0, "{fault:?}");
+            assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}: flushes may run again");
+            // The state is still readable.
+            assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)]);
+
+            let root = store.commit().unwrap();
+            assert_eq!(store.manifest.dirty(), 0, "{fault:?}");
+            let re = reload(&store, &root);
+            for f in &files[..5] {
+                assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 1)], "{fault:?}");
+            }
+            for f in &files[5..11] {
+                assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 0)], "{fault:?}");
+            }
+            assert!(re.get_manifest(files[11]).is_err(), "{fault:?}: deleted");
+            assert!(re.get_inode(files[11]).is_err(), "{fault:?}: deleted");
+            assert!(re.lookup(1, &format!("f{}", files[11])).is_err(), "{fault:?}");
+            assert_eq!(re.lookup(1, "new").unwrap(), new, "{fault:?}");
+            assert_eq!(re.get_manifest(new).unwrap(), vec![mkey(new, 1)], "{fault:?}");
+            assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
+        }
+    }
+
+    // A commit that fails after its roots are installed (AfterInstall, and
+    // BeforePreRootSync after the sync) loses nothing: the edits are in the
+    // working roots, and the next commit writes the root again.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_failed_commit_after_install_keeps_the_state() {
+        for fault in [CommitFault::AfterInstall, CommitFault::BeforePreRootSync, CommitFault::BeforeRoot] {
+            let mem = chunk_store::mem::MemIo::new();
+            let (_io, store) = mem_store(&mem);
+            let files = files_with_manifests(&store, 12);
+            store.commit().unwrap();
+            for f in &files[..5] {
+                store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+            }
+            store.unlink(1, &format!("f{}", files[11])).unwrap();
+            store.delete_inode(files[11]).unwrap();
+            let new = store.create_inode(&new_file_meta()).unwrap();
+            store.link(1, "new", new).unwrap();
+            store.modify_inode(files[7], |m| m.size = 77).unwrap();
+
+            store.test_fail_next_commit_at(fault);
+            assert!(store.commit().is_err(), "{fault:?}");
+            assert!(store.has_uncommitted_changes(), "{fault:?}: no root was logged");
+            assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}");
+            assert_eq!(store.manifest.dirty(), 0, "{fault:?}: the edits are in the tree");
+            assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)], "{fault:?}");
+            assert!(store.get_manifest(files[11]).is_err(), "{fault:?}");
+
+            let root = store.commit().unwrap();
+            let re = reload(&store, &root);
+            for f in &files[..5] {
+                assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 1)], "{fault:?}");
+            }
+            for f in &files[5..11] {
+                assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 0)], "{fault:?}");
+            }
+            assert!(re.get_manifest(files[11]).is_err(), "{fault:?}");
+            assert_eq!(re.lookup(1, "new").unwrap(), new, "{fault:?}");
+            assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
+        }
+    }
+
+    // PMAP-03: writers set manifests (flushes run at TREE_FLUSH = 8) while a
+    // commit thread commits in a loop. Each writer reads back what it just
+    // wrote (never an older value, also in the window of a flush or commit
+    // install); at the end every inode has its last version, before and
+    // after a final commit and a reload.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_manifest_set_racing_flushes_and_commits_loses_nothing() {
+        const THREADS: usize = 4;
+        const PER: usize = 64;
+        const VERSIONS: u32 = 40;
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let inos: Vec<u64> = (0..THREADS * PER).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        let writers_left = std::sync::atomic::AtomicUsize::new(THREADS);
+        let commits = AtomicU64::new(0);
+        std::thread::scope(|s| {
+            let (store, writers_left, commits) = (&store, &writers_left, &commits);
+            for mine in inos.chunks(PER) {
+                s.spawn(move || {
+                    // Counts the thread out also on a panic, so the commit thread ends.
+                    struct Done<'a>(&'a std::sync::atomic::AtomicUsize);
+                    impl Drop for Done<'_> {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    let _done = Done(writers_left);
+                    for v in 1..=VERSIONS {
+                        for ino in mine {
+                            store.set_manifest(*ino, &[mkey(*ino, v)]).unwrap();
+                            let got = store.get_manifest(*ino).unwrap();
+                            assert_eq!(got, vec![mkey(*ino, v)], "inode {ino} read back an older version than {v}");
+                        }
+                    }
+                });
+            }
+            s.spawn(move || {
+                while writers_left.load(Ordering::SeqCst) > 0 {
+                    store.commit().unwrap();
+                    commits.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        });
+        assert!(commits.load(Ordering::Relaxed) > 0, "commits ran during the writes");
+        let check = |s: &DictMetadataStore, what: &str| {
+            for ino in &inos {
+                assert_eq!(s.get_manifest(*ino).unwrap(), vec![mkey(*ino, VERSIONS)], "{what}: inode {ino}");
+            }
+        };
+        check(&store, "before the final commit");
+        let root = store.commit().unwrap();
+        check(&store, "after the final commit");
+        check(&reload(&store, &root), "after a reload");
+    }
+
+    // RESEARCH Pitfall 1: a read in the window of a flush (the new root is
+    // installed, the overlay is not settled yet) sees the flushed value.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_read_in_the_flush_window_sees_the_new_value() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let store = Arc::new(store);
+        let files: Vec<u64> = (0..TREE_FLUSH).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        let empty = store.manifest.root();
+        type Seen = Vec<(bool, Vec<Option<ObjectKey>>)>;
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        {
+            let (weak, seen, files) = (Arc::downgrade(&store), Arc::clone(&seen), files.clone());
+            store.test_set_flush_hook(move || {
+                let st = weak.upgrade().unwrap();
+                let moved = st.manifest.root() != empty;
+                let values = files.iter().map(|f| st.manifest.read(&st.trees, f).unwrap()).collect();
+                seen.lock().unwrap().push((moved, values));
+            });
+        }
+        // The last write reaches TREE_FLUSH and flushes.
+        for f in &files {
+            store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+        }
+        store.test_clear_flush_hook();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one flush ran");
+        let (moved, values) = &seen[0];
+        assert!(*moved, "the hook ran after the install of the new root");
+        // Every key reads the flushed value in the window, not an older one
+        // and not a miss.
+        for (f, v) in files.iter().zip(values) {
+            assert_eq!(*v, Some(store.prepare_manifest(&[mkey(*f, 1)]).unwrap()), "key {f}");
+        }
+        assert_eq!(store.manifest.dirty(), 0);
+    }
+
+    // RESEARCH Pitfall 2: a change after the cut is not in the root of that
+    // commit, also when writes pass the flush limit before the root is
+    // installed, and it is in the next root.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_post_cut_change_is_not_in_the_committed_root() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let before = files_with_manifests(&store, 10);
+        let after: Vec<u64> = (0..20).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        let p = store.begin_commit().unwrap();
+        for f in &after {
+            store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+        }
+        store.set_manifest(before[0], &[mkey(before[0], 9)]).unwrap();
+        assert!(after.len() > TREE_FLUSH);
+        let root = store.finish_commit(p).unwrap();
+        let cut = reload(&store, &root);
+        for f in &after {
+            assert!(cut.get_manifest(*f).is_err(), "inode {f}: a write after the cut is not in the root");
+        }
+        assert_eq!(cut.get_manifest(before[0]).unwrap(), vec![mkey(before[0], 0)]);
+        for f in &after {
+            assert_eq!(store.get_manifest(*f).unwrap(), vec![mkey(*f, 1)], "the live store has it");
+        }
+        let next = store.commit().unwrap();
+        let re = reload(&store, &next);
+        for f in &after {
+            assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 1)], "the next root has it");
+        }
+        assert_eq!(re.get_manifest(before[0]).unwrap(), vec![mkey(before[0], 9)]);
+    }
+
+    // The same, with the writes made while the commit runs on another
+    // thread (anywhere between its cut and its end): the root never has a
+    // write that came after the cut. `cut_done` is sent after the cut.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn writes_during_the_finish_are_not_in_the_committed_root() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let base = files_with_manifests(&store, 10);
+        for round in 1..=10u32 {
+            let late: Vec<u64> = (0..3 * TREE_FLUSH).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+            let (cut_done, cut_rx) = std::sync::mpsc::channel();
+            let root = std::thread::scope(|s| {
+                let store = &store;
+                let committer = s.spawn(move || {
+                    let p = store.begin_commit().unwrap();
+                    cut_done.send(()).unwrap();
+                    store.finish_commit(p).unwrap()
+                });
+                cut_rx.recv_timeout(LIMIT).unwrap();
+                for f in &late {
+                    store.set_manifest(*f, &[mkey(*f, round)]).unwrap();
+                }
+                committer.join().unwrap()
+            });
+            let cut = reload(&store, &root);
+            for f in &late {
+                assert!(cut.get_manifest(*f).is_err(), "round {round}: inode {f} is not in the root of the cut");
+            }
+            for f in &base {
+                assert_eq!(cut.get_manifest(*f).unwrap(), vec![mkey(*f, 0)]);
+            }
+            let next = store.commit().unwrap();
+            let re = reload(&store, &next);
+            for f in &late {
+                assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, round)], "round {round}");
+            }
+        }
+    }
+
+    // A flush that fails requeues its entries (they stay readable) and keeps
+    // the error: the next commit fails with it, and the commit after that
+    // writes every change.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_failed_flush_requeues_and_fails_the_next_commit() {
+        let mem = chunk_store::mem::MemIo::new();
+        let (_io, store) = mem_store(&mem);
+        let files: Vec<u64> = (0..2 * TREE_FLUSH).map(|_| store.create_inode(&new_file_meta()).unwrap()).collect();
+        let empty = store.manifest.root();
+        store.test_fail_next_flush();
+        // The write that reaches TREE_FLUSH flushes, and the flush fails.
+        for f in &files[..TREE_FLUSH] {
+            store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+        }
+        assert_eq!(store.manifest.root(), empty, "the failed flush installed nothing");
+        assert_eq!(store.manifest.dirty(), TREE_FLUSH, "the entries are dirty again");
+        for f in &files[..TREE_FLUSH] {
+            assert_eq!(store.get_manifest(*f).unwrap(), vec![mkey(*f, 1)], "still readable");
+        }
+        // The next write flushes again (the fault is used up).
+        for f in &files[TREE_FLUSH..] {
+            store.set_manifest(*f, &[mkey(*f, 1)]).unwrap();
+        }
+        assert_ne!(store.manifest.root(), empty);
+        let e = store.commit().unwrap_err();
+        assert!(e.to_string().contains("injected flush fault"), "{e}");
+        let root = store.commit().unwrap();
+        let re = reload(&store, &root);
+        for f in &files {
+            assert_eq!(re.get_manifest(*f).unwrap(), vec![mkey(*f, 1)]);
+        }
     }
 }

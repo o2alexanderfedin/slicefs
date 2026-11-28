@@ -120,3 +120,44 @@ fn an_empty_store_keeps_its_trees() {
     assert!(store.get_manifest(1).is_err());
     store.commit().unwrap();
 }
+
+/// PMAP-06 ordering: with the online GC order (`gc_begin`, then a commit,
+/// then the mark from the new root), nodes that a hot-path flush wrote after
+/// `gc_begin` survive the sweep. (Integration tests have a flush limit of
+/// 16,384 dirty entries, so the writes go past it.)
+#[test]
+#[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+fn nodes_of_a_flush_after_gc_begin_survive_the_sweep() {
+    const FILES: u64 = 20_000;
+    let dir = tempfile::TempDir::new().unwrap();
+    let io = Arc::new(Mutex::new(StoreIo::open(dir.path()).unwrap()));
+    let cs = Arc::clone(io.lock().unwrap().store());
+    let store = DictMetadataStore::new(Arc::clone(&io));
+    let inos: Vec<u64> = (0..FILES).map(|_| store.create_inode(&InodeMeta::new_file(0, 0, 0, 0o100644)).unwrap()).collect();
+    // One real manifest (the mark reads its content key), shared by all files.
+    let digest = store.prepare_manifest(&manifest(&cs, 0, 0)).unwrap();
+    store.commit().unwrap();
+
+    let boundary = cs.gc_begin_full().unwrap();
+    let before = cs.stats().objects;
+    for ino in &inos {
+        store.set_manifest_digest(*ino, digest).unwrap();
+    }
+    assert!(cs.stats().objects > before, "a flush wrote tree nodes after gc_begin");
+    let b = store.commit().unwrap();
+
+    let stop = AtomicBool::new(false);
+    let live = metadata::gc::live_objects_exact(&cs, &[b], &[], &stop).unwrap().unwrap();
+    cs.gc_finish_full(live, boundary).unwrap();
+
+    let tree_b = manifest_tree(&cs, &b);
+    let nodes_b = nodes_of(&cs, &tree_b);
+    assert!(nodes_b.len() > 100, "a tree of many nodes");
+    for id in &nodes_b {
+        cs.read(id).unwrap_or_else(|e| panic!("node {id:?} of the new root: {e}"));
+    }
+    let store = DictMetadataStore::load_from_root(Arc::clone(&io), &b).unwrap();
+    for ino in &inos {
+        assert_eq!(store.manifest_digest(*ino), Some(digest), "inode {ino}");
+    }
+}
