@@ -27,6 +27,12 @@ head -c 60000 /dev/urandom > $R/xv
 step xattr-big 30 bash -c "setfattr -n user.big -v 0s\$(base64 -w0 $R/xv) $R/mnt/e.txt && getfattr --only-values -n user.big $R/mnt/e.txt | cmp - $R/xv"
 step xattr-many 120 bash -c "for i in \$(seq 1 300); do setfattr -n user.n\$i -v v\$i $R/mnt/e.txt || exit 1; done; [ \$(getfattr -d $R/mnt/e.txt | grep -c '^user\.n') = 300 ]"
 step xattr-remove 10 bash -c "setfattr -x user.big $R/mnt/e.txt && ! getfattr -n user.big $R/mnt/e.txt"
+# 3,000 names in one directory: the kernel reads the listing in many
+# readdir replies, each filled from the streamed directory scan; rmdir
+# refuses the directory until it is empty.
+step readdir-many 180 bash -c "mkdir $R/mnt/big && for i in \$(seq 1 3000); do : > $R/mnt/big/f\$i || exit 1; done; [ \$(ls -f $R/mnt/big | wc -l) = 3002 ] && [ \$(ls $R/mnt/big | sort -u | wc -l) = 3000 ]"
+step rmdir-notempty 10 bash -c "! rmdir $R/mnt/big 2>/dev/null"
+step rmdir 120 bash -c "rm -f $R/mnt/big/f* && rmdir $R/mnt/big && [ ! -e $R/mnt/big ]"
 step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done

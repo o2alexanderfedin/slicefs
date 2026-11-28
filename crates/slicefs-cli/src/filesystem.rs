@@ -63,6 +63,21 @@ pub(crate) type LogOp<'a> = &'a mut dyn FnMut(crate::oplog::Op);
 
 /// The `create_inode` of a create: at the logged inode number in replay
 /// (`Some`), else the next free one.
+/// The file type of a directory entry type byte (the Linux `DT_*`
+/// number); `None` for 0 or an unknown byte.
+fn dt_file_type(kind: u8) -> Option<FileType> {
+    Some(match kind {
+        1 => FileType::NamedPipe,
+        2 => FileType::CharDevice,
+        4 => FileType::Directory,
+        6 => FileType::BlockDevice,
+        8 => FileType::RegularFile,
+        10 => FileType::Symlink,
+        12 => FileType::Socket,
+        _ => return None,
+    })
+}
+
 fn new_inode(meta: &DictMetadataStore, at: Option<u64>, m: &InodeMeta) -> Result<u64, MetaError> {
     match at {
         Some(ino) => meta.create_inode_at(ino, m),
@@ -4718,14 +4733,9 @@ impl SliceFsFilesystem {
             return Err(libc::ENOTDIR);
         }
 
-        // Check emptiness: list_directory returns . and .. plus any real entries
-        let entries = self
-            .meta
-            .list_directory(ino)
-            .map_err(|e| meta_error_to_errno(&e))?;
-        // . and .. always present — anything beyond that is ENOTEMPTY
-        let real_entries = entries.iter().filter(|e| e.name != "." && e.name != "..").count();
-        if real_entries > 0 {
+        // Empty: no entry but `.` and `..` (the scan stops at the first
+        // other name; no listing).
+        if !self.meta.dir_is_empty(ino).map_err(|e| meta_error_to_errno(&e))? {
             return Err(libc::ENOTEMPTY);
         }
 
@@ -4972,11 +4982,8 @@ impl SliceFsFilesystem {
                 (false, true) => return Err(libc::EISDIR),
                 _ => {}
             }
-            if dst_is_dir {
-                let entries = self.meta.list_directory(dst_ino).map_err(|e| meta_error_to_errno(&e))?;
-                if entries.iter().any(|e| e.name != "." && e.name != "..") {
-                    return Err(libc::ENOTEMPTY);
-                }
+            if dst_is_dir && !self.meta.dir_is_empty(dst_ino).map_err(|e| meta_error_to_errno(&e))? {
+                return Err(libc::ENOTEMPTY);
             }
             self.meta
                 .unlink(newparent_ino, newname)
@@ -5142,16 +5149,42 @@ impl SliceFsFilesystem {
     /// List directory entries starting at `offset`.
     /// Returns `Vec<(ino, kind, name)>` tuples.
     pub fn test_readdir(&self, ino: u64, offset: u64) -> Result<Vec<(u64, FileType, String)>, i32> {
-        let entries = self.meta.list_directory(ino).map_err(|e| meta_error_to_errno(&e))?;
         let mut result = Vec::new();
-        for entry in entries.iter().skip(offset as usize) {
-            let kind = match self.meta.get_inode(entry.ino) {
-                Ok(m) => inode_to_file_attr(&m).kind,
-                Err(_) => FileType::RegularFile,
-            };
-            result.push((entry.ino, kind, entry.name.clone()));
-        }
+        self.readdir_entries(ino, offset, &mut |child, kind, name, _| {
+            result.push((child, kind, name.to_string()));
+            ControlFlow::Continue(())
+        })?;
         Ok(result)
+    }
+
+    /// Call `f` with each entry of directory `ino` from entry index
+    /// `offset` on (name byte order, `.` and `..` included): the child ino,
+    /// its file type, the name and the offset of the next entry. `Break`
+    /// stops it (a full reply buffer). Streamed from the store's directory
+    /// scan: no list of the directory is built; the entries before `offset`
+    /// are scanned and skipped. The type is the stored type byte of the
+    /// entry; for a byte of 0 (linked before its inode existed) the child
+    /// inode is read.
+    pub fn readdir_entries(
+        &self,
+        ino: u64,
+        offset: u64,
+        f: &mut dyn FnMut(u64, FileType, &str, u64) -> ControlFlow<()>,
+    ) -> Result<(), i32> {
+        let mut index = 0u64;
+        self.meta
+            .for_each_dir_entry(ino, &mut |name, child, kind| {
+                index += 1;
+                if index <= offset {
+                    return ControlFlow::Continue(());
+                }
+                let kind = dt_file_type(kind).unwrap_or_else(|| match self.meta.get_inode(child) {
+                    Ok(m) => inode_to_file_attr(&m).kind,
+                    Err(_) => FileType::RegularFile,
+                });
+                f(child, kind, name, index)
+            })
+            .map_err(|e| meta_error_to_errno(&e))
     }
 
     /// Open a file. Returns `(fh, is_write)` on success.
@@ -5810,6 +5843,45 @@ mod tests {
         let all = fs.test_readdir(1, 0).unwrap();
         let skipped = fs.test_readdir(1, 1).unwrap();
         assert_eq!(skipped.len(), all.len() - 1);
+    }
+
+    // A readdir reply is filled from the streamed scan: from an entry
+    // index, in name byte order, each entry with the offset of the next,
+    // and the scan stops when the reply is full (`Break`).
+    #[test]
+    fn readdir_streams_from_an_offset_until_the_reply_is_full() {
+        let (fs, _dir) = fresh_fs();
+        for n in ["c", "a", "b", "d"] {
+            fs.test_create(1, n, 0o644, 0, 0, 0).unwrap();
+        }
+        let page = |offset: u64, room: usize| {
+            let mut got = Vec::new();
+            fs.readdir_entries(1, offset, &mut |_, _, name, next| {
+                if got.len() == room {
+                    return ControlFlow::Break(());
+                }
+                got.push((name.to_string(), next));
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+            got
+        };
+        let all = page(0, usize::MAX);
+        let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, [".", "..", "a", "b", "c", "d"]);
+        let offsets: Vec<u64> = all.iter().map(|(_, o)| *o).collect();
+        assert_eq!(offsets, [1, 2, 3, 4, 5, 6]);
+        // Pages of two, each resumed at the offset of its last entry.
+        let mut resumed = Vec::new();
+        let mut at = 0;
+        loop {
+            let p = page(at, 2);
+            let Some((_, last)) = p.last() else { break };
+            at = *last;
+            resumed.extend(p);
+        }
+        assert_eq!(resumed, all);
+        assert!(page(6, 2).is_empty(), "past the end");
     }
 
     #[test]

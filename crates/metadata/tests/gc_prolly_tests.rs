@@ -20,6 +20,8 @@ const XATTR_DATA: usize = MANIFEST_DATA + KEY_BYTES;
 const REFCOUNTS: usize = MANIFEST_DATA + 2 * KEY_BYTES;
 /// Offset of the inode tree root: after the root dir ino and next ino.
 const INODE_DATA: usize = 8 + 8;
+/// The offset of the `DIR_DATA` field of a root record.
+const DIR_DATA: usize = INODE_DATA + KEY_BYTES;
 
 fn manifest_tree(cs: &chunk_store::ChunkStore, root: &ObjectKey) -> chunk_store::ObjectId {
     let rec = get_value(cs, root).unwrap();
@@ -85,13 +87,14 @@ fn manifest_tree_end_to_end() {
     let (nodes_a, nodes_b) = (nodes_of(&cs, &tree_a), nodes_of(&cs, &tree_b));
     let mut io_r = NodeReader(Arc::clone(&cs));
     let listed: BTreeSet<_> = tree_nodes(&mut io_r, &b).unwrap().iter().map(to_id).collect();
-    // The refcount tree (plan 26-07), the xattr tree (26-15) and the inode
-    // tree (26-08) are in the list too.
+    // The refcount tree (plan 26-07), the xattr tree (26-15), the inode
+    // tree (26-08) and the directory tree (26-09) are in the list too.
     let rec = get_value(&cs, &b).unwrap();
     let field = |o: usize| chunk_store::ObjectId(rec[o..o + KEY_BYTES].try_into().unwrap());
     let mut want: BTreeSet<_> = nodes_b.union(&nodes_of(&cs, &field(REFCOUNTS))).copied().collect();
     want.extend(nodes_of(&cs, &field(XATTR_DATA)));
     want.extend(nodes_of(&cs, &field(INODE_DATA)));
+    want.extend(nodes_of(&cs, &field(DIR_DATA)));
     assert_eq!(listed, want, "tree_nodes lists the nodes of the trees");
     let old: Vec<_> = nodes_a.difference(&nodes_b).copied().collect();
     assert!(!old.is_empty(), "B rewrote nodes of A");

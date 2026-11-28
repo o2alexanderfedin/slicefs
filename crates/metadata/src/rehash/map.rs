@@ -43,12 +43,10 @@ const GROW_READ: usize = (64 << 10) / SLOT * SLOT;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
-    /// A byte-copied value: file content, a directory node, or a spilled
-    /// xattr value.
+    /// A byte-copied value: file content or a spilled xattr value.
     Value = 1,
     ManifestList = 2,
-    /// A `u64 -> key` map of directory nodes.
-    ValueMap = 3,
+    // 3 is not used (it was the flat directory map, now a tree).
     // 4 is not used (it was the flat manifest map, now a tree).
     // 5 is not used (it was the inode map, removed in store format 8).
     // 6 is not used (it was the flat refcount table, now a tree).
@@ -61,6 +59,8 @@ pub enum Kind {
     XattrTree = 10,
     /// The prolly tree of inline inode records (`inode_data`).
     InodeTree = 11,
+    /// The prolly tree of directory entries by name (`dir_data`).
+    DirTree = 12,
 }
 
 const EMPTY: [u8; SLOT] = [0; SLOT];
