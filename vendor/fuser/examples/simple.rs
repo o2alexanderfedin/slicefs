@@ -2399,6 +2399,7 @@ impl Filesystem for SimpleFS {
         inode: INodeNo,
         key: &OsStr,
         size: u32,
+        _position: u32,
         reply: ReplyXattr,
     ) {
         if let Ok(attrs) = self.get_inode(inode) {

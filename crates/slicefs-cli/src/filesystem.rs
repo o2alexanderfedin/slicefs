@@ -6,7 +6,7 @@
 //! Write callbacks (create, write, release, setattr) are fully implemented in Phase 4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
+use std::ops::{ControlFlow, Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2167,6 +2167,28 @@ pub fn meta_error_to_errno(e: &MetaError) -> i32 {
         MetaError::NameTooLong(_) => libc::ENAMETOOLONG,
         MetaError::Corrupted(_) => libc::EIO,
         MetaError::Io(_) => libc::EIO,
+    }
+}
+
+/// The xattr name that macOS reads by position (the resource fork).
+pub const RESOURCE_FORK: &str = "com.apple.ResourceFork";
+
+/// The reply of `getxattr_reply` / `listxattr_reply`: a length (the
+/// request size was 0) or the bytes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum XattrReply {
+    Size(u32),
+    Data(Vec<u8>),
+}
+
+/// The errno of a getxattr store error: an absent name is ENODATA (the
+/// callback sends ENOATTR on macOS), a name above 255 bytes ERANGE (the
+/// Linux errno); the rest as `meta_error_to_errno`.
+fn getxattr_errno(e: &MetaError) -> i32 {
+    match e {
+        MetaError::NotFound(_) => libc::ENODATA,
+        MetaError::NameTooLong(_) => libc::ERANGE,
+        e => meta_error_to_errno(e),
     }
 }
 
@@ -5193,6 +5215,80 @@ impl SliceFsFilesystem {
             buf.push(0);
         }
         Ok(buf)
+    }
+
+    /// The reply to a getxattr request (the FUSE path). Memory is bounded
+    /// by the request, never by the value (`xattr_len`, `read_xattr`):
+    /// - `size` 0 asks for the length: no value byte is read;
+    /// - `RESOURCE_FORK` is read by `position` (macOS): up to `size` bytes
+    ///   from there, only the chunks of that range, with no ERANGE;
+    /// - another name: a value above `size` is ERANGE before any value
+    ///   read, else the value is read whole (at most `size` bytes); a
+    ///   position above 0 is EINVAL.
+    ///
+    /// An absent name is ENODATA, a name above 255 bytes ERANGE (Linux).
+    pub fn getxattr_reply(&self, ino: u64, name: &str, size: u32, position: u32) -> Result<XattrReply, i32> {
+        let fork = name == RESOURCE_FORK;
+        if position > 0 && !fork {
+            return Err(libc::EINVAL);
+        }
+        if size == 0 {
+            let len = self.meta.xattr_len(ino, name).map_err(|e| getxattr_errno(&e))?;
+            return u32::try_from(len).map(XattrReply::Size).map_err(|_| libc::E2BIG);
+        }
+        if fork {
+            let v = self.meta.read_xattr(ino, name, u64::from(position), size as usize);
+            return v.map(XattrReply::Data).map_err(|e| getxattr_errno(&e));
+        }
+        let len = self.meta.xattr_len(ino, name).map_err(|e| getxattr_errno(&e))?;
+        if len > u64::from(size) {
+            return Err(libc::ERANGE);
+        }
+        // One byte more than the buffer: a value replaced since its length
+        // was read and now too long is ERANGE, never a cut value. The read
+        // allocates at most the value length.
+        let v = self.meta.read_xattr(ino, name, 0, size as usize + 1).map_err(|e| getxattr_errno(&e))?;
+        if v.len() > size as usize {
+            return Err(libc::ERANGE);
+        }
+        Ok(XattrReply::Data(v))
+    }
+
+    /// The reply to a listxattr request (the FUSE path), from a streamed
+    /// scan of the names (`for_each_xattr_name`, name byte order); no list
+    /// of all names is built. `size` 0 gives the sum of (name length + 1)
+    /// with no buffer; else the NUL-separated names, or ERANGE as soon as
+    /// the next name does not fit (the scan stops there).
+    pub fn listxattr_reply(&self, ino: u64, size: u32) -> Result<XattrReply, i32> {
+        let mut over = false;
+        if size == 0 {
+            let mut total: u64 = 0;
+            self.meta
+                .for_each_xattr_name(ino, &mut |n| {
+                    total += n.len() as u64 + 1;
+                    if total > u64::from(u32::MAX) {
+                        over = true;
+                        return ControlFlow::Break(());
+                    }
+                    ControlFlow::Continue(())
+                })
+                .map_err(|e| meta_error_to_errno(&e))?;
+            return if over { Err(libc::E2BIG) } else { Ok(XattrReply::Size(total as u32)) };
+        }
+        // The buffer grows with the names (no allocation of `size` up front).
+        let mut buf = Vec::new();
+        self.meta
+            .for_each_xattr_name(ino, &mut |n| {
+                if buf.len() + n.len() + 1 > size as usize {
+                    over = true;
+                    return ControlFlow::Break(());
+                }
+                buf.extend_from_slice(n.as_bytes());
+                buf.push(0);
+                ControlFlow::Continue(())
+            })
+            .map_err(|e| meta_error_to_errno(&e))?;
+        if over { Err(libc::ERANGE) } else { Ok(XattrReply::Data(buf)) }
     }
 
     /// Set an extended attribute.
