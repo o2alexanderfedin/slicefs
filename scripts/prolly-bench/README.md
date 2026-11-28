@@ -22,6 +22,16 @@ macOS and on Linux. It runs by hand only. It is never part of `cargo test`
 |---|---|
 | `bench.sh <data-dir> [runs]` | Seed the first tree once; for each run (default 3) copy the seeded store and run the edit script in the mode `whole`, as its own process; then the synthetic `scale` rows; print one CSV row per commit and one median row per (mode, pattern, k) |
 | `layout.sh` | The synthetic `synth` rows of Phase 25 (see the last section) |
+| `pmap07.sh prepare-v230 <dir>` | PMAP-07: make the detached worktree of tag `v2.3.0` and copy the commit bench and the flat report module into it |
+| `pmap07.sh commit <src-dir> <label> <n> <samples> <out-file>` | PMAP-07 checks A and B: the ignored test `one_change_commit_at_scale` of `<src-dir>` in Docker, release build, store on the volume `slicefs-pmap07-work` |
+| `pmap07.sh boost <bin-src-dir> <label> <data-dir> <out-dir>` | PMAP-07 check C: `bench.sh` of this tree in Docker with `BIN` built from `<bin-src-dir>`, with the settings of the rule (`SMOKE=1` and `-` as data dir: a smoke) |
+| `pmap07.py` | The PMAP-07 decision script: reads the commit logs and the two `results.csv`, prints checks A, B and C and `verdict pmap07=<pass\|fail>` (`--self-test`, `--summary`) |
+
+`pmap07.sh` refuses to start while another container named `pmap07-*` runs,
+so two decision runs never overlap. The rule of PMAP-07 (builds, sizes,
+samples, limits and the re-run policy) is in
+`.planning/phases/26-prolly-maps-in-commit-read-and-gc/runs/pmap07-rule.md`.
+It and `pmap07.py` were committed before any measurement and do not change.
 
 **Retired modes.** The modes `batches`, `flat`, `prolly`, `maps` and `layout`
 read the flat metadata maps of a product store. Since Phase 26 the maps are

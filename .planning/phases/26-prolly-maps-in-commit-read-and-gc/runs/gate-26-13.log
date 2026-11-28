@@ -1,0 +1,129 @@
+# Phase gate of plan 26-13, head 92ee5fc plus the research and summary docs (no code change)
+== cargo test --workspace
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+== RUST_STABLE=stable scripts/safety/clippy.sh
+    Checking cas-local v0.1.0 (<repo>/crates/cas-local)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Checking index-bench v0.1.0 (<repo>/benchmarks/index-bench)
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.68s
+CLIPPY os=Darwin toolchain=stable result=ok
+UNSAFE files=35 tokens=153 result=ok
+rc=0
+== scripts/docker-linux-test/run.sh all (default target volume)
+  unmount: ok
+  daemon-exit: ok
+  workers-line: Workers: 8 (default)
+  pool-line: pool: workers=8 jobs=20106 max_weight=131072 max_queue_wait_ms=0 queue_max=2 jobs_per_worker=2509,2501,2534,2420,2415,2389,2447,2891
+  allocator-line: Allocator: mmap threshold 131072 bytes (fixed)
+  steps-line: steps: save_steps=1 steps_per_s=0.30 freed_per_step=0 freed_bytes=0
+CAS bytes        : 2.96 MiB (3101320 bytes) (packs/, apparent size)
+CAS on disk      : 2.97 MiB (3112960 bytes) (packs/, allocated blocks)
+File dedup ratio : 1.00x (logical / unique content; whole-file duplicates)
+== seeded
+Logical bytes    : 2 B
+Unique content   : 2 B (each distinct file content once)
+CAS bytes        : 1.51 KiB (1551 bytes) (packs/, apparent size)
+CAS on disk      : 8.00 KiB (8192 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+1633	packs
+107	segments
+  workers-line: Workers: 8 (default)
+== after a.bin
+Logical bytes    : 2.86 MiB (3000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3039034 bytes) (packs/, apparent size)
+CAS on disk      : 2.91 MiB (3051520 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3039198	packs
+187	segments
+  workers-line: Workers: 8 (default)
+== after b.bin (same content)
+Logical bytes    : 5.72 MiB (6000002 bytes)
+Unique content   : 2.86 MiB (3000002 bytes) (each distinct file content once)
+CAS bytes        : 2.90 MiB (3040262 bytes) (packs/, apparent size)
+CAS on disk      : 2.92 MiB (3059712 bytes) (packs/, allocated blocks)
+88	FORMAT
+0	index
+3040508	packs
+187	segments
+  workers-line: Workers: 8 (default)
+content ok
+rc=0
+== PMAP-07 verdict (copied from runs/pmap07/verdict.txt)
+verdict=pass

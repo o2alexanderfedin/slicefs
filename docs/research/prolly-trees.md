@@ -20,7 +20,16 @@ table from the CSV files.
 
 ## Summary
 
-**Recommendation: later** (the same as before the fixes; see
+**Since Phase 26 the metadata maps are prolly trees** (#215). The product
+run of plan 26-13 gives `verdict pmap07=pass`: at 1,000,000 files a
+one-change commit takes 6.8 ms in place of 528.6 ms (1.6 in place of 515.1
+CPU ms, 18 in place of 14,181 nodes), and all nine Boost rows for K up to
+100 are better than flat. Two recorded rows are worse (K = 1,000 with
+scatter and with real inserts and deletes); they are accepted, see
+"Phase 26: the product run". The rest of this summary is the Phase 24
+evaluation, before adoption.
+
+**Phase 24 recommendation: later** (the same as before the fixes; see
 "Recommendation" for the one Linux row that is not better)
 
 - A prolly map for `inode_data` does much less work per small commit than
@@ -821,6 +830,169 @@ What would change the choice:
   smaller one than prolly maps.
 - If snapshot diff or sync between stores becomes a goal, the subtree skip
   of prolly roots adds a reason that this benchmark does not measure.
+
+## Phase 26: the product run
+
+Plan 26-13, 2026-11-28. This run measures the product code with prolly maps
+against the flat maps of release `v2.3.0`, by a rule that was committed
+before any measurement:
+`.planning/phases/26-prolly-maps-in-commit-read-and-gc/runs/pmap07-rule.md`,
+with the owner note `pmap07-owner-amendment.md` next to it. The run files
+and `verdict.txt` are in `runs/pmap07/` of that phase.
+
+- Builds: flat is tag `v2.3.0` (582a41d), prolly is the Phase 26 branch at
+  3a64054. Release builds of both.
+- Platform: Linux in Docker (OrbStack, x86_64, 32 CPUs), stores on a btrfs
+  volume (not tmpfs). One run at a time, in the order flat, prolly, flat,
+  prolly, then Boost flat and Boost prolly.
+- Commit runs: 1,000,000 files (1,010,001 inodes), 11 one-change commits
+  per run, two runs per build (22 samples). Boost runs: `1_84_0`, then
+  `1_85_0`, 3 runs, K = 1, 10, 100 and 1,000, 10 commits per pattern and K.
+
+### Check A: work before the sync, at 1,000,000 files
+
+| Median per commit | flat | prolly | prolly / flat | limit |
+|---|---:|---:|---:|---:|
+| thread CPU (ms) | 515.083 | 1.575 | 0.003 | 0.20 |
+| nodes read + written | 14,181 (0 + 14,181) | 18 (11 + 7) | 0.001 | 0.20 |
+
+The prolly time before the sync (information only) is 1.348 ms. Check A
+passes.
+
+### Check B: total wall time, sync included
+
+| Median per commit | flat | prolly | prolly / flat | limit |
+|---|---:|---:|---:|---:|
+| wall (ms) | 528.631 | 6.786 | 0.013 | below 1 |
+
+Check B passes. The flat commit is CPU-bound: it serializes and hashes every
+map. Most of the prolly commit is the sync.
+
+### Check C: Boost rows (recorded, does not block)
+
+Median rows of `whole`, 84,104 inodes. CPU is user plus system time; bytes
+are new stored bytes.
+
+| Pattern | K | CPU prolly / flat | wall prolly / flat | bytes prolly / flat | better | bytes ok |
+|---|---:|---:|---:|---:|:---:|:---:|
+| scatter | 1 | 0.063 | 0.185 | 0.569 | yes | yes |
+| scatter | 10 | 0.122 | 0.277 | 0.424 | yes | yes |
+| scatter | 100 | 0.458 | 0.578 | 0.307 | yes | yes |
+| cluster | 1 | 0.075 | 0.180 | 0.345 | yes | yes |
+| cluster | 10 | 0.113 | 0.205 | 0.443 | yes | yes |
+| cluster | 100 | 0.142 | 0.219 | 0.454 | yes | yes |
+| insdel | 1 | 0.052 | 0.124 | 0.326 | yes | yes |
+| insdel | 10 | 0.207 | 0.260 | 0.466 | yes | yes |
+| insdel | 100 | 0.731 | 0.716 | 0.361 | yes | yes |
+
+All nine rows are better and their bytes are ok, so check C passes too. In
+Phase 24 on Linux, insdel K = 100 was a little slower with prolly; in the
+product run it is better (0.716 of the flat wall time).
+
+### Verdict
+
+The last line of `verdict.txt`, as `pmap07.py` printed it:
+
+```
+verdict pmap07=pass
+```
+
+PMAP-07 decided by checks A and B (owner amendment); check C recorded.
+
+### Insert and delete rows, and the rows where prolly is worse
+
+The `insdel` commits insert and delete K keys in the middle of
+`inode_data`, so node boundaries move. Median rows:
+
+| K | CPU ms flat | CPU ms prolly | ratio | wall ms flat | wall ms prolly | ratio | stored bytes flat | stored bytes prolly | ratio |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 31.2 | 1.6 | 0.052 | 35.0 | 4.3 | 0.124 | 24,080 | 7,856 | 0.326 |
+| 10 | 34.3 | 7.1 | 0.207 | 39.5 | 10.3 | 0.260 | 248,269 | 115,796 | 0.466 |
+| 100 | 53.9 | 39.4 | 0.731 | 61.1 | 43.8 | 0.716 | 1,571,495 | 566,578 | 0.361 |
+| 1,000 | 113.2 | 153.5 | 1.356 | 116.1 | 161.6 | 1.392 | 5,054,888 | 2,777,059 | 0.549 |
+
+The other recorded rows: scatter K = 1,000 has CPU 1.025, wall 1.074 and
+bytes 0.377 (73.1 against 71.3 CPU ms, 83.2 against 77.4 ms); cluster
+K = 1,000 has 0.219, 0.385 and 0.311; the version step has 0.481, 0.557 and
+0.182; the setup commit has 0.103, 0.203 and 0.481.
+
+Prolly is worse in two rows: insdel K = 1,000 and scatter K = 1,000. Both
+are accepted, as the owner note allows ("an accepted cost of the scalable
+layout"):
+
+- The numbers: insdel K = 1,000 costs 40.3 CPU ms and 45.6 ms of wall time
+  more per commit than flat (1.36 x and 1.39 x). Scatter K = 1,000 costs
+  1.8 CPU ms and 5.8 ms more (1.03 x and 1.07 x). In both rows prolly
+  stores fewer new bytes (0.55 x and 0.38 x).
+- What the insdel row is: 1,000 changes in one commit, at random places in
+  the tree, and each change inserts or deletes a key in the middle of
+  `inode_data`. The product never uses a freed inode number again, so in
+  the product new files go to the right edge of `inode_data` (and of
+  `manifest_data` and `xattr_data`). Keys in the middle are normal in
+  `dir_data` (a new name in an existing directory) and in `refcounts`
+  (content keys). The insdel row stands for those maps.
+- How often it happens: a commit runs on a timer (by default every 30 s,
+  `--commit-interval`). So a K = 1,000 commit means about 1,000 files
+  changed at random places in one interval. That is a bulk operation, for
+  example an unpack, a copy or a remove of a tree. Such an operation also
+  writes or removes the file data. The extra commit time is 45.6 ms per
+  commit, about 0.05 ms per changed file.
+- Scatter K = 1,000 is near parity (1.03 x CPU, 1.07 x wall, 0.38 x
+  bytes). In `scatter` most creates and deletes cancel inside the commit,
+  so this row is about 500 value changes at random places.
+- Cost against gain: in the flat rows, insdel K = 1 costs 31.2 CPU ms and
+  K = 1,000 costs 113.2 CPU ms, with the same 10.4 MB serialized per
+  commit. So about 31 ms of the flat cost grows with the inode count and
+  about 82 ms grows with K. At 1,000,000 files the flat one-change commit
+  costs 515.1 CPU ms, so that part is about 16 times larger there. The
+  prolly cost grows with K and the tree height, not with the inode count.
+  So at a larger store the break-even K should move up (an inference, not
+  measured here). The gain is on every small commit: at 1,000,000 files
+  one change takes 6.8 ms in place of 528.6 ms.
+
+Possible mitigations, as follow-ups only (a code change after the decision
+runs would void the pre-registration, and the owner asked for no early
+optimization):
+
+- Measure where the time of an insdel K = 1,000 commit goes (boundary
+  cuts, hashing, node encoding or the sync) before choosing a change.
+- Apply the changes of one tree in key order in one pass, so that changes
+  in the same leaf share one path read and one re-cut.
+- Run the insdel rows at 1,000,000 files to find the real break-even K at
+  that size.
+
+### Cross-checks
+
+- Early flat baseline of plan 26-01 (`runs/pmap07-early-flat.log`, the same
+  test at 1,000,000 files): 533.2 ms wall, 510.0 CPU ms, 14,181 nodes. This
+  run: 532.1 and 524.1 ms wall, 523.0 and 507.0 CPU ms (round 1 and 2), and
+  14,181 nodes in every sample.
+- Spread of the 22 samples: flat 486.5 to 654.4 ms wall, prolly 3.7 to
+  9.2 ms wall and 1.3 to 2.9 CPU ms.
+- The seed through the product API takes longer with prolly: 197.4 s and
+  178.2 s, against 88.7 s and 93.0 s for flat. The first commit takes 1,566
+  and 1,358 ms with prolly, against 1,957 and 2,494 ms for flat.
+- Boost store size (apparent bytes, median, before GC): flat 296.9 MB at
+  the start and 537.6 MB at the end (+240.6 MB); prolly 263.9 MB and
+  413.2 MB (+149.3 MB).
+- Load: each run started only after three quiet samples of the Docker VM
+  (load below 3, disk writes below 30 MB/s). Jobs of other projects ran
+  on the host during the runs (host load 10 to 22 of 32 CPUs). The load
+  samples are in `runs/pmap07/run-order.log`.
+
+Reproduce (the full settings are in the rule file):
+
+```sh
+scripts/prolly-bench/pmap07.sh prepare-v230 V230_DIR
+scripts/prolly-bench/pmap07.sh commit V230_DIR flat 1000000 11 commit-flat-1.log
+scripts/prolly-bench/pmap07.sh commit . prolly 1000000 11 commit-prolly-1.log
+scripts/macos-mount-test/fetch-boost.sh DATA 1_84_0 1_85_0
+scripts/prolly-bench/pmap07.sh boost V230_DIR flat DATA boost-flat
+scripts/prolly-bench/pmap07.sh boost . prolly DATA boost-prolly
+python3 scripts/prolly-bench/pmap07.py --flat-commit commit-flat-*.log \
+  --prolly-commit commit-prolly-*.log --flat-boost boost-flat/results.csv \
+  --prolly-boost boost-prolly/results.csv
+```
 
 ## Reproduce
 

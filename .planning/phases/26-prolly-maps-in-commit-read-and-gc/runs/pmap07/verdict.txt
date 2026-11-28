@@ -1,0 +1,24 @@
+check A cpu_ratio=0.003 nodes_ratio=0.001 pass=1
+check B wall_ratio=0.013 pass=1
+row pattern=scatter k=1 cpu_ratio=0.063 wall_ratio=0.185 bytes_ratio=0.569 better=1 bytes_ok=1
+row pattern=scatter k=10 cpu_ratio=0.122 wall_ratio=0.277 bytes_ratio=0.424 better=1 bytes_ok=1
+row pattern=scatter k=100 cpu_ratio=0.458 wall_ratio=0.578 bytes_ratio=0.307 better=1 bytes_ok=1
+row pattern=cluster k=1 cpu_ratio=0.075 wall_ratio=0.180 bytes_ratio=0.345 better=1 bytes_ok=1
+row pattern=cluster k=10 cpu_ratio=0.113 wall_ratio=0.205 bytes_ratio=0.443 better=1 bytes_ok=1
+row pattern=cluster k=100 cpu_ratio=0.142 wall_ratio=0.219 bytes_ratio=0.454 better=1 bytes_ok=1
+row pattern=insdel k=1 cpu_ratio=0.052 wall_ratio=0.124 bytes_ratio=0.326 better=1 bytes_ok=1
+row pattern=insdel k=10 cpu_ratio=0.207 wall_ratio=0.260 bytes_ratio=0.466 better=1 bytes_ok=1
+row pattern=insdel k=100 cpu_ratio=0.731 wall_ratio=0.716 bytes_ratio=0.361 better=1 bytes_ok=1
+check C rows=9 pass=1
+info presync_ms_median_prolly=1.348
+info flat_cpu_ms_median=515.083 prolly_cpu_ms_median=1.575 flat_wall_ms_median=528.631 prolly_wall_ms_median=6.786
+info pattern=cluster k=1000 cpu_ratio=0.219 wall_ratio=0.385 bytes_ratio=0.311
+info insdel k=1 cpu_s_flat=0.0312 cpu_s_prolly=0.0016 wall_ms_flat=35.031 wall_ms_prolly=4.338
+info insdel k=10 cpu_s_flat=0.0343 cpu_s_prolly=0.0071 wall_ms_flat=39.483 wall_ms_prolly=10.267
+info insdel k=100 cpu_s_flat=0.0539 cpu_s_prolly=0.0394 wall_ms_flat=61.084 wall_ms_prolly=43.756
+info pattern=insdel k=1000 cpu_ratio=1.356 wall_ratio=1.392 bytes_ratio=0.549
+info insdel k=1000 cpu_s_flat=0.1132 cpu_s_prolly=0.1535 wall_ms_flat=116.095 wall_ms_prolly=161.647
+info pattern=scatter k=1000 cpu_ratio=1.025 wall_ratio=1.074 bytes_ratio=0.377
+info pattern=setup k=0 cpu_ratio=0.103 wall_ratio=0.203 bytes_ratio=0.481
+info pattern=version k=0 cpu_ratio=0.481 wall_ratio=0.557 bytes_ratio=0.182
+verdict pmap07=pass
