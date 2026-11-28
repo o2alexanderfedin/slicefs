@@ -1,0 +1,228 @@
+== cargo test -p metadata
+test test_round_trip_root_update ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/wal_tests.rs (target/debug/deps/wal_tests-d0db2ddb85a8bf6a)
+
+running 9 tests
+test test_no_wal_log_mutation ... ok
+test test_no_wal_flush_and_sync ... ok
+test test_no_wal_shutdown ... ok
+test test_per_op_wal_log_mutation_snapshot ... ok
+test test_flush_on_fsync_wal_buffers_entries ... ok
+test test_per_op_wal_log_mutation_root_update ... ok
+test test_flush_on_fsync_wal_flush_writes_entries ... ok
+test test_periodic_wal_shutdown_flushes_entries ... ok
+test test_per_op_wal_flush_and_sync ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/write_log_tests.rs (target/debug/deps/write_log_tests-626a1136af6553aa)
+
+running 9 tests
+test a_commit_cuts_the_log ... ok
+test an_op_after_an_unknown_last_record_is_not_read ... ok
+test a_torn_record_at_the_scan_ends_both_passes ... ok
+test a_record_cut_after_the_scan_is_an_error ... ok
+test records_added_after_the_scan_are_not_read ... ok
+test the_log_continues_into_later_segments ... ok
+test a_commit_makes_its_objects_durable_before_the_root ... ok
+test records_after_the_last_root_come_back_in_order ... ok
+test each_commit_rotates_the_log_to_one_segment_and_keeps_snapshots ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.87s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0
+== cargo test -p prolly-bench
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+   Compiling metadata v0.1.0 (<repo>/crates/metadata)
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+   Compiling prolly-bench v0.1.0 (<repo>/benchmarks/prolly-bench)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.22s
+     Running unittests src/main.rs (target/debug/deps/prolly_bench-c8a4df0a353695ba)
+
+running 5 tests
+test synth::tests::an_inserted_refcount_key_sorts_next_to_its_slot ... ok
+test layout::tests::a_combined_key_sorts_by_ino_then_kind_and_refcounts_last ... ok
+test synth::tests::the_streams_are_sorted_and_their_counts_match ... ok
+test synth::tests::the_permutation_is_a_bijection_with_an_inverse ... ok
+test layout::tests::every_layout_replay_matches_the_model ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/smoke.rs (target/debug/deps/smoke-cc1a30239575f3b4)
+
+running 3 tests
+test bad_arguments_exit_2 ... ok
+test smoke_end_to_end ... ok
+test synth_smoke ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.15s
+
+rc=0
+== lock_stats_report
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+   Compiling metadata v0.1.0 (<repo>/crates/metadata)
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.32s
+     Running tests/lock_stats_report.rs (target/debug/deps/lock_stats_report-269bba6ba3680ba2)
+
+running 1 test
+test lock_stats_report ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+rc=0
+== harness smoke PMAP07_N=2000
+sample tree=this n=2000 seq=0 wall_ms=43.306 cpu_ms=1.597 nodes_read=0 nodes_written=1 presync_ms=1.378
+sample tree=this n=2000 seq=1 wall_ms=45.945 cpu_ms=1.991 nodes_read=0 nodes_written=1 presync_ms=2.294
+sample tree=this n=2000 seq=2 wall_ms=51.928 cpu_ms=1.913 nodes_read=0 nodes_written=1 presync_ms=1.802
+sample tree=this n=2000 seq=3 wall_ms=50.707 cpu_ms=2.114 nodes_read=0 nodes_written=1 presync_ms=1.843
+sample tree=this n=2000 seq=4 wall_ms=65.162 cpu_ms=1.938 nodes_read=0 nodes_written=1 presync_ms=2.061
+sample tree=this n=2000 seq=5 wall_ms=47.505 cpu_ms=2.135 nodes_read=0 nodes_written=1 presync_ms=1.964
+sample tree=this n=2000 seq=6 wall_ms=45.773 cpu_ms=2.218 nodes_read=0 nodes_written=1 presync_ms=1.974
+sample tree=this n=2000 seq=7 wall_ms=43.465 cpu_ms=1.940 nodes_read=0 nodes_written=1 presync_ms=1.696
+sample tree=this n=2000 seq=8 wall_ms=68.900 cpu_ms=1.817 nodes_read=0 nodes_written=1 presync_ms=1.565
+sample tree=this n=2000 seq=9 wall_ms=45.301 cpu_ms=1.356 nodes_read=0 nodes_written=1 presync_ms=1.130
+sample tree=this n=2000 seq=10 wall_ms=61.652 cpu_ms=1.976 nodes_read=0 nodes_written=1 presync_ms=1.814
+summary tree=this n=2000 samples=11 wall_ms_median=47.505 cpu_ms_median=1.940
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.81s
+rc=0
+== clippy
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+    Checking zstd v0.13.3
+    Checking chunk-store v0.1.0 (<repo>/crates/chunk-store)
+    Checking prolly v0.1.0 (<repo>/crates/prolly)
+    Checking metadata v0.1.0 (<repo>/crates/metadata)
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 31.19s
+rc=0
+== unsafe-count
+UNSAFE files=33 tokens=135 result=ok
+rc=0
+== cargo test --workspace
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0

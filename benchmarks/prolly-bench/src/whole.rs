@@ -382,13 +382,16 @@ impl Whole {
         let u1 = rusage();
         let s1 = self.cs.stats();
         let rr = root_record(&self.cs, &root)?;
-        let ser = serialized_bytes(&self.cs, &rr)?;
+        let cstats = self.meta.last_commit_stats();
+        let ser = serialized_bytes(&self.cs, &rr)? + cstats.bytes_written;
         println!(
-            "commit mode=whole pattern={pattern} k={k} seq={seq} edits_meta={} edits_content={} edits_create={} edits_delete={} serialized_bytes={ser} begin_ms={begin_ms:.3} finish_ms={finish_ms:.3} total_ms={total_ms:.3} {} {}",
+            "commit mode=whole pattern={pattern} k={k} seq={seq} edits_meta={} edits_content={} edits_create={} edits_delete={} serialized_bytes={ser} nodes_read={} nodes_written={} begin_ms={begin_ms:.3} finish_ms={finish_ms:.3} total_ms={total_ms:.3} {} {}",
             kinds[0],
             kinds[1],
             kinds[2],
             kinds[3],
+            cstats.nodes_read,
+            cstats.nodes_written,
             usage_fields(&u0, &u1),
             stats_delta(&s0, &s1)
         );
