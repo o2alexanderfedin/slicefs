@@ -22,12 +22,15 @@
 # SLICEFS_WORKERS (for example 4) passes --workers to the mounts of the scripts.
 # SLICEFS_TARGET_VOL names the cargo target volume (default slicefs-target), so
 # two runs from different trees at the same time do not share build output.
+# SLICEFS_CARGO_VOL names the cargo registry volume (default slicefs-cargo).
+# Either one can be an absolute host path in place of a volume name; CI uses
+# that to keep the build output and the registry in its cache between runs.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 docker build -q -t slicefs-fusetest "$HERE" >/dev/null
 RUN=(docker run --rm --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined
-  -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry
-  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS
+  -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry
+  -v "$HERE":/dk:ro -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL -e BW_KEEP -e BW_QUIET_REF -e SLICEFS_WORKERS
   -e POOL_BENCH_QUICK -e POOL_BENCH_N -e POOL_BENCH_ROUNDS -e POOL_BENCH_EXTRA
   -e COVERAGE_FLOOR -e COVERAGE_REPORT_ONLY -e CARGO_BUILD_JOBS slicefs-fusetest unshare -m --propagation private)
 case "${1:-all}" in
@@ -51,8 +54,8 @@ case "${1:-all}" in
     # the STRESS_*, S3_*, S5_*, S6_* and S7_* variables pass through from the host.
     # The recorder is process-global, so run one test per call, nothing else beside it.
     shift
-    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -e CARGO_TARGET_DIR=/target -e HARNESS_FEATURES \
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL -e HARNESS_FEATURES \
       -e STRESS_SEED -e STRESS_THREADS -e STRESS_SECS -e STRESS_FILE_MIB -e STRESS_SERIALIZE -e STRESS_MODE \
       -e S3_THREADS -e S3_FILE_MIB -e S3_SERIALIZE -e S5_FILES -e S5_SECS -e S5_HOLD_MS \
       -e S6_FILES -e S7_FILE_MIB -e S7_WRITE_MIB -e S7_COMMIT_SECS -e S7_SERIALIZE -e S7_FLUSHER -e S7_THREADS -e S7_STORE_WAIT_MS \
@@ -64,8 +67,8 @@ case "${1:-all}" in
     # no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
     # The stores stay on the volume slicefs-index-bench and are used again.
     shift
-    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -v slicefs-index-bench:/bench -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -v slicefs-index-bench:/bench -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL slicefs-fusetest bash -c '
         grep MemAvailable /proc/meminfo && df -h /bench && cargo build -q --release --locked -p index-bench || exit 1
         for n in "$@"; do
           echo "# size $n, load before: $(cat /proc/loadavg)"
@@ -75,8 +78,8 @@ case "${1:-all}" in
   chunk-profiles-smoke)
     # The smoke mode of the chunk profile benchmark (#67, PROF-03). It mounts
     # nothing: no FUSE device, no SYS_ADMIN and no unshare, so it does not use RUN.
-    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL slicefs-fusetest bash -c '
         rustc -V
         timeout 1200 cargo build -q --release --locked -j 1 -p chunk-store --example chunk_profile_bench || exit 1
         echo "# load before: $(cat /proc/loadavg)"
@@ -89,8 +92,8 @@ case "${1:-all}" in
     # The prolly tests (the golden root on Linux) and the smoke of the prolly
     # benchmark (#19, PROLLY-02). It mounts nothing: no FUSE device, no SYS_ADMIN
     # and no unshare, so it does not use RUN.
-    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL slicefs-fusetest bash -c '
         set -o pipefail
         rustc -V || exit 1
         timeout 2400 cargo test -q --release --locked -j 2 -p prolly || exit 1
@@ -116,9 +119,9 @@ case "${1:-all}" in
       [ -d "$DATA" ] || { echo "prolly-layout: DATA is not a directory: $DATA" >&2; exit 2; }
       DATA_MOUNT=(-v "$(cd "$DATA" && pwd)":/data:ro)
     fi
-    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -v slicefs-prolly-work:/work -v "$OUT":/out ${DATA_MOUNT[@]+"${DATA_MOUNT[@]}"} -e CARGO_TARGET_DIR=/target \
-      -e LAYOUT_SMOKE -e CONFIGS -e LAYOUTS -e SYNTH_NS -e SYNTH_KS -e COMMITS -e SEED -e ROW_TIMEOUT -e RESUME \
+    docker run --rm -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -v slicefs-prolly-work:/work -v "$OUT":/out ${DATA_MOUNT[@]+"${DATA_MOUNT[@]}"} -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL \
+      -e LAYOUT_SMOKE -e CONFIGS -e LAYOUTS -e SYNTH_NS -e KS -e SYNTH_KS -e COMMITS -e SEED -e ROW_TIMEOUT -e RESUME \
       slicefs-fusetest bash -c '
         set -o pipefail
         rustc -V || exit 1
@@ -144,8 +147,8 @@ case "${1:-all}" in
     # a small sample (K = N/1000), one phase per process, 3 seeds.
     # Each step has a time limit of 30 min.
     shift
-    docker run --rm --privileged -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v slicefs-cargo:/usr/local/cargo/registry \
-      -v slicefs-index-bench:/bench -e CARGO_TARGET_DIR=/target slicefs-fusetest bash -c '
+    docker run --rm --privileged -v "$REPO":/src:ro -v "${SLICEFS_TARGET_VOL:-slicefs-target}":/target -v "${SLICEFS_CARGO_VOL:-slicefs-cargo}":/usr/local/cargo/registry \
+      -v slicefs-index-bench:/bench -e CARGO_TARGET_DIR=/target -e CARGO_INCREMENTAL slicefs-fusetest bash -c '
         grep MemAvailable /proc/meminfo && df -h /bench && uname -r && cargo build -q --release --locked -p index-bench || exit 1
         B="timeout 1800 /target/release/index-bench"
         for n in "$@"; do
