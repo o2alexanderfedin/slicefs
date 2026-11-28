@@ -31,7 +31,7 @@ metrics:
 actuals:
   tokens: 16000
   tasks: 2
-  commits: 3
+  commits: 2
 plan_head_before: 53eff1f808a3aa925b4426b25c376a3ce147179a
 plan_head_after: 7b9b3249c39f507ff0a4842c3aac67600d358088
 ---
@@ -81,7 +81,7 @@ Each mutation was applied by hand, the tests were run, and the code was put back
 
 ## Decisions
 
-- 32 random cases with the fixed seed `0x261208085eed` in the default run, and `PMAP08_SEED` / `PMAP08_CASES` for a longer run by hand (the plan's discretion choice). The release run with 200 cases takes about 1 s, and the debug file takes about 7 s.
+- 32 random cases with the fixed seed `0x261208085eed` in the default run (they reach every fault point: AfterApply 9, BeforeSync 5, AfterInstall 4, BeforePreRootSync 6, BeforeRoot 3, none 5), and `PMAP08_SEED` / `PMAP08_CASES` for a longer run by hand (the plan's discretion choice). The release run with 200 cases takes about 1 s, and the debug file takes about 7 s.
 - Inodes with no name are legal (the xattr test makes them), so the validator takes the inode set from the inode tree, not from the namespace walk. The model then pins the exact set.
 - The two old hook calls keep their manifest-only meaning, because unit tests call them.
 
@@ -130,7 +130,7 @@ Acceptance greps:
 - `7b9b324` chore(26-12): gate log
 - the summary commit
 
-`commits: 3` counts these three. `tokens` is chars/4 of the code diff.
+`commits: 2` counts the commits from `plan_head_before` to `plan_head_after` (the code and the gate log); the summary commits are not counted. `tokens` is chars/4 of the code diff.
 
 ## Notes for 26-13
 
