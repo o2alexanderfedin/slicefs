@@ -737,8 +737,25 @@ impl DictMetadataStore {
         ino: InodeId,
         f: &mut dyn FnMut(&str, InodeId, u8) -> ControlFlow<()>,
     ) -> Result<(), MetaError> {
+        self.for_each_dir_entry_after(ino, None, f)
+    }
+
+    /// `for_each_dir_entry` from the first name after `after` in name byte
+    /// order (`None`: from the start). `after` need not be an entry any
+    /// more: a resumed readdir goes on after the last name it gave.
+    pub fn for_each_dir_entry_after(
+        &self,
+        ino: InodeId,
+        after: Option<&str>,
+        f: &mut dyn FnMut(&str, InodeId, u8) -> ControlFlow<()>,
+    ) -> Result<(), MetaError> {
         self.check_dir(ino)?;
-        let (start, end) = dir_range(ino);
+        let (mut start, end) = dir_range(ino);
+        if let Some(name) = after {
+            // The smallest key after the name (a name has no 0 byte).
+            start = crate::pmap::TreeKey::encode(&entry_key(ino, name));
+            start.push(0);
+        }
         let mut bad = None;
         self.dirs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &start, end.as_deref(), &mut |k| {
             let got = crate::dirent::name_of(k).and_then(|name| {

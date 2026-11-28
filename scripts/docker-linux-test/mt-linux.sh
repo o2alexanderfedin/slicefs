@@ -33,6 +33,10 @@ step xattr-remove 10 bash -c "setfattr -x user.big $R/mnt/e.txt && ! getfattr -n
 step readdir-many 180 bash -c "mkdir $R/mnt/big && for i in \$(seq 1 3000); do : > $R/mnt/big/f\$i || exit 1; done; [ \$(ls -f $R/mnt/big | wc -l) = 3002 ] && [ \$(ls $R/mnt/big | sort -u | wc -l) = 3000 ]"
 step rmdir-notempty 10 bash -c "! rmdir $R/mnt/big 2>/dev/null"
 step rmdir 120 bash -c "rm -f $R/mnt/big/f* && rmdir $R/mnt/big && [ ! -e $R/mnt/big ]"
+# Unlink each name while the directory is read (one open handle, no
+# rewind): the readdir cursor resumes after the last name, so no name is
+# left behind when the names before it are gone.
+step readdir-unlink 180 bash -c "mkdir $R/mnt/del && for i in \$(seq 1 1000); do : > $R/mnt/del/f\$i || exit 1; done; perl -e 'opendir(D, \$ARGV[0]) or die; while (defined(my \$e = readdir D)) { next if \$e eq q(.) || \$e eq q(..); unlink(\$ARGV[0] . q(/) . \$e) or die } closedir D' $R/mnt/del && [ \$(ls -A $R/mnt/del | wc -l) = 0 ] && rmdir $R/mnt/del"
 step rm 10 rm $R/mnt/d/r1.bin
 step unmount 15 $B unmount $R/mnt
 for i in $(seq 20); do kill -0 $MP 2>/dev/null || break; sleep .5; done

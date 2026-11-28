@@ -275,7 +275,7 @@ impl Filesystem for MountedFs {
             // scan stops at the first entry that does not fit (no list of
             // the directory is built).
             let r = serve(&fs, || {
-                fs.readdir_entries(ino, offset, &mut |entry_ino, kind, name, next_offset| {
+                fs.readdir_handle(ino, fh, offset, &mut |entry_ino, kind, name, next_offset| {
                     if reply.add(INodeNo(entry_ino), next_offset, kind, name) {
                         return std::ops::ControlFlow::Break(());
                     }
@@ -402,7 +402,7 @@ impl Filesystem for MountedFs {
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
             fuse_trace!("[{}][FUSE] releasedir: ENTRY ino={}, fh={}, flags={:#x}", ts(), ino, fh, flags);
-            serve(&fs, || ());
+            serve(&fs, || fs.release_dir_handle(fh));
             fuse_trace!("[{}][FUSE] releasedir: EXIT ino={} -> ok", ts(), ino);
             reply.ok();
         });
