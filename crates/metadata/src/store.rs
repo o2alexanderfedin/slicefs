@@ -520,7 +520,8 @@ impl DictMetadataStore {
     ///
     /// A scrub-time scan: one cursor over the whole refcount tree plus the
     /// pending edits (`MapTree::for_each_value`), O(map) time and bounded
-    /// memory. Exact when no request changes the store meanwhile.
+    /// memory. Exact when no refcount changes meanwhile (a flush or a
+    /// commit during the scan does not change the result).
     pub fn saturated_refcount_count(&self) -> Result<usize, MetaError> {
         let mut n = 0;
         self.refcounts.for_each_value(&self.trees, |c| n += usize::from(c == u64::MAX))?;
