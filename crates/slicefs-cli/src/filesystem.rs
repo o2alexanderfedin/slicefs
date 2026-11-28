@@ -61,8 +61,6 @@ pub const REORDER_WINDOW: usize = 64 << 20;
 /// `&mut |_| {}`.
 pub(crate) type LogOp<'a> = &'a mut dyn FnMut(crate::oplog::Op);
 
-/// The `create_inode` of a create: at the logged inode number in replay
-/// (`Some`), else the next free one.
 /// The file type of a directory entry type byte (the Linux `DT_*`
 /// number); `None` for 0 or an unknown byte.
 fn dt_file_type(kind: u8) -> Option<FileType> {
@@ -78,6 +76,8 @@ fn dt_file_type(kind: u8) -> Option<FileType> {
     })
 }
 
+/// The `create_inode` of a create: at the logged inode number in replay
+/// (`Some`), else the next free one.
 fn new_inode(meta: &DictMetadataStore, at: Option<u64>, m: &InodeMeta) -> Result<u64, MetaError> {
     match at {
         Some(ino) => meta.create_inode_at(ino, m),
@@ -2211,11 +2211,20 @@ pub enum XattrReply {
 }
 
 /// The errno of a getxattr store error: an absent name is ENODATA (the
-/// callback sends ENOATTR on macOS), a name above 255 bytes ERANGE (the
-/// Linux errno); the rest as `meta_error_to_errno`.
+/// callback sends ENOATTR on macOS); the rest as `xattr_errno`.
 fn getxattr_errno(e: &MetaError) -> i32 {
     match e {
         MetaError::NotFound(_) => libc::ENODATA,
+        e => xattr_errno(e),
+    }
+}
+
+/// The errno of an xattr store error of getxattr, setxattr or removexattr:
+/// a name above 255 bytes is ERANGE on all three (the Linux errno; the
+/// kernel checks the length before FUSE, so this is the rare case); the
+/// rest as `meta_error_to_errno`.
+fn xattr_errno(e: &MetaError) -> i32 {
+    match e {
         MetaError::NameTooLong(_) => libc::ERANGE,
         e => meta_error_to_errno(e),
     }
@@ -5172,6 +5181,10 @@ impl SliceFsFilesystem {
 
     /// List directory entries starting at `offset`.
     /// Returns `Vec<(ino, kind, name)>` tuples.
+    ///
+    /// For tests only (a whole listing in RAM): the FUSE callback streams
+    /// through `readdir_handle`.
+    #[doc(hidden)]
     pub fn test_readdir(&self, ino: u64, offset: u64) -> Result<Vec<(u64, FileType, String)>, i32> {
         let mut result = Vec::new();
         self.readdir_entries(ino, offset, &mut |child, kind, name, _| {
@@ -5420,7 +5433,7 @@ impl SliceFsFilesystem {
     pub(crate) fn setxattr_logged(&self, ino: u64, name: &str, value: &[u8], log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.set_xattr(ino, name, value).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.set_xattr(ino, name, value).map_err(|e| xattr_errno(&e))?;
             log(crate::oplog::Op::Setxattr { ino, name: name.to_string(), value: value.to_vec() });
             Ok(())
         })
@@ -5435,7 +5448,7 @@ impl SliceFsFilesystem {
     pub(crate) fn removexattr_logged(&self, ino: u64, name: &str, log: LogOp<'_>) -> Result<(), i32> {
         self.with_inode_locked(ino, |_| {
             self.meta.get_inode(ino).map_err(|e| meta_error_to_errno(&e))?;
-            self.meta.remove_xattr(ino, name).map_err(|e| meta_error_to_errno(&e))?;
+            self.meta.remove_xattr(ino, name).map_err(|e| xattr_errno(&e))?;
             log(crate::oplog::Op::Removexattr { ino, name: name.to_string() });
             Ok(())
         })

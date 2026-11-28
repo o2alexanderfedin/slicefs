@@ -25,10 +25,10 @@ use slicefs_traits::metadata::{InodeMeta, MetaError};
 ///   [60..68] atime_sec  i64  (8 bytes)
 ///   [68..72] atime_nsec u32  (4 bytes)
 ///
-/// Inodes without rdev/atime keep the original 56-byte encoding (and their
-/// CAS digests), so stores written before the extension load unchanged.
+/// Inodes without rdev/atime use the 56-byte form (a smaller inline value
+/// in the inode tree).
 pub fn serialize_inode(meta: &InodeMeta) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(60);
+    let mut buf = Vec::with_capacity(72);
     buf.extend_from_slice(&meta.ino.to_le_bytes());
     buf.extend_from_slice(&meta.mode.to_le_bytes());
     buf.extend_from_slice(&meta.uid.to_le_bytes());
