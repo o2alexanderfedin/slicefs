@@ -5,9 +5,9 @@
 //! chunks under a manifest tree (`chunk_store::file`). The engine has two
 //! primitives:
 //!
-//! - **Byte copy of a value.** File content, the inode and directory nodes
-//!   and the spilled xattr values hold no content address, so their bytes
-//!   stay the same.
+//! - **Byte copy of a value.** File content, the directory nodes and the
+//!   spilled xattr values hold no content address, so their bytes stay the
+//!   same.
 //!   They are streamed from a [`FileReader`] (every object read is
 //!   verified, a read window of [`WINDOW`] bytes) into a [`FileWriter`] of
 //!   the store that is open with the target hasher and the store profile.
@@ -16,23 +16,24 @@
 //!   (`is_cut`), so only the real writer gives the fresh-write key. A
 //!   directory entry holds the BLAKE3-256 of its name, not a content
 //!   address; it is inside the copied bytes and does not change.
-//! - **Translation of a key-carrying node.** The manifest lists, the two
-//!   flat `u64 -> key` maps and the root record are read in windows of
+//! - **Translation of a key-carrying node.** The manifest lists, the flat
+//!   `u64 -> key` directory map and the root record are read in windows of
 //!   whole records; each key is replaced by its new key, and the node is
 //!   written again through a `FileWriter`. These nodes are always
 //!   translated, also when their own key has the target tag: they can list
 //!   keys of another tag.
-//! - **Rebuild of a map tree** (the `manifest_data`, `refcounts` and
-//!   `xattr_data` prolly trees). A tree
+//! - **Rebuild of a map tree** (the `manifest_data`, `refcounts`,
+//!   `xattr_data` and `inode_data` prolly trees). A tree
 //!   node holds the IDs of its children, so every node ID changes with the
 //!   hash. The old tree is read in key order with a cursor (one path of
 //!   nodes, no cache; every object read is verified with the hasher of its
 //!   tag), each value is translated (a manifest key through the manifest
 //!   list translation; a spilled xattr value through the byte copy, an
-//!   inline one copied), and the entries go into a `prolly::Builder` of the
+//!   inline one copied; an inode record copied, it holds no key), and the
+//!   entries go into a `prolly::Builder` of the
 //!   target store with the store's boundary salt (`RehashOptions::tree_salt`).
-//!   The manifest keys (inode numbers) and the xattr keys (inode number and
-//!   name) do not change, so their order does not either. The refcount keys are content keys and do change: the rows
+//!   The manifest and inode keys (inode numbers) and the xattr keys (inode
+//!   number and name) do not change, so their order does not either. The refcount keys are content keys and do change: the rows
 //!   are sorted by their new keys with the external sorter of the chunk
 //!   store, and rows that get one new key are merged (saturating sum).
 //!   A tree is always rebuilt, also when every node already has the target
@@ -169,7 +170,7 @@ const REF_ROW: usize = KEY_BYTES + 16;
 enum Blob {
     /// A manifest list: content keys.
     ManifestList,
-    /// A `u64 -> key` map of inode or directory nodes.
+    /// A `u64 -> key` map of directory nodes.
     ValueMap(&'static str),
 }
 
@@ -409,8 +410,64 @@ impl Walker<'_, '_> {
         self.mapped(kind, old, new)
     }
 
-    /// The new key of the value `old` (file content, an inode or directory
-    /// node, or a spilled xattr value): its bytes streamed into a new writer.
+    /// The new root of the inode tree `old`: read in key order with a
+    /// cursor, each entry checked (an 8-byte ino and a 56- or 72-byte inline
+    /// record) and copied as it is (it holds no key), and pushed into a
+    /// `prolly::Builder` of the target store; only the node IDs change. In a
+    /// dry run the old root, with the tree nodes of another tag counted.
+    fn inode_tree(&mut self, old: ObjectKey) -> Result<ObjectKey, RehashError> {
+        let kind = Kind::InodeTree;
+        if let Some(new) = self.hit(kind, &old)? {
+            return Ok(new);
+        }
+        let cs = self.cs;
+        let what = "inode tree";
+        let err = |e: prolly::Error| match e {
+            prolly::Error::Store(source) => RehashError::Read { what, key: old, source },
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let werr = |e: prolly::Error| match e {
+            prolly::Error::Store(e) => RehashError::Write(e),
+            e => RehashError::Corrupt(format!("{what} {}: {e}", old.to_hex())),
+        };
+        let ctx = prolly::Ctx::uncached(cs);
+        let cfg = prolly::Config::DEFAULT.with_salt(self.tree_salt);
+        let mut b = (!self.dry()).then(|| prolly::Builder::new(cs, cfg));
+        for e in prolly::iter_in(&ctx, &to_id(&old)).map_err(err)? {
+            let (k, v) = e.map_err(err)?;
+            if k.len() != 8 || (v.len() != 56 && v.len() != 72) {
+                return Err(RehashError::Corrupt(format!(
+                    "{what} {}: entry of a {}-byte key and a {}-byte value", old.to_hex(), k.len(), v.len()
+                )));
+            }
+            if let Some(b) = b.as_mut() {
+                b.push(&k, &v).map_err(werr)?;
+            }
+        }
+        self.stats.values_read += 1;
+        let new = match b {
+            Some(b) => {
+                let (root, _) = b.finish().map_err(werr)?;
+                self.stats.values_rewritten += 1;
+                to_key(root)
+            }
+            None => {
+                let tag = self.target.tag();
+                let mut other = 0u64;
+                prolly::visit(&ctx, &to_id(&old), &mut |n| {
+                    other += u64::from(n.id.tag() != tag);
+                    true
+                })
+                .map_err(err)?;
+                self.stats.other_tag_objects += other;
+                old
+            }
+        };
+        self.mapped(kind, old, new)
+    }
+
+    /// The new key of the value `old` (file content, a directory node, or
+    /// a spilled xattr value): its bytes streamed into a new writer.
     fn value(&mut self, what: &'static str, old: ObjectKey) -> Result<ObjectKey, RehashError> {
         if let Some(new) = self.hit(Kind::Value, &old)? {
             return Ok(new);
@@ -638,11 +695,12 @@ impl Walker<'_, '_> {
             ManifestTree,
             RefcountTree,
             XattrTree,
+            InodeTree,
         }
         // The manifests before the refcounts: a refcount row that no
         // manifest uses is stale.
         let fields = [
-            (root_rec::INODE_DATA, Field::Map(Blob::ValueMap("inode node"))),
+            (root_rec::INODE_DATA, Field::InodeTree),
             (root_rec::DIR_DATA, Field::Map(Blob::ValueMap("directory node"))),
             (root_rec::XATTR_DATA, Field::XattrTree),
             (root_rec::MANIFEST_DATA, Field::ManifestTree),
@@ -655,6 +713,7 @@ impl Walker<'_, '_> {
                 Field::ManifestTree => self.manifest_tree(key)?,
                 Field::RefcountTree => self.refcount_tree(key)?,
                 Field::XattrTree => self.xattr_tree(key)?,
+                Field::InodeTree => self.inode_tree(key)?,
             };
             rec[o..o + KEY_BYTES].copy_from_slice(&new.0);
         }

@@ -5,8 +5,9 @@
 //! for crash-safe ordering.
 //!
 //! Locking order (always acquire in this order to prevent deadlocks):
-//!   `inode_alloc`, then one `inode_live` shard, then `inode_data`;
-//!   one `dir_live` shard, then `dir_data`. The other maps are taken alone.
+//!   `inode_alloc`, then one `inodes` overlay shard, then the `inodes`
+//!   tree root lock; one `dir_live` shard, then `dir_data`. The other maps
+//!   are taken alone.
 //!   No hot-path call holds the `io` lock; a commit takes it briefly.
 //!   The `prolly::NodeCache` lock (`Rank::Store`) is a leaf: no other lock, read,
 //!   decode or callback runs under it, so it may be taken under any lock above.
@@ -18,12 +19,18 @@
 //!   A refcount change (read-modify-write) holds one `refcounts` overlay
 //!   shard only for its check and edit (`MapTree::modify`); its tree read
 //!   runs with no lock held.
+//!   An inode change (`modify_inode`, `delete_inode`) is a
+//!   read-modify-write of the `inodes` tree: one overlay shard only for its
+//!   check and edit, the tree read with no lock held. `create_inode_at`
+//!   probes the tree with no lock held, then takes `inode_alloc` and one
+//!   overlay shard (the check and the edit).
 //!   An xattr call holds one `xattrs` overlay shard (the shard of its
 //!   inode) only to read or write one edit, or to copy the pending keys of
 //!   the inode for a scan (`MapTree::scan_keys`); the tree reads, the spill
 //!   of a large value and its ranged reads run with no lock held.
-//!   The test flush hook of a tree (`pmap`, `Rank::Store`) is a leaf: it is
-//!   cloned out and called with no tree lock held.
+//!   The test flush hook and the unit-test read hook of a tree (`pmap`,
+//!   `Rank::Store`) are leaves: each is cloned or taken out and called with
+//!   no tree lock held.
 //!   The commit stats lock (`last_stats`, `Rank::Store`, untimed) is a leaf: it
 //!   is set once at the end of a successful commit and cloned by
 //!   `last_commit_stats`; no other store-rank lock and no I/O runs under it.
@@ -44,7 +51,6 @@ use crate::store_io::StoreIo;
 use crate::pmap::{MapTree, Taken, TreeIo};
 use crate::wal::{Lsn, WalCut, WalEntry, WalError, WalStrategy};
 
-use crate::inode::{intern_inode, load_inode};
 use crate::inode_alloc::InodeAlloc;
 use crate::directory::{create_dir_entries, DirList};
 use crate::manifest::{intern_manifest, load_manifest};
@@ -54,7 +60,8 @@ use crate::xattr::{fits_inline, xattr_range, XattrKey, XattrValue};
 const S_IFMT: u32 = 0o0_170_000;
 
 /// Byte layout of the root record that `commit` writes: fixed-width fields,
-/// little-endian. Each `*_DATA` field is the key of a serialized map.
+/// little-endian. Each `*_DATA` field (and `REFCOUNTS`) is the key of a map:
+/// the root of a prolly tree, or (`DIR_DATA`) a serialized flat map.
 pub(crate) mod root_rec {
     use super::KEY_BYTES as D;
     pub const ROOT_DIR_INO: usize = 0;
@@ -80,13 +87,9 @@ const NAME_MAX: usize = 255;
 /// and the clean ones dropped.
 #[cfg(not(test))]
 const DIR_CACHE_MAX: usize = 16_384;
-#[cfg(not(test))]
-const INODE_CACHE_MAX: usize = 262_144;
 // Small in unit tests, so the flush-and-evict path runs.
 #[cfg(test)]
 const DIR_CACHE_MAX: usize = 4;
-#[cfg(test)]
-const INODE_CACHE_MAX: usize = 16;
 /// Dirty cache entries are written once this many have built up, so the
 /// final commit (at unmount) stays small.
 #[cfg(not(test))]
@@ -178,8 +181,8 @@ impl<T: Clone> Live<T> {
     }
 }
 
-/// Shards of the inode and the directory cache: threads that work on
-/// inodes of different shards take different locks.
+/// Shards of the directory cache: threads that work on directories of
+/// different shards take different locks.
 const SHARDS: usize = 32;
 
 /// A cache split by inode number into `SHARDS` locks (`Rank::Store`). A
@@ -346,8 +349,8 @@ pub struct PreparedCommit<'a> {
     /// One commit at a time, from the cut to the root: roots stay in order.
     _serial: sync::MutexGuard<'a, ()>,
     store: &'a DictMetadataStore,
-    /// The root is logged. Else (an error, or dropped unfinished) the inodes
-    /// and directories it took are dirty again.
+    /// The root is logged. Else (an error, or dropped unfinished) the
+    /// directories it took are dirty again.
     done: bool,
     /// The map trees have their new roots (`finish_inner`). Else (an error
     /// before that, or dropped) their overlays are requeued and the
@@ -357,10 +360,8 @@ pub struct PreparedCommit<'a> {
     /// `wal_fail_seq` at the cut: failures up to it end with this root.
     fail_seq: u64,
     /// With the ticket of each take (see `Live::flushing`).
-    inodes: Vec<(u64, u64, InodeMeta)>,
     dirs: Vec<(u64, u64, DirList)>,
     next_ino: u64,
-    inode_data: BTreeMap<u64, ObjectKey>,
     dir_data: BTreeMap<u64, ObjectKey>,
     /// The manifest tree at the cut and the edits taken from its overlay.
     manifest_root: chunk_store::ObjectId,
@@ -371,6 +372,9 @@ pub struct PreparedCommit<'a> {
     /// The xattr tree at the cut and the edits taken from its overlay.
     xattr_root: chunk_store::ObjectId,
     xattrs: Taken<XattrKey, XattrValue>,
+    /// The inode tree at the cut and the edits taken from its overlay.
+    inode_root: chunk_store::ObjectId,
+    inodes: Taken<u64, InodeMeta>,
     logical_bytes: u64,
     inode_count: u64,
     snapshots: Vec<SnapshotEntry>,
@@ -425,8 +429,13 @@ pub struct DictMetadataStore {
     put_error: sync::Mutex<Option<std::io::Error>>,
     /// Inode-number allocator.
     inode_alloc: sync::Mutex<InodeAlloc>,
-    /// Maps inode number → current inode data `ObjectKey`.
-    inode_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
+    /// The inodes: a prolly tree (key: the ino, 8 bytes big endian; value:
+    /// the inline record of `inode::serialize_inode`, 56 or 72 bytes, no
+    /// tag) and an overlay of the changes not in the tree yet (see `pmap`).
+    /// Clean inodes are read through the node cache. The overlay shards are
+    /// timed as `Site::InodeLive`, the root lock as `Site::InodeData`.
+    /// Lock order: `inode_alloc`, an overlay shard, the root lock.
+    inodes: MapTree<u64, InodeMeta>,
     /// Maps directory inode number → entry list `ObjectKey` as of the last flush.
     /// A directory in `dir_live` can be newer than its digest here.
     dir_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
@@ -436,12 +445,6 @@ pub struct DictMetadataStore {
     /// Sharded by inode number. Lock order: a `dir_live` shard, `dir_data`.
     /// No shard lock is held across a node read, a hash or a put.
     dir_live: Sharded<DirList>,
-    /// Inodes in use, with a dirty flag. `inode_data` holds the
-    /// digest as of the last flush; a dirty inode here is newer. `commit()`
-    /// writes the dirty ones. Sharded by inode number. Lock order:
-    /// `inode_alloc`, an `inode_live` shard, `inode_data`. No shard lock is held
-    /// across a node read, a hash or a put.
-    inode_live: Sharded<InodeMeta>,
     /// Count of mutations so far, and its value at the last commit: the
     /// commit timer commits only when they differ.
     changes: AtomicU64,
@@ -484,8 +487,8 @@ pub struct DictMetadataStore {
     /// Running count of all inodes (including the root directory).
     ///
     /// Incremented in `create_inode` and `create_directory`, decremented in
-    /// `delete_inode`.  Initialized to `1` (root inode) on `new()`, recomputed
-    /// from `inode_data.len()` on `load_from_root()`.
+    /// `delete_inode`.  Initialized to `1` (root inode) on `new()`, read from
+    /// the root record on `load_from_root()`.
     inode_count: AtomicU64,
     /// Optional WAL strategy — routes all Dictionary mutations to durable storage.
     ///
@@ -531,33 +534,32 @@ impl DictMetadataStore {
             Ok(r) => (r, None),
             Err(e) => (chunk_store::ObjectId(ObjectKey::ZERO.0), Some(std::io::Error::other(e))),
         };
-        let (root_inode_digest, root_dir_digest) = {
+        // Use current process uid/gid so the mounting user can write to root.
+        // On non-unix, falls back to 0/0 (callers like `seed` update root inode
+        // from the source directory metadata afterwards).
+        #[cfg(unix)]
+        let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
+        #[cfg(not(unix))]
+        let (uid, gid) = (0u32, 0u32);
+        let mut root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
+        // A new file system starts now, not at the epoch (shown as 1969).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        root_meta.mtime_sec = now.as_secs() as _;
+        root_meta.mtime_nsec = now.subsec_nanos() as _;
+        root_meta.ctime_sec = root_meta.mtime_sec;
+        root_meta.ctime_nsec = root_meta.mtime_nsec;
+        let root_dir_digest = {
             let mut io_guard = lock_stats::lock(&io, Site::Io);
             let mut fsa = &mut *io_guard;
-            // Use current process uid/gid so the mounting user can write to root.
-            // On non-unix, falls back to 0/0 (callers like `seed` update root inode
-            // from the source directory metadata afterwards).
-            #[cfg(unix)]
-            let (uid, gid) = (unsafe { libc::getuid() }, unsafe { libc::getgid() });
-            #[cfg(not(unix))]
-            let (uid, gid) = (0u32, 0u32);
-            let mut root_meta = InodeMeta::new_directory(1, uid, gid, S_IFDIR | 0o755);
-            // A new file system starts now, not at the epoch (shown as 1969).
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            root_meta.mtime_sec = now.as_secs() as _;
-            root_meta.mtime_nsec = now.subsec_nanos() as _;
-            root_meta.ctime_sec = root_meta.mtime_sec;
-            root_meta.ctime_nsec = root_meta.mtime_nsec;
-            let root_inode_digest = intern_inode(&mut fsa, &root_meta);
-            let root_dir_digest = create_dir_entries(&mut fsa, 1, 1);
-            (root_inode_digest, root_dir_digest)
+            create_dir_entries(&mut fsa, 1, 1)
             // fsa drops here, flushing files to io
         };
-
-        let mut inode_data = BTreeMap::new();
-        inode_data.insert(1, root_inode_digest);
+        // The root inode goes into the empty tree through the overlay; the
+        // first commit writes it.
+        let inodes = MapTree::with_sites("inode_data", Site::InodeLive, Site::InodeData, empty);
+        inodes.write(1, Some(root_meta));
 
         let mut dir_data = BTreeMap::new();
         dir_data.insert(1, root_dir_digest);
@@ -569,10 +571,9 @@ impl DictMetadataStore {
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(put_error),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
-            inode_data: lk(inode_data).timed(Site::InodeData),
+            inodes,
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
-            inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
             manifest: MapTree::new("manifest_data", Site::ManifestData, empty),
@@ -712,8 +713,8 @@ impl DictMetadataStore {
     /// Return the current inode count (total number of live inodes including root).
     ///
     /// Updated atomically in `create_inode`/`create_directory` (+1) and
-    /// `delete_inode` (-1, saturating).  Recomputed from `inode_data.len()` after
-    /// `load_from_root()`.
+    /// `delete_inode` (-1, saturating).  Read from the root record by
+    /// `load_from_root()` (no walk).
     pub fn inode_count(&self) -> u64 {
         self.inode_count.load(Ordering::Relaxed)
     }
@@ -864,7 +865,8 @@ impl DictMetadataStore {
 
     /// The shard of directory `ino`, locked, with its entry list cached. A
     /// cold list is read with no lock held and cached only if it is still
-    /// absent and its digest did not change meanwhile (see `cached_inode`).
+    /// absent and its digest did not change meanwhile (else a delete or a
+    /// newer flush in between would be undone).
     fn cached_dir(&self, ino: InodeId) -> Result<Shard<'_, DirList>, MetaError> {
         let mut cold: Option<(ObjectKey, DirList)> = None;
         loop {
@@ -911,69 +913,31 @@ impl DictMetadataStore {
         Ok(r)
     }
 
-    /// The inode cache, locked, with `ino` in it. A cold inode is read with
-    /// no cache lock held; it is cached only if it is still absent and its
-    /// digest did not change meanwhile (else a delete or a newer flush in
-    /// between would be undone). Lock order: `inode_alloc`, `inode_live`,
-    /// `inode_data`.
-    fn cached_inode(&self, ino: InodeId) -> Result<Shard<'_, InodeMeta>, MetaError> {
-        let mut cold: Option<(ObjectKey, InodeMeta)> = None;
-        loop {
-            let mut live = self.inode_live.lock(ino);
-            if live.map.contains_key(&ino) {
-                return Ok(live);
-            }
-            let digest = self.inode_data.lock().get(&ino).copied()
-                .ok_or(MetaError::NotFound(ino))?;
-            if let Some((d, meta)) = cold.take()
-                && d == digest
-            {
-                live.map.insert(ino, meta);
-                return Ok(live);
-            }
-            drop(live);
-            let meta = load_inode(&mut self.reader(), &digest)?;
-            cold = Some((digest, meta));
-        }
-    }
-
-    /// After a change of the inode cache, with no cache lock held: write the
-    /// dirty entries (`flush`), and drop the clean ones when it is `full`.
-    fn trim_inodes(&self, flush: bool, full: bool) {
-        if flush || full {
-            self.flush_inodes();
-        }
-        if full {
-            self.inode_live.evict_clean();
-        }
-    }
-
-    /// Current metadata of `ino`: the cached copy, or read from the store.
+    /// Current metadata of `ino`: the overlay, else the inode tree.
     fn load_meta(&self, ino: InodeId) -> Result<InodeMeta, MetaError> {
-        let live = self.cached_inode(ino)?;
-        let meta = live.map[&ino].clone();
-        drop(live);
-        self.trim_inodes(false, self.inode_live.len() > INODE_CACHE_MAX);
-        Ok(meta)
+        self.inodes.read(&self.trees, &ino)?.ok_or(MetaError::NotFound(ino))
     }
 
-    /// Change inode `ino` in one hold of its cache lock (D-05): `f` gets the
-    /// current metadata, and what it leaves is the new (dirty) state. Two
+    /// Change inode `ino` in one hold of its overlay shard lock (D-05): `f`
+    /// gets the current metadata, and what it leaves is the new (dirty)
+    /// state. A cold inode is read from the tree with no lock held, then
+    /// checked again under the lock (`MapTree::read_modify_write`): two
     /// threads that change one inode never lose a change. `logical_bytes`
     /// follows the size change in the same hold. `f` must not call the store
     /// or take a lock. `NotFound` if there is no such inode.
     pub fn modify_inode<R>(&self, ino: InodeId, f: impl FnOnce(&mut InodeMeta) -> R) -> Result<R, MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        let mut live = self.cached_inode(ino)?;
-        let m = live.map.get_mut(&ino).expect("cached_inode caches it");
-        let old_size = m.size;
-        let r = f(m);
-        debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
-        let new_size = m.size;
-        live.mark_dirty(ino);
-        self.add_size(old_size, new_size);
-        drop(live);
-        self.trim_inodes(self.inode_live.dirty() >= DIRTY_FLUSH, self.inode_live.len() > INODE_CACHE_MAX);
+        let r = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
+            None => (None, Err(MetaError::NotFound(ino))),
+            Some(mut m) => {
+                let old_size = m.size;
+                let r = f(&mut m);
+                debug_assert_eq!(m.ino, ino, "modify_inode must not change the inode number");
+                self.add_size(old_size, m.size);
+                (Some(Some(m)), Ok(r))
+            }
+        })??;
+        self.flush_trees();
         Ok(r)
     }
 
@@ -989,32 +953,53 @@ impl DictMetadataStore {
         }
     }
 
-    /// Cache `meta` as a new dirty inode: number `at` (`AlreadyExists` if
-    /// it is taken; new numbers are above it afterwards), or a new number.
-    /// The number is taken and the inode cached under `inode_alloc`, so no
-    /// number is given twice. A new inode is only in the cache until a flush.
+    /// Put `meta` as a new inode in the overlay: number `at`
+    /// (`AlreadyExists` if the overlay or the tree has it; a number whose
+    /// delete is still pending is free; new numbers are above it
+    /// afterwards), or a new number. The number is taken and the inode
+    /// written under `inode_alloc`, so no number is given twice. For `at`,
+    /// the tree is probed with no lock held, then checked under
+    /// `inode_alloc` and the overlay shard lock with the generation of the
+    /// probe (`MapTree::modify`); a flush or commit between them retries.
     fn insert_inode(&self, at: Option<InodeId>, meta: &InodeMeta) -> Result<InodeId, MetaError> {
-        let mut alloc = self.inode_alloc.lock();
-        let ino = at.unwrap_or_else(|| alloc.allocate_ino());
-        let mut live = self.inode_live.lock(ino);
-        if at.is_some() {
-            if live.map.contains_key(&ino) || self.inode_data.lock().contains_key(&ino) {
-                return Err(MetaError::AlreadyExists(ino));
-            }
-            if alloc.next_ino() <= ino {
-                alloc.set_next_ino(ino.saturating_add(1));
-            }
-        }
         let mut m = meta.clone();
-        m.ino = ino;
         let size = m.size;
-        live.map.insert(ino, m);
-        live.mark_dirty(ino);
-        drop(live);
-        drop(alloc);
+        let ino = match at {
+            None => {
+                let mut alloc = self.inode_alloc.lock();
+                let ino = alloc.allocate_ino();
+                m.ino = ino;
+                self.inodes.write(ino, Some(m));
+                ino
+            }
+            Some(ino) => {
+                m.ino = ino;
+                let mut m = Some(m);
+                loop {
+                    let probe = self.inodes.read_with_generation(&self.trees, &ino)?;
+                    let mut alloc = self.inode_alloc.lock();
+                    let done = self.inodes.modify(ino, Some(probe), |cur| match cur {
+                        Some(_) => (None, Err(MetaError::AlreadyExists(ino))),
+                        None => (Some(m.take()), Ok(())),
+                    });
+                    match done {
+                        Some(Ok(())) => {
+                            if alloc.next_ino() <= ino {
+                                alloc.set_next_ino(ino.saturating_add(1));
+                            }
+                            break ino;
+                        }
+                        Some(Err(e)) => return Err(e),
+                        // The tree moved after the probe: probe again,
+                        // with no lock held.
+                        None => drop(alloc),
+                    }
+                }
+            }
+        };
         self.add_size(0, size);
         self.inode_count.fetch_add(1, Ordering::Relaxed);
-        self.trim_inodes(self.inode_live.dirty() >= DIRTY_FLUSH, self.inode_live.len() > INODE_CACHE_MAX);
+        self.flush_trees();
         Ok(ino)
     }
 
@@ -1059,41 +1044,6 @@ impl DictMetadataStore {
         Ok(ino)
     }
 
-    /// Write every dirty cached inode; record its digest in `inode_data`.
-    fn flush_inodes(&self) {
-        self.flush_inodes_between(|| ());
-    }
-
-    /// `flush_inodes`, shard by shard: take the dirty entries (they go in
-    /// flight), write them with no shard lock held, then install each digest
-    /// only if the entry still has the ticket of this take (it was not
-    /// changed or deleted meanwhile; else a late install would bring back
-    /// an older or a deleted inode). `between` runs once, after the first
-    /// write and before its install (a test hook point).
-    fn flush_inodes_between(&self, between: impl FnOnce()) {
-        let mut between = Some(between);
-        for i in 0..SHARDS {
-            let taken = self.inode_live.lock_at(i).take(false);
-            if taken.is_empty() {
-                continue;
-            }
-            let mut w = self.writer();
-            let written: Vec<(u64, u64, ObjectKey)> =
-                taken.into_iter().map(|(ino, t, meta)| (ino, t, intern_inode(&mut w, &meta))).collect();
-            self.kept(w);
-            if let Some(f) = between.take() {
-                f();
-            }
-            let mut live = self.inode_live.lock_at(i);
-            let mut inode_data = self.inode_data.lock();
-            for (ino, t, d) in written {
-                if live.settle(ino, t) {
-                    inode_data.insert(ino, d);
-                }
-            }
-        }
-    }
-
     /// True if `ino` is a directory known to the store.
     fn is_dir(&self, ino: InodeId) -> bool {
         self.dir_live.lock(ino).map.contains_key(&ino)
@@ -1101,7 +1051,11 @@ impl DictMetadataStore {
     }
 
     /// Write every dirty cached directory and record its digest in
-    /// `dir_data`; shard by shard, as `flush_inodes_between` does.
+    /// `dir_data`, shard by shard: take the dirty entries (they go in
+    /// flight), write them with no shard lock held, then install each digest
+    /// only if the entry still has the ticket of this take (it was not
+    /// changed or deleted meanwhile; else a late install would bring back
+    /// an older or a deleted list).
     fn flush_dirs(&self) {
         for i in 0..SHARDS {
             let taken = self.dir_live.lock_at(i).take(false);
@@ -1219,9 +1173,9 @@ impl DictMetadataStore {
             self.manifest.requeue();
             self.refcounts.requeue();
             self.xattrs.requeue();
+            self.inodes.requeue();
             self.end_prepared();
         }
-        self.inode_live.requeue();
         self.dir_live.requeue();
     }
 
@@ -1238,14 +1192,18 @@ impl DictMetadataStore {
     /// commit.
     fn flush_trees(&self) {
         let limit = self.tree_flush.load(Ordering::Relaxed);
-        if self.manifest.dirty() < limit && self.refcounts.dirty() < limit && self.xattrs.dirty() < limit {
+        if self.manifest.dirty() < limit
+            && self.refcounts.dirty() < limit
+            && self.xattrs.dirty() < limit
+            && self.inodes.dirty() < limit
+        {
             return;
         }
         let Some(apply) = self.apply_lock.try_lock() else { return };
         if self.prepared.load(Ordering::Relaxed) {
             return;
         }
-        let mut results = Vec::with_capacity(3);
+        let mut results = Vec::with_capacity(4);
         if self.manifest.dirty() >= limit {
             results.push(self.manifest.flush(&self.trees, &apply));
         }
@@ -1254,6 +1212,9 @@ impl DictMetadataStore {
         }
         if self.xattrs.dirty() >= limit {
             results.push(self.xattrs.flush(&self.trees, &apply));
+        }
+        if self.inodes.dirty() >= limit {
+            results.push(self.inodes.flush(&self.trees, &apply));
         }
         for r in results {
             match r {
@@ -1273,7 +1234,8 @@ impl DictMetadataStore {
 
     /// First half of a commit (#108), run while no request changes the store
     /// (the file system holds its commit gate exclusively): take the dirty
-    /// inodes and directories and a copy of every map, and cut the write log
+    /// directories, the edits of every map tree and a copy of the directory
+    /// map, and cut the write log
     /// (`WalStrategy::cut`), so requests after this go to the next
     /// generation. Fast: no node is written and nothing is synced. Waits for
     /// a commit still in `finish_commit`.
@@ -1307,11 +1269,10 @@ impl DictMetadataStore {
         let fail_seq = self.wal_fail_seq.load(Ordering::SeqCst);
         let changes = self.changes.load(Ordering::Relaxed);
         let dirs = self.dir_live.take_all();
-        let inodes = self.inode_live.take_all();
+        let (inode_root, inodes) = self.inodes.take_for_commit();
         let (manifest_root, manifest) = self.manifest.take_for_commit();
         // After the takes (IN-01).
         let next_ino = self.inode_alloc.lock().next_ino();
-        let inode_data = self.inode_data.lock().clone();
         let dir_data = self.dir_data.lock().clone();
         let (refcount_root, refcounts) = self.refcounts.take_for_commit();
         let (xattr_root, xattrs) = self.xattrs.take_for_commit();
@@ -1322,10 +1283,8 @@ impl DictMetadataStore {
             installed: false,
             changes,
             fail_seq,
-            inodes,
             dirs,
             next_ino,
-            inode_data,
             dir_data,
             manifest_root,
             manifest,
@@ -1333,6 +1292,8 @@ impl DictMetadataStore {
             refcounts,
             xattr_root,
             xattrs,
+            inode_root,
+            inodes,
             logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
             inode_count: self.inode_count.load(Ordering::Relaxed),
             snapshots: self.list_snapshots(),
@@ -1345,7 +1306,7 @@ impl DictMetadataStore {
     /// Second half of a commit (#108); requests may run meanwhile. Writes
     /// the nodes of `p`, syncs the chunk store, then logs the root
     /// (`WalStrategy::install_root`). Takes no store lock across a write
-    /// or a sync of more than one node. On an error, the inodes and
+    /// or a sync of more than one node. On an error, the edits and
     /// directories that `p` took are dirty again.
     pub fn finish_commit(&self, mut p: PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
         let r = self.finish_inner(&mut p);
@@ -1357,13 +1318,7 @@ impl DictMetadataStore {
         let finish_started = std::time::Instant::now();
         let cs = Arc::clone(&self.cs);
         let mut w = NodeWriter::new(Arc::clone(&cs));
-        // Write the changed directories and inodes, so the digest maps are current.
-        let mut new_inodes = Vec::with_capacity(p.inodes.len());
-        for (ino, t, meta) in &p.inodes {
-            let d = intern_inode(&mut w, meta);
-            p.inode_data.insert(*ino, d);
-            new_inodes.push((*ino, *t, d));
-        }
+        // Write the changed directories, so the digest map is current.
         let mut new_dirs = Vec::with_capacity(p.dirs.len());
         for (ino, t, list) in &p.dirs {
             let d = list.intern(&mut w);
@@ -1376,13 +1331,13 @@ impl DictMetadataStore {
         //   inode, dir, manifest, xattr and refcount maps, logical_bytes (u64)
         //   and inode_count (u64).
         let next_ino = p.next_ino;
-        let inode_data_digest = intern_u64_digest_map(&mut w, &p.inode_data);
         let dir_data_digest = intern_u64_digest_map(&mut w, &p.dir_data);
         // The map trees: the taken edits on the cut roots (no flush ran
         // since the cut, so the cut roots are still the working roots).
         let (manifest_root, manifest_apply) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
         let (refcount_root, refcount_apply) = self.refcounts.apply_batch(&self.trees, &p.refcount_root, &p.refcounts)?;
         let (xattr_root, xattr_apply) = self.xattrs.apply_batch(&self.trees, &p.xattr_root, &p.xattrs)?;
+        let (inode_root, inode_apply) = self.inodes.apply_batch(&self.trees, &p.inode_root, &p.inodes)?;
         let tree_stats = |name: &'static str, root: &chunk_store::ObjectId, apply: prolly::ApplyStats| {
             let ctx = self.trees.ctx();
             let tree_err = |e| crate::pmap::tree_err(name, e);
@@ -1396,7 +1351,9 @@ impl DictMetadataStore {
         let manifest_stats = tree_stats("manifest_data", &manifest_root, manifest_apply)?;
         let refcount_stats = tree_stats("refcounts", &refcount_root, refcount_apply)?;
         let xattr_stats = tree_stats("xattr_data", &xattr_root, xattr_apply)?;
+        let inode_stats = tree_stats("inode_data", &inode_root, inode_apply)?;
         self.injected_fault(CommitFault::AfterApply)?;
+        let inode_data_digest = crate::store_io::to_key(inode_root);
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
         let xattr_data_digest = crate::store_io::to_key(xattr_root);
         let refcount_data_digest = crate::store_io::to_key(refcount_root);
@@ -1424,20 +1381,13 @@ impl DictMetadataStore {
             self.manifest.install_and_settle(manifest_root, &p.manifest, &apply);
             self.refcounts.install_and_settle(refcount_root, &p.refcounts, &apply);
             self.xattrs.install_and_settle(xattr_root, &p.xattrs, &apply);
+            self.inodes.install_and_settle(inode_root, &p.inodes, &apply);
             p.installed = true;
             self.prepared.store(false, Ordering::Relaxed);
         }
 
-        // The nodes are stored: the caches may forget the entries that were
+        // The nodes are stored: the cache may forget the entries that were
         // not changed again since the cut.
-        {
-            for (ino, t, d) in new_inodes {
-                let mut live = self.inode_live.lock(ino);
-                if live.settle(ino, t) {
-                    self.inode_data.lock().insert(ino, d);
-                }
-            }
-        }
         for (ino, t, d) in new_dirs {
             let mut live = self.dir_live.lock(ino);
             if live.settle(ino, t) {
@@ -1493,7 +1443,7 @@ impl DictMetadataStore {
         // Update last_root so background GC can use it
         *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
-        let trees = vec![manifest_stats, refcount_stats, xattr_stats];
+        let trees = vec![manifest_stats, refcount_stats, xattr_stats, inode_stats];
         let stats = CommitStats {
             nodes_read: trees.iter().map(|t| t.apply.nodes_read).sum(),
             nodes_written: trees.iter().map(|t| t.apply.nodes_written).sum::<u64>() + 1,
@@ -1770,16 +1720,13 @@ impl MetadataStore for DictMetadataStore {
 
     fn delete_inode(&self, ino: InodeId) -> Result<(), MetaError> {
         self.changes.fetch_add(1, Ordering::Relaxed);
-        // Capture size before removing so we can decrement logical_bytes.
-        let size = self.load_meta(ino)?.size;
-
-        // The cache entry and the digest go in one hold of the cache lock:
-        // a cold load that runs meanwhile then cannot cache the inode again.
-        {
-            let mut live = self.inode_live.lock(ino);
-            live.remove(ino);
-            self.inode_data.lock().remove(&ino);
-        }
+        // A pending delete, written with the size it had in the same hold of
+        // the overlay shard lock (read-modify-write): of two deletes, one
+        // counts and the other gets `NotFound`.
+        let size = self.inodes.read_modify_write(&self.trees, &ino, |cur| match cur {
+            None => (None, Err(MetaError::NotFound(ino))),
+            Some(m) => (Some(None), Ok(m.size)),
+        })??;
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
         self.manifest.write(ino, None);
@@ -1912,7 +1859,7 @@ impl MetadataStore for DictMetadataStore {
 }
 
 /// The metadata values that the root record `root` refers to, each a file
-/// value: the record itself and its flat maps, the inode and directory
+/// value: the record itself and its flat directory map, the directory
 /// nodes, the manifest nodes and the spilled xattr values (metadata, with no
 /// refcount). The nodes of the map trees are not file values and are not
 /// here (see [`tree_nodes`]); nor are file content keys (see
@@ -1968,11 +1915,12 @@ pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> 
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let mut out = Vec::new();
     // The order of `for_each_referenced`: the manifest tree, the refcounts,
-    // then the xattrs.
+    // the xattrs, then the inodes.
     for (name, o) in [
         ("manifest_data", root_rec::MANIFEST_DATA),
         ("refcounts", root_rec::REFCOUNTS),
         ("xattr_data", root_rec::XATTR_DATA),
+        ("inode_data", root_rec::INODE_DATA),
     ] {
         walk_tree(cs, name, &at(o), &mut |id| {
             out.push(id);
@@ -2039,6 +1987,17 @@ fn refcount_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
     Ok(())
 }
 
+/// Check a leaf entry of the inode tree (an 8-byte ino and an inline
+/// record of 56 or 72 bytes, else corrupt).
+fn inode_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
+    if k.len() != 8 || (v.len() != 56 && v.len() != 72) {
+        return Err(MetaError::Corrupted(format!(
+            "inode_data tree: entry of a {}-byte key and a {}-byte value", k.len(), v.len()
+        )));
+    }
+    Ok(())
+}
+
 /// The spilled value key of a leaf entry of the xattr tree, if any (a key
 /// of at least 9 bytes and a value that `XattrValue::decode` takes, else
 /// corrupt).
@@ -2067,15 +2026,11 @@ pub(crate) fn for_each_referenced(
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let (inodes, dirs, manifests) = (
-        at(root_rec::INODE_DATA), at(root_rec::DIR_DATA), at(root_rec::MANIFEST_DATA),
-    );
-    for k in [*root, inodes, dirs] {
+    let (dirs, manifests) = (at(root_rec::DIR_DATA), at(root_rec::MANIFEST_DATA));
+    for k in [*root, dirs] {
         f(Ref::Node, k)?;
     }
-    for map in [inodes, dirs] {
-        for_each_map_value(cs, &map, &mut |k| f(Ref::Node, k))?;
-    }
+    for_each_map_value(cs, &dirs, &mut |k| f(Ref::Node, k))?;
     // The manifest tree: its nodes, and per leaf entry the manifest node and
     // its content keys. `f` is used by both callbacks, one at a time.
     let f = std::cell::RefCell::new(f);
@@ -2094,13 +2049,16 @@ pub(crate) fn for_each_referenced(
             Some(key) => (f.borrow_mut())(Ref::Node, key),
             None => Ok(()),
         }
-    })
+    })?;
+    // The inode tree: its nodes only (the records are inline and hold no key).
+    walk_tree(cs, "inode_data", &at(root_rec::INODE_DATA), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut inode_leaf)
 }
 
 /// About how many keys [`for_each_referenced`] gives to the sorter for
 /// `root` (tree nodes go straight to the live set), from the sizes of its
-/// maps (no map is read whole): the 3 file-value nodes of the root (the
-/// root record and its flat maps), one key per map entry, for each entry
+/// maps (no map is read whole): the 2 file-value nodes of the root (the
+/// root record and its flat directory map), one key per entry of that map,
+/// nothing for the inode tree (its nodes are not sorted), for each entry
 /// of the manifest tree (`prolly::count`, the root node only) its manifest
 /// and one content key (a file with more extents gives more), and at most
 /// one spilled value per entry of the xattr tree. For the temp space check
@@ -2110,13 +2068,11 @@ pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root:
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 3u64;
-    for off in [root_rec::INODE_DATA, root_rec::DIR_DATA] {
-        let key = at(off);
-        let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
-            .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
-        keys = keys.saturating_add(r.len().saturating_sub(8) / MAP_ENTRY as u64);
-    }
+    let mut keys = 2u64;
+    let key = at(root_rec::DIR_DATA);
+    let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
+        .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
+    keys = keys.saturating_add(r.len().saturating_sub(8) / MAP_ENTRY as u64);
     let manifests = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::MANIFEST_DATA)))
         .map_err(|e| crate::pmap::tree_err("manifest_data", e))?;
     let xattrs = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::XATTR_DATA)))
@@ -2286,9 +2242,11 @@ impl DictMetadataStore {
     /// Reconstruct a `DictMetadataStore` from the node store and a root key
     /// previously returned by `commit()`.
     ///
-    /// Restores the in-memory maps (inode_data, dir_data) and the
-    /// working roots of the manifest, refcount and xattr trees
-    /// and inode numbering state so that subsequent operations continue seamlessly.
+    /// Restores the in-memory directory map (dir_data), the working roots
+    /// of the inode, manifest, refcount and xattr trees and the inode
+    /// numbering state so that subsequent operations continue seamlessly.
+    /// The counts come from the root record; the root inode is checked with
+    /// one tree read (no walk).
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
 
@@ -2314,20 +2272,20 @@ impl DictMetadataStore {
         let mut inode_alloc = InodeAlloc::new();
         inode_alloc.set_next_ino(next_ino);
 
-        let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
 
-        // Sanity: root directory inode must exist
-        if !inode_data.contains_key(&root_dir_ino) {
+        let cs = Arc::clone(io_guard.store());
+        let trees = TreeIo::new(Arc::clone(&cs), io_guard.node_cache(), io_guard.tree_config());
+        drop(io_guard);
+
+        // The working root; only the root inode is read (sanity check).
+        let inodes = MapTree::with_sites("inode_data", Site::InodeLive, Site::InodeData, crate::store_io::to_id(&inode_data_digest));
+        if inodes.read(&trees, &root_dir_ino)?.is_none() {
             return Err(MetaError::Corrupted(format!(
                 "root dir ino {} not found in inode_data after reload",
                 root_dir_ino
             )));
         }
-
-        let cs = Arc::clone(io_guard.store());
-        let trees = TreeIo::new(Arc::clone(&cs), io_guard.node_cache(), io_guard.tree_config());
-        drop(io_guard);
 
         Ok(DictMetadataStore {
             io,
@@ -2336,10 +2294,9 @@ impl DictMetadataStore {
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(None),
             inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
-            inode_data: lk(inode_data).timed(Site::InodeData),
+            inodes,
             dir_data: lk(dir_data).timed(Site::DirData),
             dir_live: Sharded::new(Site::DirLive),
-            inode_live: Sharded::new(Site::InodeLive),
             changes: AtomicU64::new(0),
             committed_changes: AtomicU64::new(0),
             // The working root; no manifest is read here.
@@ -2430,11 +2387,11 @@ mod tests {
             }
             store.unlink(dir, "f0").unwrap();
         }
-        // The caches stayed bounded, and every change is still visible.
-        assert!(store.inode_live.len() <= INODE_CACHE_MAX + 1);
+        // The cache and the overlay stayed bounded, and every change is
+        // still visible.
         assert!(store.dir_live.len() <= DIR_CACHE_MAX + 1);
         // Dirty entries are written in batches, so the final commit stays small.
-        assert!(store.inode_live.dirty() < DIRTY_FLUSH);
+        assert!(store.inodes.dirty() < TREE_FLUSH);
         assert!(store.dir_live.dirty() < DIRTY_FLUSH);
         let check = |s: &DictMetadataStore| {
             for (dir, name, ino, size) in &expect {
@@ -3739,44 +3696,164 @@ mod tests {
         });
     }
 
-    // Pitfall 7: a flush wrote inode X with no lock held, and X is deleted
-    // before the flush installs its digest. The late install must not bring
-    // X back. The hook point runs on this thread: no timing.
+    /// Flush the inode tree of `store` now (as the hot path does at the
+    /// limit).
+    fn flush_inode_tree(store: &DictMetadataStore) {
+        let apply = store.apply_lock.lock();
+        store.inodes.flush(&store.trees, &apply).unwrap();
+    }
+
+    // Pitfall 7: a flush installed a tree root with inode X, and X is
+    // deleted before the flush settles the overlay (the flush hook runs
+    // there). The settle must not drop the pending delete and bring X back.
+    // The hook runs on this thread: no timing.
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn flush_install_does_not_resurrect_a_deleted_inode() {
         let (_d, store) = make_store();
+        let store = Arc::new(store);
         let x = store.create_inode(&new_file_meta()).unwrap();
-        store.flush_inodes_between(|| store.delete_inode(x).unwrap());
+        let ran = Arc::new(AtomicBool::new(false));
+        {
+            let (weak, ran) = (Arc::downgrade(&store), Arc::clone(&ran));
+            store.inodes.set_flush_hook(Some(Arc::new(move || {
+                let st = weak.upgrade().unwrap();
+                // In the window: the new root has X, the overlay is not settled.
+                assert!(prolly::get_in(&st.trees.ctx(), &st.inodes.root(), &x.to_be_bytes()).unwrap().is_some());
+                st.delete_inode(x).unwrap();
+                ran.store(true, Ordering::SeqCst);
+            })));
+        }
+        flush_inode_tree(&store);
+        store.inodes.set_flush_hook(None);
+        assert!(ran.load(Ordering::SeqCst));
         assert!(matches!(store.get_inode(x), Err(MetaError::NotFound(_))));
-        assert!(!store.inode_data.lock().contains_key(&x));
-        assert!(!store.inode_live.lock(x).map.contains_key(&x));
+        assert_eq!(store.inodes.dirty(), 1, "the delete is still pending");
+        flush_inode_tree(&store);
+        assert!(matches!(store.get_inode(x), Err(MetaError::NotFound(_))));
+        assert!(prolly::get_in(&store.trees.ctx(), &store.inodes.root(), &x.to_be_bytes()).unwrap().is_none());
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
         assert!(matches!(reloaded.get_inode(x), Err(MetaError::NotFound(_))));
     }
 
-    // A commit took X (size 1) at its cut, then X changed (size 2) and a
-    // flush took it. Before the flush installs, the commit installs its
-    // older digest. The older digest must not end up as the current one.
+    // A commit took X (size 1) at its cut, then X changed (size 2) before
+    // the commit installs its root (no flush runs in between: the commit is
+    // prepared). The install of the older value must not hide the newer
+    // change. The same in a flush: X changes (size 3) between the install
+    // and the settle (the flush hook).
     #[test]
     #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
     fn late_older_install_does_not_overwrite_a_newer_change() {
         let (_d, store) = make_store();
+        let store = Arc::new(store);
         let x = store.create_inode(&new_file_meta()).unwrap();
         store.modify_inode(x, |m| m.size = 1).unwrap();
         let p = store.begin_commit().unwrap();
         store.modify_inode(x, |m| m.size = 2).unwrap();
-        let st = &store;
-        st.flush_inodes_between(move || {
-            st.finish_commit(p).unwrap();
-        });
-        // Drop the clean entries: X is read back through its digest.
-        store.inode_live.evict_clean();
+        store.finish_commit(p).unwrap();
         assert_eq!(store.get_inode(x).unwrap().size, 2);
+        assert_eq!(store.inodes.dirty(), 1, "the newer change stays pending");
+        flush_inode_tree(&store);
+        assert_eq!(store.inodes.dirty(), 0);
+        assert_eq!(store.get_inode(x).unwrap().size, 2, "from the tree");
+        {
+            let weak = Arc::downgrade(&store);
+            store.inodes.set_flush_hook(Some(Arc::new(move || {
+                weak.upgrade().unwrap().modify_inode(x, |m| m.size = 3).unwrap();
+            })));
+        }
+        store.modify_inode(x, |m| m.size = 4).unwrap();
+        flush_inode_tree(&store);
+        store.inodes.set_flush_hook(None);
+        assert_eq!(store.get_inode(x).unwrap().size, 3);
+        assert_eq!(store.inodes.dirty(), 1);
         let root = store.commit().unwrap();
         let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
-        assert_eq!(reloaded.get_inode(x).unwrap().size, 2);
+        assert_eq!(reloaded.get_inode(x).unwrap().size, 3);
+        assert_eq!(reloaded.logical_bytes(), 3);
+    }
+
+    // A `modify_inode` that misses the overlay reads the tree; a flush that
+    // moves the root between that read and the check under the lock (the
+    // read hook) makes it read again: the change is made on the newest
+    // value, not on the one it read first.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn a_cold_inode_read_racing_a_flush_is_not_stale() {
+        let (_d, store) = make_store();
+        let store = Arc::new(store);
+        let x = store.create_inode(&new_file_meta()).unwrap();
+        store.commit().unwrap();
+        assert_eq!(store.inodes.dirty(), 0, "x is only in the tree");
+        let start = store.get_inode(x).unwrap().nlinks;
+        {
+            let weak = Arc::downgrade(&store);
+            store.inodes.set_read_hook(Arc::new(move || {
+                let st = weak.upgrade().unwrap();
+                // Another change of x, flushed: the root moves and x leaves
+                // the overlay.
+                st.modify_inode(x, |m| m.nlinks += 10).unwrap();
+                flush_inode_tree(&st);
+                assert_eq!(st.inodes.dirty(), 0);
+            }));
+        }
+        let generation = store.inodes.generation();
+        store.modify_inode(x, |m| m.nlinks += 1).unwrap();
+        assert!(store.inodes.generation() > generation, "a flush ran in the window");
+        assert_eq!(store.get_inode(x).unwrap().nlinks, start + 11);
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(reloaded.get_inode(x).unwrap().nlinks, start + 11);
+    }
+
+    // `create_inode_at` probes the tree: an inode that is only in the tree
+    // (after a commit) is taken; a number whose delete is pending is free.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn create_inode_at_refuses_a_number_in_the_tree() {
+        let (_d, store) = make_store();
+        let x = store.create_inode(&new_file_meta()).unwrap();
+        store.commit().unwrap();
+        assert_eq!(store.inodes.dirty(), 0, "the overlay is empty");
+        assert!(matches!(store.create_inode_at(x, &new_file_meta()), Err(MetaError::AlreadyExists(n)) if n == x));
+        assert!(matches!(store.create_inode_at(1, &new_file_meta()), Err(MetaError::AlreadyExists(1))));
+        let count = store.inode_count();
+        store.delete_inode(x).unwrap();
+        let mut meta = new_file_meta();
+        meta.size = 5;
+        assert_eq!(store.create_inode_at(x, &meta).unwrap(), x, "a pending delete frees the number");
+        assert_eq!(store.get_inode(x).unwrap().size, 5);
+        assert_eq!((store.inode_count(), store.logical_bytes()), (count, 5));
+        assert!(matches!(store.create_inode_at(x, &new_file_meta()), Err(MetaError::AlreadyExists(_))));
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert_eq!(reloaded.get_inode(x).unwrap().size, 5);
+        assert!(reloaded.create_inode(&new_file_meta()).unwrap() > x);
+    }
+
+    // The leaf value of an inode is its inline record: 56 bytes with no
+    // rdev or atime, 72 with one; another length is corrupt.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_inode_value_is_56_or_72_bytes() {
+        let (_d, store) = make_store();
+        let plain = store.create_inode(&new_file_meta()).unwrap();
+        let dev = store.create_inode(&InodeMeta { rdev: 0x0102, mode: 0o020_644, ..new_file_meta() }).unwrap();
+        store.commit().unwrap();
+        let leaf = |ino: u64| prolly::get_in(&store.trees.ctx(), &store.inodes.root(), &ino.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(leaf(plain).len(), 56);
+        assert_eq!(leaf(dev).len(), 72);
+        assert_eq!(crate::inode::deserialize_inode(&leaf(dev)).unwrap(), store.get_inode(dev).unwrap());
+        for bad in [0usize, 55, 57, 60, 71, 73] {
+            let (root, _) = prolly::build(&store.cs, prolly::Config::DEFAULT, [(7u64.to_be_bytes().to_vec(), vec![0u8; bad])]).unwrap();
+            let m: MapTree<u64, InodeMeta> = MapTree::new("inode_data", Site::InodeData, root);
+            let e = m.read(&store.trees, &7).unwrap_err();
+            assert!(matches!(&e, MetaError::Corrupted(t) if t.contains("inode_data tree")), "{bad}: {e}");
+            assert!(inode_leaf(&[0; 8], &vec![0u8; bad]).is_err(), "{bad}");
+        }
+        assert!(inode_leaf(&[0; 7], &[0; 56]).is_err(), "short key");
+        assert!(inode_leaf(&[0; 8], &[0; 56]).is_ok() && inode_leaf(&[0; 8], &[0; 72]).is_ok());
     }
 
     // LOCK-01: thread A reads a manifest node and its pack read is held.
@@ -3892,10 +3969,8 @@ mod tests {
         // The keys of whole-node loads, as the mark had them before #207.
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-        let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA)];
-        for o in [root_rec::INODE_DATA, root_rec::DIR_DATA] {
-            want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
-        }
+        let mut want = vec![root, at(root_rec::DIR_DATA)];
+        want.extend(load_u64_digest_map(&mut io, &at(root_rec::DIR_DATA)).unwrap().into_values());
         // The manifests: the values of the manifest tree, in key order.
         let mut want_content = Vec::new();
         let tree = crate::store_io::to_id(&at(root_rec::MANIFEST_DATA));
@@ -3918,7 +3993,7 @@ mod tests {
         let (nodes, content) = referenced(&mut io, &root).unwrap();
         assert_eq!(nodes, want);
         assert_eq!(content, want_content);
-        assert!(want.len() > 3 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
+        assert!(want.len() > 2 * (100 / MAP_ENTRY) && want_content.len() > 100 / KEY_BYTES, "many windows");
         // The tree nodes come apart from the file values (`Ref::Tree`).
         let mut trees = Vec::new();
         for_each_referenced(&mut io, &root, &mut |r, k| {
@@ -3939,6 +4014,12 @@ mod tests {
         let xi = trees.iter().position(|k| *k == xattrs).expect("the xattr tree is in the tree nodes");
         assert!(trees.iter().position(|k| *k == refcounts).unwrap() < xi, "manifest, refcounts, then xattrs");
         assert!(!nodes.contains(&xattrs));
+        // The inode tree last: its nodes are tree nodes, its records inline.
+        let inodes = at(root_rec::INODE_DATA);
+        assert_eq!(prolly::count(&prolly::Ctx::uncached(&cs), &crate::store_io::to_id(&inodes)).unwrap(), 41);
+        let ii = trees.iter().position(|k| *k == inodes).expect("the inode tree is in the tree nodes");
+        assert!(xi < ii, "manifest, refcounts, xattrs, then inodes");
+        assert!(!nodes.contains(&inodes), "and not a file value");
         // A bad xattr leaf entry is corrupt.
         assert!(xattr_leaf(&[1, 2, 3], &[0]).is_err(), "short key");
         assert!(xattr_leaf(&[0; 9], &[2]).is_err(), "bad tag");
@@ -4089,7 +4170,8 @@ mod tests {
             assert!(store.manifest.dirty() > 0, "{fault:?}: the manifest overlay is dirty again");
             assert!(store.refcounts.dirty() > 0, "{fault:?}: the refcount overlay is dirty again");
             assert!(store.xattrs.dirty() > 0, "{fault:?}: the xattr overlay is dirty again");
-            assert!(store.inode_live.dirty() > 0 && store.dir_live.dirty() > 0, "{fault:?}");
+            assert!(store.inodes.dirty() > 0, "{fault:?}: the inode overlay is dirty again");
+            assert!(store.dir_live.dirty() > 0, "{fault:?}");
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}: flushes may run again");
             // The state is still readable.
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)]);
@@ -4148,6 +4230,7 @@ mod tests {
             assert_eq!(store.manifest.dirty(), 0, "{fault:?}: the edits are in the tree");
             assert_eq!(store.refcounts.dirty(), 0, "{fault:?}: the counts are in the tree");
             assert_eq!(store.xattrs.dirty(), 0, "{fault:?}: the xattrs are in the tree");
+            assert_eq!(store.inodes.dirty(), 0, "{fault:?}: the inodes are in the tree");
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)], "{fault:?}");
             assert!(store.get_manifest(files[11]).is_err(), "{fault:?}");
 
