@@ -18,6 +18,10 @@
 //!   A refcount change (read-modify-write) holds one `refcounts` overlay
 //!   shard only for its check and edit (`MapTree::modify`); its tree read
 //!   runs with no lock held.
+//!   An xattr call holds one `xattrs` overlay shard (the shard of its
+//!   inode) only to read or write one edit, or to copy the pending keys of
+//!   the inode for a scan (`MapTree::scan_keys`); the tree reads, the spill
+//!   of a large value and its ranged reads run with no lock held.
 //!   The test flush hook of a tree (`pmap`, `Rank::Store`) is a leaf: it is
 //!   cloned out and called with no tree lock held.
 //!   The commit stats lock (`last_stats`, `Rank::Store`, untimed) is a leaf: it
@@ -25,6 +29,7 @@
 //!   `last_commit_stats`; no other store-rank lock and no I/O runs under it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
 
 use chunk_store::lock_stats::{self, Site};
@@ -43,8 +48,7 @@ use crate::inode::{intern_inode, load_inode};
 use crate::inode_alloc::InodeAlloc;
 use crate::directory::{create_dir_entries, DirList};
 use crate::manifest::{intern_manifest, load_manifest};
-use crate::xattr::{intern_xattrs, load_xattrs, set_xattr_entry, get_xattr_entry,
-                   list_xattr_names, remove_xattr_entry};
+use crate::xattr::{fits_inline, xattr_range, XattrKey, XattrValue};
 
 // S_IFDIR bit mask (POSIX directory type)
 const S_IFMT: u32 = 0o0_170_000;
@@ -361,10 +365,12 @@ pub struct PreparedCommit<'a> {
     /// The manifest tree at the cut and the edits taken from its overlay.
     manifest_root: chunk_store::ObjectId,
     manifest: Taken<u64, ObjectKey>,
-    xattr_data: BTreeMap<u64, ObjectKey>,
     /// The refcount tree at the cut and the edits taken from its overlay.
     refcount_root: chunk_store::ObjectId,
     refcounts: Taken<ObjectKey, u64>,
+    /// The xattr tree at the cut and the edits taken from its overlay.
+    xattr_root: chunk_store::ObjectId,
+    xattrs: Taken<XattrKey, XattrValue>,
     logical_bytes: u64,
     inode_count: u64,
     snapshots: Vec<SnapshotEntry>,
@@ -456,8 +462,11 @@ pub struct DictMetadataStore {
     /// skip, so no edit after the cut reaches the committed roots. Read and
     /// written under `apply_lock`.
     prepared: AtomicBool,
-    /// Maps inode number → xattr set `ObjectKey` (only for inodes with xattrs).
-    xattr_data: sync::Mutex<BTreeMap<u64, ObjectKey>>,
+    /// The xattrs, one entry per name: a prolly tree (key: the ino, 8 bytes
+    /// big endian, then the name bytes; value: a tag, then the value inline
+    /// or the key of a spilled value, see `xattr`) and an overlay sharded by
+    /// the ino. Its locks are timed as `Site::XattrData`.
+    xattrs: MapTree<XattrKey, XattrValue>,
     /// Called in `commit()` after the metadata objects are synced and before
     /// the root is logged: makes the file content (chunk store) durable.
     pre_root_sync: sync::Mutex<Option<PreRootSync>>,
@@ -570,7 +579,7 @@ impl DictMetadataStore {
             trees,
             apply_lock: lk(()),
             prepared: AtomicBool::new(false),
-            xattr_data: lk(BTreeMap::new()).timed(Site::XattrData),
+            xattrs: MapTree::new("xattr_data", Site::XattrData, empty),
             pre_root_sync: lk(None),
             refcounts: MapTree::new("refcounts", Site::Refcounts, empty),
             logical_bytes: AtomicU64::new(0),
@@ -1209,6 +1218,7 @@ impl DictMetadataStore {
         if !trees_installed {
             self.manifest.requeue();
             self.refcounts.requeue();
+            self.xattrs.requeue();
             self.end_prepared();
         }
         self.inode_live.requeue();
@@ -1228,19 +1238,22 @@ impl DictMetadataStore {
     /// commit.
     fn flush_trees(&self) {
         let limit = self.tree_flush.load(Ordering::Relaxed);
-        if self.manifest.dirty() < limit && self.refcounts.dirty() < limit {
+        if self.manifest.dirty() < limit && self.refcounts.dirty() < limit && self.xattrs.dirty() < limit {
             return;
         }
         let Some(apply) = self.apply_lock.try_lock() else { return };
         if self.prepared.load(Ordering::Relaxed) {
             return;
         }
-        let mut results = Vec::with_capacity(2);
+        let mut results = Vec::with_capacity(3);
         if self.manifest.dirty() >= limit {
             results.push(self.manifest.flush(&self.trees, &apply));
         }
         if self.refcounts.dirty() >= limit {
             results.push(self.refcounts.flush(&self.trees, &apply));
+        }
+        if self.xattrs.dirty() >= limit {
+            results.push(self.xattrs.flush(&self.trees, &apply));
         }
         for r in results {
             match r {
@@ -1301,7 +1314,7 @@ impl DictMetadataStore {
         let inode_data = self.inode_data.lock().clone();
         let dir_data = self.dir_data.lock().clone();
         let (refcount_root, refcounts) = self.refcounts.take_for_commit();
-        let xattr_data = self.xattr_data.lock().clone();
+        let (xattr_root, xattrs) = self.xattrs.take_for_commit();
         Ok(PreparedCommit {
             _serial: serial,
             store: self,
@@ -1316,9 +1329,10 @@ impl DictMetadataStore {
             dir_data,
             manifest_root,
             manifest,
-            xattr_data,
             refcount_root,
             refcounts,
+            xattr_root,
+            xattrs,
             logical_bytes: self.logical_bytes.load(Ordering::Relaxed),
             inode_count: self.inode_count.load(Ordering::Relaxed),
             snapshots: self.list_snapshots(),
@@ -1368,6 +1382,7 @@ impl DictMetadataStore {
         // since the cut, so the cut roots are still the working roots).
         let (manifest_root, manifest_apply) = self.manifest.apply_batch(&self.trees, &p.manifest_root, &p.manifest)?;
         let (refcount_root, refcount_apply) = self.refcounts.apply_batch(&self.trees, &p.refcount_root, &p.refcounts)?;
+        let (xattr_root, xattr_apply) = self.xattrs.apply_batch(&self.trees, &p.xattr_root, &p.xattrs)?;
         let tree_stats = |name: &'static str, root: &chunk_store::ObjectId, apply: prolly::ApplyStats| {
             let ctx = self.trees.ctx();
             let tree_err = |e| crate::pmap::tree_err(name, e);
@@ -1380,9 +1395,10 @@ impl DictMetadataStore {
         };
         let manifest_stats = tree_stats("manifest_data", &manifest_root, manifest_apply)?;
         let refcount_stats = tree_stats("refcounts", &refcount_root, refcount_apply)?;
+        let xattr_stats = tree_stats("xattr_data", &xattr_root, xattr_apply)?;
         self.injected_fault(CommitFault::AfterApply)?;
         let manifest_data_digest = crate::store_io::to_key(manifest_root);
-        let xattr_data_digest = intern_u64_digest_map(&mut w, &p.xattr_data);
+        let xattr_data_digest = crate::store_io::to_key(xattr_root);
         let refcount_data_digest = crate::store_io::to_key(refcount_root);
 
         let mut root_bytes = Vec::with_capacity(root_rec::SIZE);
@@ -1407,6 +1423,7 @@ impl DictMetadataStore {
             let apply = self.apply_lock.lock();
             self.manifest.install_and_settle(manifest_root, &p.manifest, &apply);
             self.refcounts.install_and_settle(refcount_root, &p.refcounts, &apply);
+            self.xattrs.install_and_settle(xattr_root, &p.xattrs, &apply);
             p.installed = true;
             self.prepared.store(false, Ordering::Relaxed);
         }
@@ -1476,7 +1493,7 @@ impl DictMetadataStore {
         // Update last_root so background GC can use it
         *self.last_root.lock() = Some(root_digest);
         self.committed_changes.store(p.changes, Ordering::Relaxed);
-        let trees = vec![manifest_stats, refcount_stats];
+        let trees = vec![manifest_stats, refcount_stats, xattr_stats];
         let stats = CommitStats {
             nodes_read: trees.iter().map(|t| t.apply.nodes_read).sum(),
             nodes_written: trees.iter().map(|t| t.apply.nodes_written).sum::<u64>() + 1,
@@ -1659,30 +1676,72 @@ impl DictMetadataStore {
         Ok(())
     }
 
-    /// Change the xattr set of `ino` with `f`: the set is read and stored
-    /// with no lock held; the new digest goes in only if the old one is
-    /// still current (else `f` runs again on the newer set), so a change
-    /// that ran meanwhile is not lost.
-    fn change_xattrs(
-        &self,
-        ino: InodeId,
-        mut f: impl FnMut(&mut Vec<(String, Vec<u8>)>) -> Result<(), MetaError>,
-    ) -> Result<(), MetaError> {
-        loop {
-            let old = self.xattr_data.lock().get(&ino).copied();
-            let mut xattrs = match old {
-                Some(d) => load_xattrs(&mut self.reader(), &d)?,
-                None => vec![],
-            };
-            f(&mut xattrs)?;
-            let mut w = self.writer();
-            let new = intern_xattrs(&mut w, &xattrs);
-            self.kept(w);
-            let mut map = self.xattr_data.lock();
-            if map.get(&ino).copied() == old {
-                map.insert(ino, new);
-                return Ok(());
+    /// The entry of the xattr `name` of `ino`: the overlay, then the tree
+    /// (one path of nodes). A name that `xattr::check_name` refuses is an
+    /// error (it can have no entry, and its key could exceed `MAX_KEY`).
+    fn xattr_entry(&self, ino: InodeId, name: &str) -> Result<XattrValue, MetaError> {
+        crate::xattr::check_name(name)?;
+        self.xattrs.read(&self.trees, &XattrKey::new(ino, name))?.ok_or(MetaError::NotFound(ino))
+    }
+
+    /// The length of the xattr `name` of `ino` (a size query), from its
+    /// entry (inline) or the manifest root of its value (spilled): no value
+    /// byte is read. Memory: one path of tree nodes and one manifest node.
+    /// An absent name is `MetaError::NotFound(ino)`.
+    pub fn xattr_len(&self, ino: InodeId, name: &str) -> Result<u64, MetaError> {
+        let v = self.xattr_entry(ino, name)?;
+        crate::xattr::value_len(&self.cs, &v)
+    }
+
+    /// Up to `size` bytes of the xattr `name` of `ino` from `offset` (fewer
+    /// at the end, none past it). A spilled value reads only the manifest
+    /// nodes and chunks of the range. Memory: the bytes asked for, one path
+    /// of tree nodes and the reader of the range. An absent name is
+    /// `MetaError::NotFound(ino)`.
+    pub fn read_xattr(&self, ino: InodeId, name: &str, offset: u64, size: usize) -> Result<Vec<u8>, MetaError> {
+        let v = self.xattr_entry(ino, name)?;
+        crate::xattr::read_range(&self.cs, &v, offset, size)
+    }
+
+    /// Call `f` with each xattr name of `ino` in name byte order, streamed
+    /// from a range scan of `ino BE .. (ino + 1) BE` merged with the pending
+    /// edits (`MapTree::scan_keys`); `Break` stops it. Memory: the pending
+    /// keys of the inode and one path of tree nodes, never a list of names.
+    pub fn for_each_xattr_name(&self, ino: InodeId, f: &mut dyn FnMut(&str) -> ControlFlow<()>) -> Result<(), MetaError> {
+        let (start, end) = xattr_range(ino);
+        let mut bad = None;
+        self.xattrs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &start, end.as_deref(), &mut |k| {
+            match crate::xattr::name_of(k) {
+                Ok(n) => f(n),
+                Err(e) => {
+                    bad = Some(e);
+                    ControlFlow::Break(())
+                }
             }
+        })?;
+        bad.map_or(Ok(()), Err)
+    }
+
+    /// Delete every xattr of `ino`, pending and in the tree: scans of at
+    /// most `tree_flush` keys from a resume key, a delete for each, a flush
+    /// between them; no lock is held across a scan.
+    fn delete_xattrs(&self, ino: InodeId) -> Result<(), MetaError> {
+        let (mut from, end) = xattr_range(ino);
+        let batch = self.tree_flush.load(Ordering::Relaxed).max(1);
+        loop {
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            self.xattrs.scan_keys(&self.trees, crate::pmap::shard_of(ino), &from, end.as_deref(), &mut |k| {
+                keys.push(k.to_vec());
+                if keys.len() >= batch { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+            })?;
+            let Some(last) = keys.last() else { return Ok(()) };
+            // The next scan starts just after the last key.
+            from = last.clone();
+            from.push(0);
+            for k in &keys {
+                self.xattrs.write(XattrKey::from_encoded(k)?, None);
+            }
+            self.flush_trees();
         }
     }
 }
@@ -1724,7 +1783,7 @@ impl MetadataStore for DictMetadataStore {
         // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
         // would keep the deleted content reachable (never garbage-collected).
         self.manifest.write(ino, None);
-        self.xattr_data.lock().remove(&ino);
+        self.delete_xattrs(ino)?;
         {
             let mut live = self.dir_live.lock(ino);
             live.remove(ino);
@@ -1797,37 +1856,48 @@ impl MetadataStore for DictMetadataStore {
         load_manifest(&mut self.reader(), &digest)
     }
 
+    /// A blind put of one entry (no read-modify-write; the file system
+    /// orders the calls of one inode with its stripe). A value that does not
+    /// fit the leaf entry is spilled first, with no lock held: the commit
+    /// syncs the chunk store before the root that refers to it is logged.
     fn set_xattr(&self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), MetaError> {
-        self.changes.fetch_add(1, Ordering::Relaxed);
-        self.change_xattrs(ino, |xattrs| {
-            set_xattr_entry(xattrs, name, value);
-            Ok(())
-        })
-    }
-
-    fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
-        let digest = self.xattr_data.lock().get(&ino).copied().ok_or(MetaError::NotFound(ino))?;
-        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
-        get_xattr_entry(&xattrs, name).ok_or(MetaError::NotFound(ino))
-    }
-
-    fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
-        let digest = match self.xattr_data.lock().get(&ino).copied() {
-            Some(d) => d,
-            None => return Ok(vec![]),
+        crate::xattr::check_name(name)?;
+        let v = if fits_inline(name.len(), value.len()) {
+            XattrValue::Inline(value.to_vec())
+        } else {
+            XattrValue::Spilled(crate::xattr::spill(&self.cs, value)?)
         };
-        let xattrs = load_xattrs(&mut self.reader(), &digest)?;
-        Ok(list_xattr_names(&xattrs))
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.xattrs.write(XattrKey::new(ino, name), Some(v));
+        self.flush_trees();
+        Ok(())
+    }
+
+    /// The whole value (the trait returns it). One entry read, then the
+    /// value of that same entry; the file system uses the bounded calls
+    /// (`xattr_len`, `read_xattr`, plan 26-16).
+    fn get_xattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, MetaError> {
+        let v = self.xattr_entry(ino, name)?;
+        crate::xattr::read_range(&self.cs, &v, 0, usize::MAX)
+    }
+
+    /// The names of `ino` in name byte order (a list: the file system uses
+    /// `for_each_xattr_name`).
+    fn list_xattrs(&self, ino: InodeId) -> Result<Vec<String>, MetaError> {
+        let mut out = Vec::new();
+        self.for_each_xattr_name(ino, &mut |n| {
+            out.push(n.to_string());
+            ControlFlow::Continue(())
+        })?;
+        Ok(out)
     }
 
     fn remove_xattr(&self, ino: InodeId, name: &str) -> Result<(), MetaError> {
+        self.xattr_entry(ino, name)?;
         self.changes.fetch_add(1, Ordering::Relaxed);
-        if !self.xattr_data.lock().contains_key(&ino) {
-            return Err(MetaError::NotFound(ino));
-        }
-        self.change_xattrs(ino, |xattrs| {
-            if remove_xattr_entry(xattrs, name) { Ok(()) } else { Err(MetaError::NotFound(ino)) }
-        })
+        self.xattrs.write(XattrKey::new(ino, name), None);
+        self.flush_trees();
+        Ok(())
     }
 
     fn root_ino(&self) -> InodeId {
@@ -1841,15 +1911,12 @@ impl MetadataStore for DictMetadataStore {
     }
 }
 
-/// Roots of every stored object that the metadata at `root` reads back: the
-/// root record, its maps, each inode, directory list and xattr set, each file
-/// manifest, and each file root in the manifests. The GC mark phase (#25)
-/// walks the object tree of each of them.
-/// The metadata nodes that the root record `root` refers to, each a file
-/// value: the record itself and its flat maps, the inode, directory and
-/// xattr nodes, and the manifest nodes. The nodes of the map trees are not
-/// file values and are not here (see [`tree_nodes`]); nor are file content
-/// keys (see [`content_keys`]).
+/// The metadata values that the root record `root` refers to, each a file
+/// value: the record itself and its flat maps, the inode and directory
+/// nodes, the manifest nodes and the spilled xattr values (metadata, with no
+/// refcount). The nodes of the map trees are not file values and are not
+/// here (see [`tree_nodes`]); nor are file content keys (see
+/// [`content_keys`]). The GC mark phase (#25) walks the object tree of each.
 pub fn referenced_roots(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
@@ -1900,8 +1967,13 @@ pub fn tree_nodes(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> 
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
     let mut out = Vec::new();
-    // The order of `for_each_referenced`: the manifest tree, then the refcounts.
-    for (name, o) in [("manifest_data", root_rec::MANIFEST_DATA), ("refcounts", root_rec::REFCOUNTS)] {
+    // The order of `for_each_referenced`: the manifest tree, the refcounts,
+    // then the xattrs.
+    for (name, o) in [
+        ("manifest_data", root_rec::MANIFEST_DATA),
+        ("refcounts", root_rec::REFCOUNTS),
+        ("xattr_data", root_rec::XATTR_DATA),
+    ] {
         walk_tree(cs, name, &at(o), &mut |id| {
             out.push(id);
             Ok(())
@@ -1967,10 +2039,26 @@ fn refcount_leaf(k: &[u8], v: &[u8]) -> Result<(), MetaError> {
     Ok(())
 }
 
+/// The spilled value key of a leaf entry of the xattr tree, if any (a key
+/// of at least 9 bytes and a value that `XattrValue::decode` takes, else
+/// corrupt).
+fn xattr_leaf(k: &[u8], v: &[u8]) -> Result<Option<ObjectKey>, MetaError> {
+    use crate::pmap::TreeValue;
+    if k.len() < 9 {
+        return Err(MetaError::Corrupted(format!("xattr_data tree: entry of a {}-byte key", k.len())));
+    }
+    match XattrValue::decode(v).map_err(|m| MetaError::Corrupted(format!("xattr_data tree: {m}")))? {
+        XattrValue::Spilled(key) => Ok(Some(key)),
+        XattrValue::Inline(_) => Ok(None),
+    }
+}
+
 /// Call `f` with each key that the root record `root` refers to, without a
 /// list of them (the GC mark, #207). A key can come more than once. The
 /// map and manifest nodes are read in windows of [`WALK_WINDOW`] bytes of
-/// whole entries, never whole: RAM does not grow with the entry count.
+/// whole entries, never whole, and the trees with one path of nodes: RAM
+/// does not grow with the entry count. The tree nodes are `Ref::Tree`; a
+/// spilled xattr value is `Ref::Node` (its manifest nodes and chunks).
 pub(crate) fn for_each_referenced(
     io: &mut impl crate::store_io::NodeRead,
     root: &ObjectKey,
@@ -1979,14 +2067,13 @@ pub(crate) fn for_each_referenced(
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let (inodes, dirs, manifests, xattrs) = (
-        at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
-        at(root_rec::MANIFEST_DATA), at(root_rec::XATTR_DATA),
+    let (inodes, dirs, manifests) = (
+        at(root_rec::INODE_DATA), at(root_rec::DIR_DATA), at(root_rec::MANIFEST_DATA),
     );
-    for k in [*root, inodes, dirs, xattrs] {
+    for k in [*root, inodes, dirs] {
         f(Ref::Node, k)?;
     }
-    for map in [inodes, dirs, xattrs] {
+    for map in [inodes, dirs] {
         for_each_map_value(cs, &map, &mut |k| f(Ref::Node, k))?;
     }
     // The manifest tree: its nodes, and per leaf entry the manifest node and
@@ -2000,24 +2087,31 @@ pub(crate) fn for_each_referenced(
     })?;
     // The refcount tree: its nodes only (a counted content key is not a
     // reference; the manifests give the live content).
-    let f = f.into_inner();
-    walk_tree(cs, "refcounts", &at(root_rec::REFCOUNTS), &mut |id| f(Ref::Tree, id), &mut refcount_leaf)
+    walk_tree(cs, "refcounts", &at(root_rec::REFCOUNTS), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut refcount_leaf)?;
+    // The xattr tree: its nodes, and each spilled value.
+    walk_tree(cs, "xattr_data", &at(root_rec::XATTR_DATA), &mut |id| (f.borrow_mut())(Ref::Tree, id), &mut |k, v| {
+        match xattr_leaf(k, v)? {
+            Some(key) => (f.borrow_mut())(Ref::Node, key),
+            None => Ok(()),
+        }
+    })
 }
 
 /// About how many keys [`for_each_referenced`] gives to the sorter for
 /// `root` (tree nodes go straight to the live set), from the sizes of its
-/// maps (no map is read whole): the 4 file-value nodes of the root (the
-/// root record and its flat maps), one key per map entry, and for each
-/// entry of the manifest tree (`prolly::count`, the
-/// root node only) its manifest and one content key (a file with more
-/// extents gives more). For the temp space check of the GC mark.
+/// maps (no map is read whole): the 3 file-value nodes of the root (the
+/// root record and its flat maps), one key per map entry, for each entry
+/// of the manifest tree (`prolly::count`, the root node only) its manifest
+/// and one content key (a file with more extents gives more), and at most
+/// one spilled value per entry of the xattr tree. For the temp space check
+/// of the GC mark.
 pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root: &ObjectKey) -> Result<u64, MetaError> {
     const WHAT: &str = "u64-digest map node";
     let cs = io.chunk_store();
     let bytes = read_root(cs, root)?;
     let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-    let mut keys = 4u64;
-    for off in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
+    let mut keys = 3u64;
+    for off in [root_rec::INODE_DATA, root_rec::DIR_DATA] {
         let key = at(off);
         let r = chunk_store::file::FileReader::open(cs, crate::store_io::to_id(&key))
             .map_err(|e| crate::store_io::node_err(WHAT, &key, e))?;
@@ -2025,7 +2119,9 @@ pub(crate) fn referenced_estimate(io: &mut impl crate::store_io::NodeRead, root:
     }
     let manifests = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::MANIFEST_DATA)))
         .map_err(|e| crate::pmap::tree_err("manifest_data", e))?;
-    Ok(keys.saturating_add(manifests.saturating_mul(2)))
+    let xattrs = prolly::count(&prolly::Ctx::uncached(cs), &crate::store_io::to_id(&at(root_rec::XATTR_DATA)))
+        .map_err(|e| crate::pmap::tree_err("xattr_data", e))?;
+    Ok(keys.saturating_add(manifests.saturating_mul(2)).saturating_add(xattrs))
 }
 
 /// Bytes of a map or manifest node that [`for_each_referenced`] reads at a
@@ -2190,8 +2286,8 @@ impl DictMetadataStore {
     /// Reconstruct a `DictMetadataStore` from the node store and a root key
     /// previously returned by `commit()`.
     ///
-    /// Restores the in-memory maps (inode_data, dir_data, xattr_data) and the
-    /// working roots of the manifest and refcount trees
+    /// Restores the in-memory maps (inode_data, dir_data) and the
+    /// working roots of the manifest, refcount and xattr trees
     /// and inode numbering state so that subsequent operations continue seamlessly.
     pub fn load_from_root(io: Arc<Mutex<StoreIo>>, root: &ObjectKey) -> Result<Self, MetaError> {
         let mut io_guard = lock_stats::lock(&io, Site::Io);
@@ -2220,7 +2316,6 @@ impl DictMetadataStore {
 
         let inode_data = load_u64_digest_map(&mut *io_guard, &inode_data_digest)?;
         let dir_data = load_u64_digest_map(&mut *io_guard, &dir_data_digest)?;
-        let xattr_data = load_u64_digest_map(&mut *io_guard, &xattr_data_digest)?;
 
         // Sanity: root directory inode must exist
         if !inode_data.contains_key(&root_dir_ino) {
@@ -2252,7 +2347,8 @@ impl DictMetadataStore {
             trees,
             apply_lock: lk(()),
             prepared: AtomicBool::new(false),
-            xattr_data: lk(xattr_data).timed(Site::XattrData),
+            // The working root; no xattr is read here.
+            xattrs: MapTree::new("xattr_data", Site::XattrData, crate::store_io::to_id(&xattr_data_digest)),
             pre_root_sync: lk(None),
             refcounts: MapTree::new("refcounts", Site::Refcounts, crate::store_io::to_id(&refcount_data_digest)),
             logical_bytes: AtomicU64::new(initial_logical_bytes),
@@ -2395,6 +2491,104 @@ mod tests {
         store.unlink(1, "d").unwrap();
         store.delete_inode(d).unwrap();
         assert!(store.list_directory(d).is_err());
+    }
+
+    /// The stored form of the xattr `name` of `ino` (overlay, then tree).
+    fn xattr_form(store: &DictMetadataStore, ino: u64, name: &str) -> Option<XattrValue> {
+        store.xattrs.read(&store.trees, &XattrKey::new(ino, name)).unwrap()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn a_value_that_fits_is_inline_and_a_larger_one_spills() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        let mut want = Vec::new();
+        for n in [1usize, 255] {
+            let fits = prolly::MAX_ENTRY - 13 - n;
+            for (name, len) in [("a".repeat(n), fits), ("b".repeat(n), fits + 1)] {
+                let v: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+                store.set_xattr(ino, &name, &v).unwrap();
+                want.push((name, v));
+            }
+        }
+        let check = |store: &DictMetadataStore| {
+            for (name, v) in &want {
+                let inline = name.starts_with('a');
+                match xattr_form(store, ino, name).unwrap() {
+                    XattrValue::Inline(b) => assert!(inline && b == *v, "{} bytes inline", v.len()),
+                    XattrValue::Spilled(_) => assert!(!inline, "{} bytes spilled", v.len()),
+                }
+                assert_eq!(store.get_xattr(ino, name).unwrap(), *v);
+                assert_eq!(store.xattr_len(ino, name).unwrap(), v.len() as u64);
+            }
+        };
+        check(&store);
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        check(&reloaded);
+        // A short value over a spilled one is inline.
+        let big = "b".to_string();
+        reloaded.set_xattr(ino, &big, b"short").unwrap();
+        assert_eq!(xattr_form(&reloaded, ino, &big), Some(XattrValue::Inline(b"short".to_vec())));
+        assert_eq!(reloaded.get_xattr(ino, &big).unwrap(), b"short");
+        // Names the checks refuse.
+        assert!(matches!(store.set_xattr(ino, "", b"v"), Err(MetaError::InvalidName(_))));
+        assert!(matches!(store.set_xattr(ino, &"n".repeat(256), b"v"), Err(MetaError::NameTooLong(256))));
+        assert!(store.get_xattr(ino, &"n".repeat(2000)).is_err(), "no key above MAX_KEY");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn an_offset_read_reads_the_range() {
+        let (_d, store) = make_store();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        let big: Vec<u8> = (0..100u32 << 10).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let small: Vec<u8> = (0..50u8).collect();
+        store.set_xattr(ino, "user.big", &big).unwrap();
+        store.set_xattr(ino, "user.small", &small).unwrap();
+        assert!(matches!(xattr_form(&store, ino, "user.big"), Some(XattrValue::Spilled(_))));
+        for (name, v) in [("user.big", &big), ("user.small", &small)] {
+            let n = v.len();
+            assert_eq!(store.xattr_len(ino, name).unwrap(), n as u64);
+            assert_eq!(store.read_xattr(ino, name, 0, 16).unwrap(), &v[..16]);
+            assert_eq!(store.read_xattr(ino, name, (n / 2) as u64, 20).unwrap(), &v[n / 2..n / 2 + 20]);
+            assert_eq!(store.read_xattr(ino, name, (n - 5) as u64, 100).unwrap(), &v[n - 5..], "short");
+            assert!(store.read_xattr(ino, name, n as u64 + 1, 10).unwrap().is_empty(), "past the end");
+        }
+        assert!(matches!(store.xattr_len(ino, "user.none"), Err(MetaError::NotFound(i)) if i == ino));
+        assert!(matches!(store.read_xattr(ino, "user.none", 0, 1), Err(MetaError::NotFound(_))));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support the punch-hole probe of FileIo (fallocate, fcntl F_PUNCHHOLE)")]
+    fn delete_inode_drops_pending_and_tree_xattrs() {
+        let (_d, store) = make_store();
+        let before = store.create_inode(&new_file_meta()).unwrap();
+        let ino = store.create_inode(&new_file_meta()).unwrap();
+        let after = store.create_inode(&new_file_meta()).unwrap();
+        for n in [before, after] {
+            for i in 0..3 {
+                store.set_xattr(n, &format!("user.n{i}"), b"keep").unwrap();
+            }
+        }
+        // 30 names: past TREE_FLUSH (8), so some are in the tree.
+        for i in 0..30 {
+            store.set_xattr(ino, &format!("user.x{i:02}"), &[i as u8; 10]).unwrap();
+        }
+        assert!(store.xattrs.dirty() < 30, "flushes ran");
+        assert_eq!(store.list_xattrs(ino).unwrap().len(), 30);
+        store.delete_inode(ino).unwrap();
+        let names = |s: &DictMetadataStore, n: u64| s.list_xattrs(n).unwrap();
+        assert!(names(&store, ino).is_empty());
+        let three: Vec<String> = (0..3).map(|i| format!("user.n{i}")).collect();
+        assert_eq!(names(&store, before), three);
+        assert_eq!(names(&store, after), three);
+        let root = store.commit().unwrap();
+        let reloaded = DictMetadataStore::load_from_root(Arc::clone(store.io()), &root).unwrap();
+        assert!(names(&reloaded, ino).is_empty());
+        assert_eq!(names(&reloaded, before), three);
+        assert_eq!(names(&reloaded, after), three);
     }
 
     #[test]
@@ -3685,6 +3879,10 @@ mod tests {
             if i % 3 == 0 {
                 store.set_xattr(ino, "user.a", b"x").unwrap();
             }
+            if i % 5 == 0 {
+                // A spilled value: a file value of the xattr tree.
+                store.set_xattr(ino, "user.big", &vec![i as u8; 3000]).unwrap();
+            }
             for p in &parts {
                 store.increment_refcount(p);
             }
@@ -3694,9 +3892,8 @@ mod tests {
         // The keys of whole-node loads, as the mark had them before #207.
         let bytes = io.get_node(&root).unwrap();
         let at = |o: usize| parse_key(&bytes[o..o + KEY_BYTES]);
-        let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA),
-                            at(root_rec::XATTR_DATA)];
-        for o in [root_rec::INODE_DATA, root_rec::DIR_DATA, root_rec::XATTR_DATA] {
+        let mut want = vec![root, at(root_rec::INODE_DATA), at(root_rec::DIR_DATA)];
+        for o in [root_rec::INODE_DATA, root_rec::DIR_DATA] {
             want.extend(load_u64_digest_map(&mut io, &at(o)).unwrap().into_values());
         }
         // The manifests: the values of the manifest tree, in key order.
@@ -3708,6 +3905,16 @@ mod tests {
             want.push(m);
             want_content.extend(load_manifest(&mut io, &m).unwrap());
         }
+        // Then the spilled xattr values, in key order.
+        let xattr_tree = crate::store_io::to_id(&at(root_rec::XATTR_DATA));
+        let mut spilled = 0;
+        for e in prolly::iter(&cs, &xattr_tree).unwrap() {
+            if let XattrValue::Spilled(k) = <XattrValue as crate::pmap::TreeValue>::decode(&e.unwrap().1).unwrap() {
+                want.push(k);
+                spilled += 1;
+            }
+        }
+        assert_eq!(spilled, 8, "one per fifth file");
         let (nodes, content) = referenced(&mut io, &root).unwrap();
         assert_eq!(nodes, want);
         assert_eq!(content, want_content);
@@ -3727,6 +3934,15 @@ mod tests {
         assert!(prolly::count(&prolly::Ctx::uncached(&cs), &crate::store_io::to_id(&refcounts)).unwrap() > 100);
         assert!(trees.contains(&refcounts), "the refcount tree is in the tree nodes");
         assert!(!nodes.contains(&refcounts), "and not a file value");
+        // The xattr tree root too, after the refcount tree nodes.
+        let xattrs = at(root_rec::XATTR_DATA);
+        let xi = trees.iter().position(|k| *k == xattrs).expect("the xattr tree is in the tree nodes");
+        assert!(trees.iter().position(|k| *k == refcounts).unwrap() < xi, "manifest, refcounts, then xattrs");
+        assert!(!nodes.contains(&xattrs));
+        // A bad xattr leaf entry is corrupt.
+        assert!(xattr_leaf(&[1, 2, 3], &[0]).is_err(), "short key");
+        assert!(xattr_leaf(&[0; 9], &[2]).is_err(), "bad tag");
+        assert_eq!(xattr_leaf(&[0; 9], &[0, 1]).unwrap(), None);
 
         // A map node whose count does not fit its length is refused.
         let mut bad = 3u64.to_le_bytes().to_vec();
@@ -3863,12 +4079,16 @@ mod tests {
             store.increment_refcount(&rc_a);
             store.increment_refcount(&rc_a);
             store.increment_refcount(&rc_b);
+            // An inline and a spilled xattr.
+            store.set_xattr(files[3], "user.small", b"inline").unwrap();
+            store.set_xattr(files[4], "user.big", &vec![9u8; 3000]).unwrap();
 
             store.test_fail_next_commit_at(fault);
             assert!(store.commit().is_err(), "{fault:?}");
             assert!(store.has_uncommitted_changes(), "{fault:?}");
             assert!(store.manifest.dirty() > 0, "{fault:?}: the manifest overlay is dirty again");
             assert!(store.refcounts.dirty() > 0, "{fault:?}: the refcount overlay is dirty again");
+            assert!(store.xattrs.dirty() > 0, "{fault:?}: the xattr overlay is dirty again");
             assert!(store.inode_live.dirty() > 0 && store.dir_live.dirty() > 0, "{fault:?}");
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}: flushes may run again");
             // The state is still readable.
@@ -3890,6 +4110,8 @@ mod tests {
             assert_eq!(re.get_manifest(new).unwrap(), vec![mkey(new, 1)], "{fault:?}");
             assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
             assert_eq!((re.get_refcount(&rc_a), re.get_refcount(&rc_b)), (2, 1), "{fault:?}");
+            assert_eq!(re.get_xattr(files[3], "user.small").unwrap(), b"inline", "{fault:?}");
+            assert_eq!(re.get_xattr(files[4], "user.big").unwrap(), vec![9u8; 3000], "{fault:?}");
         }
     }
 
@@ -3916,6 +4138,8 @@ mod tests {
             store.increment_refcount(&rc_a);
             store.increment_refcount(&rc_a);
             store.increment_refcount(&rc_b);
+            store.set_xattr(files[3], "user.small", b"inline").unwrap();
+            store.set_xattr(files[4], "user.big", &vec![9u8; 3000]).unwrap();
 
             store.test_fail_next_commit_at(fault);
             assert!(store.commit().is_err(), "{fault:?}");
@@ -3923,6 +4147,7 @@ mod tests {
             assert!(!store.prepared.load(Ordering::Relaxed), "{fault:?}");
             assert_eq!(store.manifest.dirty(), 0, "{fault:?}: the edits are in the tree");
             assert_eq!(store.refcounts.dirty(), 0, "{fault:?}: the counts are in the tree");
+            assert_eq!(store.xattrs.dirty(), 0, "{fault:?}: the xattrs are in the tree");
             assert_eq!(store.get_manifest(files[0]).unwrap(), vec![mkey(files[0], 1)], "{fault:?}");
             assert!(store.get_manifest(files[11]).is_err(), "{fault:?}");
 
@@ -3938,6 +4163,8 @@ mod tests {
             assert_eq!(re.lookup(1, "new").unwrap(), new, "{fault:?}");
             assert_eq!(re.get_inode(files[7]).unwrap().size, 77, "{fault:?}");
             assert_eq!((re.get_refcount(&rc_a), re.get_refcount(&rc_b)), (2, 1), "{fault:?}");
+            assert_eq!(re.get_xattr(files[3], "user.small").unwrap(), b"inline", "{fault:?}");
+            assert_eq!(re.get_xattr(files[4], "user.big").unwrap(), vec![9u8; 3000], "{fault:?}");
         }
     }
 
