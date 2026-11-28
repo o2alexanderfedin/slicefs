@@ -2290,8 +2290,15 @@ impl SliceFsFilesystem {
         }
         let digest = self.meta.manifest_digest(ino);
         self.readers.lock().remove(&ino);
-        let _ = self.meta.delete_inode(ino);
-        digest
+        match self.meta.delete_inode(ino) {
+            Ok(()) | Err(MetaError::NotFound(_)) => digest,
+            Err(e) => {
+                eprintln!("[{}][FUSE] reclaim of inode {ino}: {e}", ts());
+                // The error came after the delete (leftover entries only):
+                // the content is released. Else the inode keeps it.
+                matches!(self.meta.get_inode(ino), Err(MetaError::NotFound(_))).then_some(digest).flatten()
+            }
+        }
     }
 
     /// Release the content of a reclaimed inode (see `reclaim_inode`): read
@@ -3196,7 +3203,9 @@ impl SliceFsFilesystem {
         let ns = self.ns.lock(&[parent, ino]);
         let linked = self.live_dir(parent).and_then(|()| self.meta.link(parent, name, ino).map_err(|e| meta_error_to_errno(&e)));
         if let Err(e) = linked {
-            let _ = self.meta.delete_inode(ino);
+            if let Err(d) = self.meta.delete_inode(ino) {
+                eprintln!("[{}][FUSE] undo of create {ino}: delete failed: {d}", ts());
+            }
             return Err(e);
         }
         let hook = self.mkdir_hook.lock().clone();

@@ -912,7 +912,9 @@ impl DictMetadataStore {
         self.dirs.write(entry_key(ino, "."), Some(DirValue { ino, kind: KIND_DIR }));
         self.dirs.write(entry_key(ino, ".."), Some(DirValue { ino: parent_ino, kind: KIND_DIR }));
         if let Err(e) = self.add_entry(parent_ino, name, DirValue { ino, kind: KIND_DIR }) {
-            let _ = self.delete_inode(ino);
+            if let Err(d) = self.delete_inode(ino) {
+                tracing::warn!("undo of directory {ino}: delete failed: {d}");
+            }
             return Err(e);
         }
         // The parent gains a link (the ".." of the new directory).
@@ -1584,30 +1586,23 @@ impl MetadataStore for DictMetadataStore {
             None => (None, Err(MetaError::NotFound(ino))),
             Some(m) => (Some(None), Ok((m.size, m.mode))),
         })??;
-        // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
-        // would keep the deleted content reachable (never garbage-collected).
-        self.manifest.write(ino, None);
-        self.delete_xattrs(ino)?;
-        // The entries of a directory (`.` and `..` of an empty one); a file
-        // has none, so its range is not scanned.
-        if mode & S_IFMT == S_IFDIR {
-            self.delete_dir_entries(ino)?;
-        }
-
-        // Decrement logical_bytes by the deleted inode's size.
-        if size > 0 {
-            self.logical_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(size))
-            }).ok();
-        }
-
-        // Decrement inode count (saturating to avoid underflow).
+        // The counts follow the delete at once: the scans below can fail,
+        // and a retry gets `NotFound`.
+        self.add_size(size, 0);
         self.inode_count.try_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
             Some(c.saturating_sub(1))
         }).ok();
+        // Drop every per-inode map entry: a leftover manifest/xattr/dir entry
+        // would keep the deleted content reachable (never garbage-collected).
+        // Both scans run, also when the first fails; an error leaves only
+        // leftover entries of a deleted inode.
+        self.manifest.write(ino, None);
+        let xattrs = self.delete_xattrs(ino);
+        // The entries of a directory (`.` and `..` of an empty one); a file
+        // has none, so its range is not scanned.
+        let entries = if mode & S_IFMT == S_IFDIR { self.delete_dir_entries(ino) } else { Ok(()) };
         self.flush_trees();
-
-        Ok(())
+        xattrs.and(entries)
     }
 
     fn create_directory(
@@ -2288,6 +2283,40 @@ mod tests {
         store.unlink(1, "d").unwrap();
         store.delete_inode(d).unwrap();
         assert!(store.list_directory(d).is_err());
+    }
+
+    // Review 26 A-WR-01: a tree read error in the scans of `delete_inode`
+    // (after the inode is gone) is returned, and the inode and logical-byte
+    // counts still follow the delete.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_failed_delete_scan_still_counts_the_delete() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let mut m = new_file_meta();
+        m.size = 4096;
+        let f = store.create_inode(&m).unwrap();
+        store.set_xattr(f, "user.a", b"x").unwrap();
+        let d = store.create_directory(1, "d", &new_dir_meta()).unwrap();
+        store.unlink(1, "d").unwrap();
+        let root = store.commit().unwrap();
+        // A new store from the root, with an empty node cache.
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", cs)));
+        let store = DictMetadataStore::load_from_root(io, &root).unwrap();
+        let (count, bytes) = (store.inode_count(), store.logical_bytes());
+        for ino in [f, d] {
+            // The inode path is cached; the xattr and dir scans read the disk.
+            store.get_inode(ino).unwrap();
+            mem.set_fail_reads(true);
+            let r = store.delete_inode(ino);
+            mem.set_fail_reads(false);
+            assert!(r.is_err(), "the scan of {ino} failed");
+            assert!(matches!(store.get_inode(ino), Err(MetaError::NotFound(_))), "{ino} is gone");
+        }
+        assert_eq!(store.inode_count(), count - 2);
+        assert_eq!(store.logical_bytes(), bytes - 4096);
     }
 
     /// The stored form of the xattr `name` of `ino` (overlay, then tree).
