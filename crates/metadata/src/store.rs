@@ -253,6 +253,11 @@ pub struct DictMetadataStore {
     /// (`TREE_FLUSH`; tests lower it with `test_set_tree_flush`).
     tree_flush: AtomicUsize,
     put_error: sync::Mutex<Option<std::io::Error>>,
+    /// The first refcount change that a tree read error dropped (never
+    /// cleared): every later commit of this store fails before its install,
+    /// so no root holds the wrong count. A reload replays the write log on
+    /// the last good root, which applies the change again.
+    refcount_error: sync::Mutex<Option<String>>,
     /// Inode-number allocator.
     inode_alloc: sync::Mutex<InodeAlloc>,
     /// The inodes: a prolly tree (key: the ino, 8 bytes big endian; value:
@@ -389,6 +394,7 @@ impl DictMetadataStore {
             unsynced_puts: AtomicU64::new(0),
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(put_error),
+            refcount_error: lk(None),
             inode_alloc: lk(InodeAlloc::new()).timed(Site::InodeAlloc),
             inodes,
             dirs,
@@ -461,8 +467,9 @@ impl DictMetadataStore {
     /// The read-modify-write of a count (the `pmap` protocol): `step` gets
     /// the count of `digest` (0: no entry) and gives the new count, or
     /// `None` to change nothing. A count of 0 is deleted. Gives the new
-    /// count if it changed. A tree read error is logged and kept for the
-    /// next commit (as a hot-path put error); the count does not change.
+    /// count if it changed. A tree read error is logged and the count does
+    /// not change; the error is kept in `refcount_error`, so no later
+    /// commit of this store succeeds.
     fn change_refcount(&self, digest: &ObjectKey, step: impl Fn(u64) -> Option<u64>) -> Option<u64> {
         let mut tree = None;
         loop {
@@ -483,9 +490,9 @@ impl DictMetadataStore {
                 Ok(t) => tree = Some(t),
                 Err(e) => {
                     tracing::warn!("refcount of {digest:?}: {e}");
-                    let mut k = self.put_error.lock();
+                    let mut k = self.refcount_error.lock();
                     if k.is_none() {
-                        *k = Some(std::io::Error::other(e.to_string()));
+                        *k = Some(format!("refcount of {digest:?}: {e}"));
                     }
                     return None;
                 }
@@ -1188,6 +1195,11 @@ impl DictMetadataStore {
 
     fn finish_inner(&self, p: &mut PreparedCommit<'_>) -> Result<ObjectKey, MetaError> {
         let finish_started = std::time::Instant::now();
+        // A dropped refcount change: the trees lack it, so no root may be
+        // installed (the edits of `p` are dirty again).
+        if let Some(e) = self.refcount_error.lock().clone() {
+            return Err(MetaError::Corrupted(format!("commit: a refcount change was lost ({e}); reload the store")));
+        }
         let cs = Arc::clone(&self.cs);
         let mut w = NodeWriter::new(Arc::clone(&cs));
 
@@ -2150,6 +2162,7 @@ impl DictMetadataStore {
             unsynced_puts: AtomicU64::new(0),
             tree_flush: AtomicUsize::new(TREE_FLUSH),
             put_error: lk(None),
+            refcount_error: lk(None),
             inode_alloc: lk(inode_alloc).timed(Site::InodeAlloc),
             inodes,
             dirs,
@@ -4102,6 +4115,34 @@ mod tests {
         let io = Arc::new(Mutex::new(StoreIo::new("mem", Arc::new(cs))));
         let reloaded = DictMetadataStore::load_from_root(io, &root).unwrap();
         assert_eq!(reloaded.get_manifest(f).unwrap(), vec![ObjectKey::example(2)]);
+    }
+
+    // Review 26 A-WR-02: a refcount change that a tree read error dropped
+    // is never saved as a wrong count: no later commit of this store
+    // succeeds (a reload replays the write log on the last good root).
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support getgid (DictMetadataStore::new)")]
+    fn a_dropped_refcount_change_is_never_committed() {
+        use chunk_store::mem::MemIo;
+        let mem = MemIo::new();
+        let (io, store) = mem_store(&mem);
+        let k = ObjectKey::example(5);
+        store.increment_refcount(&k);
+        let root = store.commit().unwrap();
+        // A new store from the root, with an empty node cache.
+        let cs = Arc::clone(lock_stats::lock(&io, Site::Io).store());
+        let io = Arc::new(Mutex::new(StoreIo::new("mem", cs)));
+        let store = DictMetadataStore::load_from_root(Arc::clone(&io), &root).unwrap();
+        mem.set_fail_reads(true);
+        store.increment_refcount(&k);
+        mem.set_fail_reads(false);
+        for i in 0..3 {
+            if let Ok(r) = store.commit() {
+                let saved = DictMetadataStore::load_from_root(Arc::clone(&io), &r).unwrap().get_refcount(&k);
+                panic!("commit {i} after the dropped change saved the count {saved}");
+            }
+        }
+        assert_eq!(store.get_refcount(&k), 1, "the dropped change is not in the store");
     }
 
     #[test]
