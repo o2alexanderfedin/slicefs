@@ -308,6 +308,13 @@ fn msg_flat_maps(store: &Path) -> String {
     format!("{store} was made by SliceFS v2.3.0 (store format 7, flat metadata maps). This SliceFS reads store format 8 only. Copy the files into a new store with the steps in docs/user/upgrade.md.")
 }
 
+/// The refusal of a store of an interim build: a format 8 header, but the
+/// root record fields are flat maps, not prolly trees (M19).
+pub fn msg_interim_flat_maps(store: &Path) -> String {
+    let store = store.display();
+    format!("{store} was made by a development build of SliceFS (store format 8 with flat metadata maps). This SliceFS reads store format 8 with prolly metadata maps only. Copy the files into a new store with the steps in docs/user/upgrade.md.")
+}
+
 fn msg_newer(store: &Path, n: u32) -> String {
     let (store, known) = (store.display(), FORMAT_NUMBER);
     format!("{store} was made by a newer SliceFS (store format {n}). This SliceFS reads store format {known} only.")
