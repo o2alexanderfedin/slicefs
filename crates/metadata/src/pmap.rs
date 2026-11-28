@@ -44,7 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use chunk_store::lock_stats::Site;
 use chunk_store::sync::{self, Rank};
@@ -267,12 +267,37 @@ pub(crate) struct MapTree<K, V> {
     name: &'static str,
     overlay: Overlay<K, V>,
     tree: Tree,
+    /// Test hooks (see `fail_next_flush` and `set_flush_hook`).
+    fail_flush: AtomicBool,
+    flush_hook: sync::Mutex<Option<FlushHook>>,
 }
+
+/// A function that tests run inside a flush (see `MapTree::set_flush_hook`).
+pub(crate) type FlushHook = Arc<dyn Fn() + Send + Sync>;
 
 impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
     /// A map whose working root is `root`; its locks are timed as `site`.
     pub(crate) fn new(name: &'static str, site: Site, root: ObjectId) -> Self {
-        MapTree { name, overlay: Overlay::new(site), tree: Tree::new(site, root) }
+        MapTree {
+            name,
+            overlay: Overlay::new(site),
+            tree: Tree::new(site, root),
+            fail_flush: AtomicBool::new(false),
+            flush_hook: sync::Mutex::new(Rank::Store, None),
+        }
+    }
+
+    /// Make the next flush fail after its take (test hook): the entries are
+    /// requeued and the flush returns an error.
+    pub(crate) fn fail_next_flush(&self) {
+        self.fail_flush.store(true, Ordering::SeqCst);
+    }
+
+    /// Run `f` in each flush, between the install of the new root and the
+    /// settle of the overlay (test hook); `None` removes it. It runs with the
+    /// caller's apply lock held and no overlay or root lock held.
+    pub(crate) fn set_flush_hook(&self, f: Option<FlushHook>) {
+        *self.flush_hook.lock() = f;
     }
 
     /// The working root.
@@ -323,9 +348,17 @@ impl<K: TreeKey, V: TreeValue> MapTree<K, V> {
         if taken.is_empty() {
             return Ok(None);
         }
+        if self.fail_flush.swap(false, Ordering::SeqCst) {
+            self.overlay.requeue();
+            return Err(MetaError::Corrupted(format!("{} tree: injected flush fault", self.name)));
+        }
         match self.apply_batch(io, &self.tree.root(), &taken) {
             Ok((root, stats)) => {
                 self.tree.install(root);
+                let hook = self.flush_hook.lock().clone();
+                if let Some(h) = hook {
+                    h();
+                }
                 self.overlay.settle(&taken);
                 Ok(Some(stats))
             }

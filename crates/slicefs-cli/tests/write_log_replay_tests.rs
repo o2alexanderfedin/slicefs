@@ -835,8 +835,17 @@ fn cross_file_budget_steps_with_commits_replay_after_a_crash() {
 enum Window {
     /// Right after the cut (the gate is released), before any node is written.
     AfterCut,
+    /// The trees have applied their edits (nodes written), the root record is
+    /// not put (`CommitFault::AfterApply`).
+    AfterApply,
     /// The nodes of the root are written, nothing is synced.
     AfterNodes,
+    /// The trees have their new roots, nothing is synced
+    /// (`CommitFault::AfterInstall`).
+    AfterInstall,
+    /// The chunk store is synced, the file content is not
+    /// (`CommitFault::BeforePreRootSync`).
+    BeforePreRootSync,
     /// The nodes and the content are synced, the root is not logged.
     AfterSyncs,
     /// The root segment is durable, the old segments are not deleted yet.
@@ -859,6 +868,9 @@ enum Window {
 /// at `w`, then one more write on each open handle.
 fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
     use metadata::store::CommitFault;
+    // Flush the manifest tree at each manifest change, so the hot-path flush
+    // runs before the cut, after it, and after a commit that failed.
+    fs.meta().test_set_tree_flush(1);
     let t0 = 1_700_000_000i64;
     let a = {
         let _t = at(t0);
@@ -954,8 +966,20 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
     let _t = at(t0 + 60);
     match w {
         Window::AfterCut => std::mem::forget(cut),
+        Window::AfterApply => {
+            fs.meta().test_fail_next_commit_at(CommitFault::AfterApply);
+            assert!(fs.commit_cut_finish(cut).is_err());
+        }
         Window::AfterNodes => {
             fs.meta().test_fail_next_commit_at(CommitFault::BeforeSync);
+            assert!(fs.commit_cut_finish(cut).is_err());
+        }
+        Window::AfterInstall => {
+            fs.meta().test_fail_next_commit_at(CommitFault::AfterInstall);
+            assert!(fs.commit_cut_finish(cut).is_err());
+        }
+        Window::BeforePreRootSync => {
+            fs.meta().test_fail_next_commit_at(CommitFault::BeforePreRootSync);
             assert!(fs.commit_cut_finish(cut).is_err());
         }
         Window::AfterSyncs => {
@@ -986,7 +1010,27 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
             }
         }
         Window::Done => {
-            fs.commit_cut_finish(cut).unwrap();
+            let root = fs.commit_cut_finish(cut).unwrap();
+            // The committed root holds the state at the cut and no request
+            // after it (RESEARCH Pitfall 2): loaded with no log.
+            let at_cut = metadata::store::DictMetadataStore::load_from_root(Arc::clone(fs.meta().io()), &root).unwrap();
+            for name in ["kept.bin", "a.bin", "r.bin", "b.bin", "ooo.bin", "d"] {
+                assert!(at_cut.lookup(1, name).is_ok(), "{name} is in the committed root");
+            }
+            for name in ["kept2.bin", "late.bin"] {
+                assert!(at_cut.lookup(1, name).is_err(), "{name} was made after the cut");
+            }
+            let d = at_cut.lookup(1, "d").unwrap();
+            for i in 0..20 {
+                let x = at_cut.lookup(d, &format!("x{i}")).expect("in the committed root");
+                assert!(at_cut.get_manifest(x).is_ok(), "d/x{i} has its manifest in the committed root");
+            }
+            // late.bin was made, with its manifest, after the cut: the live
+            // store has the manifest, the committed root has neither.
+            let late = fs.meta().lookup(1, "late.bin").unwrap();
+            assert!(fs.meta().get_manifest(late).is_ok(), "the live store has the manifest of late.bin");
+            assert!(at_cut.get_inode(late).is_err() && at_cut.get_manifest(late).is_err(),
+                "late.bin is not in the committed root");
         }
         Window::GcDuringFinish => {
             // An online GC starts while the commit finishes: it waits for
@@ -1013,7 +1057,8 @@ fn cut_window_scenario(fs: &SliceFsFilesystem, store: &Path, w: Window) {
 fn a_crash_between_the_cut_and_the_root_replays() {
     // Periodic with a 1 s timer: its syncs run beside the cut and the root install.
     for config in [WalConfig::PerOp, WalConfig::FlushOnFsync, WalConfig::Periodic { interval_secs: 1 }] {
-        for w in [Window::AfterCut, Window::AfterNodes, Window::AfterSyncs, Window::AfterRoot,
+        for w in [Window::AfterCut, Window::AfterApply, Window::AfterNodes, Window::AfterInstall,
+                  Window::BeforePreRootSync, Window::AfterSyncs, Window::AfterRoot,
                   Window::RootTorn, Window::RootHeaderOnly, Window::RootEmpty, Window::Done,
                   Window::GcDuringFinish] {
             // One thread per run: a window that forgets the cut keeps its
