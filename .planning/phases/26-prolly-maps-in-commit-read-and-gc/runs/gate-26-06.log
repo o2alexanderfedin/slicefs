@@ -1,0 +1,168 @@
+== lib
+test snapshot::tests::test_snapshot_list_empty ... ok
+test snapshot::tests::test_snapshot_create_with_name_succeeds ... ok
+test snapshot::tests::test_snapshot_create_succeeds_on_unmounted_store ... ok
+test unmount::tests::the_wait_ends_when_the_process_exits ... ok
+test overlay::tests::a_copy_then_discard_at_one_gen_equals_take ... ok
+test snapshot::tests::test_snapshot_list_after_create ... ok
+test stats::tests::stats_of_a_normal_store_shows_no_flags ... ok
+test stats::tests::stats_shows_the_header ... ok
+test unmount::tests::the_wait_ends_when_the_store_lock_is_free ... ok
+test unmount::tests::test_kill_processes_at_mountpoint_temp_dir_does_not_panic ... ok
+test stats::tests::test_stats_mounted_store_json_succeeds ... ok
+test snapshot::tests::test_snapshot_switch_refuses_mounted_store ... ok
+test stats::tests::test_stats_segment_store_succeeds ... ok
+test stats::tests::test_stats_mounted_store_succeeds ... ok
+test scrub::tests::test_scrub_verifies_objects_of_both_hashes ... ok
+test stats::tests::test_stats_segment_store_json_output ... ok
+test snapshot::tests::test_snapshot_switch_unknown_ref_fails ... ok
+Unmount failed for /nonexistent/path/that/cannot/be/a/mountpoint
+umount: /nonexistent/path/that/cannot/be/a/mountpoint: not currently mounted
+test unmount::tests::test_run_unmount_nonexistent_path_returns_error ... ok
+Unmount failed for /nonexistent/path/that/cannot/be/mounted
+umount: /nonexistent/path/that/cannot/be/mounted: not currently mounted
+test unmount::tests::test_run_unmount_returns_error_message_with_path ... ok
+Unmount failed for /nonexistent/not_a_mountpoint
+umount: /nonexistent/not_a_mountpoint: not currently mounted
+test unmount::tests::test_run_unmount_with_nonexistent_store_cleans_nothing ... ok
+test snapshot::tests::test_snapshot_switch_by_version ... ok
+test snapshot::tests::test_snapshot_switch_by_name ... ok
+test stats::tests::stats_shows_the_chunk_profile ... ok
+test gc::tests::a_sorter_io_error_in_the_mark_fails_the_gc_and_deletes_nothing ... ok
+test mount::tests::offline_commands_see_a_ro_compat_mount ... ok
+test seed::tests::test_seed_file_larger_than_read_buffer ... ok
+test header::tests::two_parallel_creates_of_a_new_store_agree ... ok
+test online_gc::tests::a_request_without_a_mount_times_out_and_is_removed ... ok
+test online_gc::tests::an_old_heartbeat_does_not_keep_the_request_waiting ... ok
+test online_gc::tests::a_request_waits_while_a_gc_runs_and_is_taken_after_it ... ok
+test commit_timer::tests::a_timed_commit_holds_the_gate_for_a_small_part_of_the_commit ... ok
+
+test result: ok. 419 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.01s
+
+rc=0
+== cli-tests
+test test_load_store_ignores_non_segment_files ... ok
+test test_load_store_with_flush_on_fsync_wal ... ok
+test test_load_store_with_periodic_wal ... ok
+test test_load_store_empty_segment_file_skipped ... ok
+test a_second_writable_load_is_refused_while_the_first_runs ... ok
+test test_load_store_with_multiple_valid_segments ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+
+     Running tests/rehash_tests.rs (target/debug/deps/rehash_tests-a6a41a25a580f536)
+
+running 25 tests
+test refuse_a_path_with_no_store ... ok
+test refuse_with_a_mount_lock_file ... ok
+test refuse_an_unknown_target ... ok
+test refuse_an_unknown_header_hash ... ok
+test refuse_with_write_log_records_after_the_last_root ... ok
+test refuse_while_the_store_lock_is_held_exclusive ... ok
+test refuse_while_the_store_lock_is_held_shared ... ok
+test verify_a_damaged_object_stops_before_the_switch ... ok
+test dry_run_refuses_like_a_real_run ... ok
+test a_store_with_only_target_objects_gets_the_header_line ... ok
+test a_writable_open_removes_a_stale_rehash_tmp ... ok
+test dry_run_changes_nothing_and_reports_an_estimate ... ok
+test progress_lines_come_at_each_step ... ok
+test report_has_the_counts_and_bytes_freed ... ok
+test a_blake3_store_rehashes_to_sha256 ... ok
+test crash_with_a_stale_seg_tmp_then_rerun ... ok
+test crash_with_old_segments_left_after_the_switch ... ok
+test crash_inside_the_rewrite_then_rerun ... ok
+test round_trip_large_profile_keys_equal_fresh_writes ... ok
+test a_second_run_finds_nothing_to_rewrite ... ok
+test round_trip_blake3_to_sha256_and_back ... ok
+test round_trip_sha256_to_blake3_and_back ... ok
+test round_trip_mixed_store_ends_with_one_hash ... ok
+test dry_run_counts_equal_the_real_run ... ok
+test crash_after_each_step_then_rerun ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.79s
+
+rc=0
+== clippy
+35 | tokio      = { version = "1", features = ["full"] }
+   | ^^^^^
+   |
+help: consider removing the workspace dependency `tokio`
+warning: workspace (manifest) generated 5 warnings
+   Compiling slicefs-cli v0.1.0 (<repo>/crates/slicefs-cli)
+warning: struct `cuse_init_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:635:19
+    |
+635 | pub(crate) struct cuse_init_in {
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `cuse_init_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:644:19
+    |
+644 | pub(crate) struct cuse_init_out {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `fuse_ioctl_iovec` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:689:19
+    |
+689 | pub(crate) struct fuse_ioctl_iovec {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_out` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:815:19
+    |
+815 | pub(crate) struct fuse_notify_retrieve_out {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `fuse_notify_retrieve_in` is never constructed
+   --> vendor/fuser/src/ll/fuse_abi.rs:825:19
+    |
+825 | pub(crate) struct fuse_notify_retrieve_in {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `fuser` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.55s
+rc=0
+== workspace
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cas_local
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests chunk_store
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests metadata
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests prolly
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slicefs_traits
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+rc=0

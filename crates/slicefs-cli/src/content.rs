@@ -298,8 +298,19 @@ pub fn open_with_hasher(store: &Path, hasher: &'static dyn ObjectHasher) -> std:
     open_inner(store, Some(hasher))
 }
 
+/// [`open`], with the boundary salt of the header that the open parsed
+/// (no second header read).
+fn open_with_salt(store: &Path) -> std::io::Result<(Content, Option<[u8; 32]>)> {
+    open_parsed(store, None)
+}
+
 fn open_inner(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::io::Result<Content> {
+    open_parsed(store, hasher).map(|(cs, _)| cs)
+}
+
+fn open_parsed(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::io::Result<(Content, Option<[u8; 32]>)> {
     let opened = header::check(store, Want::Write)?;
+    let salt = opened.header.as_ref().and_then(Header::boundary_salt);
     let hasher = match hasher {
         Some(h) => h,
         None => hasher_of(store, opened.header.as_ref())?,
@@ -307,7 +318,7 @@ fn open_inner(store: &Path, hasher: Option<&'static dyn ObjectHasher>) -> std::i
     remove_rehash_tmp(store)?;
     let opts = Options { hasher, profile: profile_of(opened.header.as_ref()), gc_tmp_dir: Some(store.join(GC_TMP_DIR)), gc_free_space: Some(crate::gc_pacing::fs_space), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
-    Ok(Arc::new(cs))
+    Ok((Arc::new(cs), salt))
 }
 
 /// The storage strategy of a store: chosen here, once, and injected into the
@@ -320,26 +331,37 @@ fn storage(store: &Path) -> Arc<dyn chunk_store::pack_io::PackIo> {
 
 /// The node store (metadata) of `store`, on the same chunk store as the
 /// file content.
+///
+/// The trees of the store are written with the boundary salt of its header
+/// (none if the header has no salt), so every writer cuts them the same way.
 pub fn store_io(store: &Path) -> std::io::Result<metadata::store_io::StoreIo> {
-    Ok(metadata::store_io::StoreIo::new(store, open(store)?))
+    let (cs, salt) = open_with_salt(store)?;
+    Ok(metadata::store_io::StoreIo::new(store, cs).with_tree_salt(salt))
 }
 
 /// The node store of `store` for reading only (see [`open_read_only`]).
 /// Load the root from the segments first, then open this: the open sees
 /// only the objects that are in the packs at that time.
 pub fn store_io_read_only(store: &Path) -> std::io::Result<metadata::store_io::StoreIo> {
-    Ok(metadata::store_io::StoreIo::new(store, open_read_only(store)?))
+    let (cs, salt) = open_read_only_with_salt(store)?;
+    Ok(metadata::store_io::StoreIo::new(store, cs).with_tree_salt(salt))
 }
 
 /// Open the content store of `store` for reading only: nothing on disk
 /// changes, also while a mount writes to it (for `scrub`). The header
 /// check comes first (`Want::Read`).
 pub fn open_read_only(store: &Path) -> std::io::Result<Content> {
+    open_read_only_with_salt(store).map(|(cs, _)| cs)
+}
+
+/// [`open_read_only`], with the boundary salt of the header it parsed.
+fn open_read_only_with_salt(store: &Path) -> std::io::Result<(Content, Option<[u8; 32]>)> {
     let opened = header::check(store, Want::Read)?;
+    let salt = opened.header.as_ref().and_then(Header::boundary_salt);
     let hasher = hasher_of(store, opened.header.as_ref())?;
     let opts = Options { read_only: true, hasher, profile: profile_of(opened.header.as_ref()), ..Options::default() };
     let cs = ChunkStore::open_with(storage(store), opts).map_err(std::io::Error::other)?;
-    Ok(Arc::new(cs))
+    Ok((Arc::new(cs), salt))
 }
 
 /// Parse `--compression`: `none`, `zstd` (level 3) or `zstd:LEVEL` (1-22).
@@ -362,13 +384,10 @@ pub fn parse_compression(s: &str) -> Result<i32, String> {
     }
 }
 
-/// Parse `--dirty-budget` and `--dirty-limit`: a whole number of bytes,
-/// with an optional binary suffix `K`, `M` or `G` (also `KiB`, `MiB`,
-/// `GiB`; any case; 1024-based). Refuses a sign, a fraction, another
-/// suffix, an overflow, and a value below `MIN_DIRTY_BYTES` (this also
-/// refuses 0).
-pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
-    use crate::filesystem::MIN_DIRTY_BYTES;
+/// Parse a size: a whole number of bytes, with an optional binary suffix
+/// `K`, `M` or `G` (also `KiB`, `MiB`, `GiB`; any case; 1024-based).
+/// Refuses a sign, a fraction, another suffix and an overflow.
+fn parse_size(s: &str) -> Result<usize, String> {
     let bad = || format!("invalid size {s:?}; use bytes, or a whole number with K, M or G (1024-based)");
     let digits = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, suffix) = s.split_at(digits);
@@ -382,15 +401,30 @@ pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
         "g" | "gib" => 1 << 30,
         _ => return Err(bad()),
     };
-    let bytes = num
-        .parse::<usize>()
+    num.parse::<usize>()
         .ok()
         .and_then(|n| n.checked_mul(unit))
-        .ok_or_else(|| format!("size {s:?} is too large"))?;
+        .ok_or_else(|| format!("size {s:?} is too large"))
+}
+
+/// Parse `--dirty-budget` and `--dirty-limit`: a size (see `parse_size`)
+/// of at least `MIN_DIRTY_BYTES` (this also refuses 0).
+pub fn parse_dirty_bytes(s: &str) -> Result<usize, String> {
+    use crate::filesystem::MIN_DIRTY_BYTES;
+    let bytes = parse_size(s)?;
     if bytes < MIN_DIRTY_BYTES {
         return Err(format!("size {s:?} is below the minimum of {}M ({MIN_DIRTY_BYTES} bytes)", MIN_DIRTY_BYTES >> 20));
     }
     Ok(bytes)
+}
+
+/// Parse `--meta-cache-size`: the size syntax of `--dirty-budget`, but any
+/// size above 0 (a small cache only costs reads; 0 is refused).
+pub fn parse_meta_cache_bytes(s: &str) -> Result<usize, String> {
+    match parse_size(s)? {
+        0 => Err(format!("size {s:?} is 0; the cache needs at least 1 byte")),
+        bytes => Ok(bytes),
+    }
 }
 
 pub use metadata::store_io::{to_key, to_id};
@@ -525,6 +559,17 @@ pub(crate) mod tests {
         assert_eq!(parse_dirty_bytes("4096K"), parse_dirty_bytes("4M"));
         assert_eq!(parse_dirty_bytes("4096kib"), Ok(4194304));
         assert_eq!(parse_dirty_bytes("1gib"), Ok(1073741824));
+    }
+
+    #[test]
+    fn meta_cache_size_takes_any_size_above_zero() {
+        assert_eq!(parse_meta_cache_bytes("64M"), Ok(64 << 20));
+        assert_eq!(parse_meta_cache_bytes("1M"), Ok(1 << 20));
+        assert_eq!(parse_meta_cache_bytes("1"), Ok(1));
+        assert_eq!(parse_meta_cache_bytes("2gib"), Ok(2 << 30));
+        for v in ["0", "0K", "1.5M", "64X", "", "-1", "99999999999G"] {
+            assert!(parse_meta_cache_bytes(v).is_err(), "{v:?} is refused");
+        }
     }
 
     #[test]

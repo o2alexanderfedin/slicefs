@@ -143,9 +143,13 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     let target = hasher_by_name(args.to).ok_or_else(|| content::parse_hash(args.to).unwrap_err())?;
     let _store_lock = header::lock_offline(store)?;
     // Read the header, then refuse what a command that writes refuses (a
-    // check with `Want::Write` could write a new header).
+    // check with `Want::Write` could write a new header). The boundary salt
+    // of the header goes to the trees that the rewrite builds, so they are
+    // the trees a writer of this store makes.
+    let mut tree_salt = None;
     if let Some(h) = header::check(store, Want::Read)?.header {
         header::decide(store, &h, Want::Write)?;
+        tree_salt = h.boundary_salt();
     }
     // A recorded write hash that this build does not know: refused here,
     // before any write (a later step reads it too).
@@ -164,7 +168,7 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     hook(args, Step::Checked)?;
 
     if args.dry_run {
-        return dry_run(args, target, &old, progress);
+        return dry_run(args, target, &old, tree_salt, progress);
     }
 
     // Step 2: the flag of the target hash, before its first object.
@@ -176,7 +180,7 @@ pub fn rehash_report_with(args: &RehashArgs<'_>, progress: &mut dyn FnMut(&str))
     // Steps 3 to 7. An error that is not a test-hook stop (a crash leaves
     // its files) removes the temp files of the run, best effort: the error
     // of the run is the one returned.
-    let r = rewrite_and_switch(args, target, &old, &segs, progress);
+    let r = rewrite_and_switch(args, target, &old, tree_salt, &segs, progress);
     if let Err(e) = &r
         && !e.is::<HookStop>()
     {
@@ -199,6 +203,7 @@ fn rewrite_and_switch(
     args: &RehashArgs<'_>,
     target: &'static dyn ObjectHasher,
     old: &RootSet,
+    tree_salt: Option<[u8; 32]>,
     segs: &Path,
     progress: &mut dyn FnMut(&str),
 ) -> Result<String, Error> {
@@ -215,8 +220,7 @@ fn rewrite_and_switch(
         progress_every: args.progress_every,
         progress: Some(&mut on_stats),
         stop_after_values: args.stop_after_values,
-        // The store's boundary salt: plan 26-06 passes the header value.
-        tree_salt: None,
+        tree_salt,
     };
     let (new, stats) = rehash_roots(&cs, old, opts).map_err(|e| -> Error {
         match e {
@@ -289,6 +293,7 @@ fn dry_run(
     args: &RehashArgs<'_>,
     target: &'static dyn ObjectHasher,
     old: &RootSet,
+    tree_salt: Option<[u8; 32]>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<String, Error> {
     let cs = content::open_read_only(args.store)?;
@@ -302,8 +307,7 @@ fn dry_run(
         progress_every: args.progress_every,
         progress: Some(&mut on_stats),
         stop_after_values: None,
-        // The store's boundary salt: plan 26-06 passes the header value.
-        tree_salt: None,
+        tree_salt,
     };
     let (_, stats) = rehash_roots(&cs, old, opts)?;
     Ok([

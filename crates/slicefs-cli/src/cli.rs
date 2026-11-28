@@ -129,6 +129,13 @@ pub enum Cmd {
         /// kept under its limit by its own writer instead.
         #[arg(long, value_name = "SECS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=u64::MAX / 1000))]
         dirty_expire: u64,
+        /// Byte cap of the metadata node cache (the decoded nodes of the
+        /// metadata trees). This is memory that the daemon may use, beside
+        /// --dirty-budget. SIZE is bytes, or a number with K, M or G
+        /// (1024-based). Default 64M. A small cap makes metadata reads
+        /// slower; it does not change any result.
+        #[arg(long, value_name = "SIZE", default_value = "64M", value_parser = crate::content::parse_meta_cache_bytes)]
+        meta_cache_size: usize,
         /// Request worker threads. Default on Linux: half the CPUs, at least
         /// 1 and at most 8; default on macOS: 1. With 1, each request runs
         /// on the FUSE reader thread. At least 1; an explicit value above 8
@@ -483,6 +490,35 @@ mod tests {
             for v in ["0", "-1", over.as_str()] {
                 assert!(dirty_times(&[opt, v]).is_err(), "{opt} {v} is refused");
             }
+        }
+    }
+
+    /// The `--meta-cache-size` value of `slicefs mount ... extra`.
+    fn meta_cache_size(extra: &[&str]) -> Result<usize, String> {
+        let args: Vec<&str> = ["slicefs", "mount", "/mnt", "--store", "/data"].into_iter().chain(extra.iter().copied()).collect();
+        match Cli::try_parse_from(&args).map_err(|e| e.to_string())?.command {
+            Cmd::Mount { meta_cache_size, .. } => Ok(meta_cache_size),
+            _ => panic!("expected Mount"),
+        }
+    }
+
+    #[test]
+    fn meta_cache_size_default_is_64_mib() {
+        assert_eq!(meta_cache_size(&[]), Ok(64 << 20));
+        assert_eq!(meta_cache_size(&[]), Ok(metadata::store_io::NODE_CACHE_BYTES));
+    }
+
+    #[test]
+    fn meta_cache_size_option_parses() {
+        assert_eq!(meta_cache_size(&["--meta-cache-size", "1M"]), Ok(1 << 20));
+        assert_eq!(meta_cache_size(&["--meta-cache-size", "512"]), Ok(512));
+        assert_eq!(meta_cache_size(&["--meta-cache-size=2G"]), Ok(2 << 30));
+    }
+
+    #[test]
+    fn meta_cache_size_bad_values_are_usage_errors() {
+        for v in ["0", "-1", "1.5M", "64X", "", "M", "99999999999G"] {
+            assert!(meta_cache_size(&["--meta-cache-size", v]).is_err(), "{v:?} is refused");
         }
     }
 
