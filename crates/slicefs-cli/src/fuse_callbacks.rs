@@ -528,15 +528,17 @@ impl Filesystem for MountedFs {
         ino: INodeNo,
         name: &OsStr,
         size: u32,
+        position: u32,
         reply: ReplyXattr,
     ) {
         let ino = ino.0;
         let name = name.to_os_string();
         let fs = Arc::clone(&self.fs);
         self.run(0, move || {
-            fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}", ts(), ino, name, size);
+            fuse_trace!("[{}][FUSE] getxattr: ENTRY ino={}, name={:?}, size={}, position={}", ts(), ino, name, size, position);
             let name_str = name.to_str().unwrap_or("");
-            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size, 0)) {
+            // `position` is set on macOS only (the resource fork, fuser patch 4).
+            match serve(&fs, || handle_getxattr(&fs, ino, name_str, size, position)) {
                 XattrResult::Size(sz) => {
                     fuse_trace!("[{}][FUSE] getxattr: EXIT ino={}, name={:?} -> size_query, value_len={}", ts(), ino, name, sz);
                     reply.size(sz);

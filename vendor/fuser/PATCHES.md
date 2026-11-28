@@ -2,12 +2,12 @@
 
 This is the fuser source tree at tag `v0.19.0` (upstream commit `893dfeb`), with the patches
 below. SliceFS uses it through `[patch.crates-io]` in the workspace `Cargo.toml`.
-Drop this copy only when a fuser release has all three fixes AND the FUSE-T smoke workflow
+Drop this copy only when a fuser release has all four fixes AND the FUSE-T smoke workflow
 (`.github/workflows/fuse-t-smoke.yml`: a real FUSE-T mount with a 1 GiB copy, renames and a
 remount) passes on that release. Unit tests are not enough: PR #789 as it is passes them and
 still breaks `mv` on FUSE-T (patch 2).
 
-All three patches are for FUSE-T on macOS. They were found with FUSE-T 1.2.x; see the
+Patches 1 to 3 are for FUSE-T on macOS. They were found with FUSE-T 1.2.x; see the
 upstream issue https://github.com/cberner/fuser/issues/761.
 
 ## 1. Size the INIT reply for the negotiated protocol minor version
@@ -63,3 +63,19 @@ before a request to `ENODEV` (clean exit on unmount). `send()` loops until the w
 is written. Both loops retry on `EINTR` and `EAGAIN`, as the 0.18 patch did. Reads and writes each take their own lock, so concurrent readers or senders
 cannot interleave bytes. Devices and seqpacket sockets are unchanged. This mirrors
 `lib/fuse_kern_chan.c` in FUSE-T's libfuse.
+
+## 4. Pass the getxattr position (macOS)
+
+Not sent upstream (a local change; it changes the `Filesystem::getxattr` signature).
+Files: `src/ll/request.rs` (`GetXAttr::position()`, unit test `getxattr_size_and_position`),
+`src/request.rs` (the `GetXAttr` dispatch), `src/lib.rs` (`Filesystem::getxattr` takes
+`position: u32`), `examples/simple.rs` (the new argument, unused).
+
+On macOS, `fuse_getxattr_in` carries a `position`: the resource fork
+(`com.apple.ResourceFork`) is read in parts from that offset. fuser parsed the field and
+dropped it, so every part of a read of the resource fork got the bytes from offset 0.
+`GetXAttr::position()` returns it on macOS and 0 on other systems (as `SetXAttr::position()`
+does), and the dispatch passes it to `Filesystem::getxattr`.
+
+If this copy is dropped for a release without this change, the position is 0 again: reads of
+the resource fork then start at offset 0, as before the patch.

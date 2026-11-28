@@ -974,6 +974,14 @@ mod op {
         pub(crate) fn size_u32(&self) -> u32 {
             self.arg.size
         }
+        /// The offset to read from. This will always be 0 except on `MacOS`, where only
+        /// the resource fork (`com.apple.ResourceFork`) uses it (local patch 4).
+        pub(crate) fn position(&self) -> u32 {
+            #[cfg(target_os = "macos")]
+            return self.arg.position;
+            #[cfg(not(target_os = "macos"))]
+            0
+        }
     }
 
     /// List extended attribute names.
@@ -2624,6 +2632,51 @@ mod tests {
                 assert_eq!(x.dest().dir, INodeNo(0x99aa_bbcc_ddee_ff00));
                 assert_eq!(x.dest().name, Path::new("new.txt"));
                 assert_eq!(x.flags(), crate::RenameFlags::RENAME_SWAP);
+            }
+            _ => panic!("Unexpected request operation"),
+        }
+    }
+
+    // GETXATTR of "user.ab" with a 256-byte buffer: the 8-byte fuse_getxattr_in
+    #[cfg(all(target_endian = "little", not(target_os = "macos")))]
+    const GETXATTR_REQUEST: AlignedData<[u8; 56]> = AlignedData([
+        0x38, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size, padding
+        0x75, 0x73, 0x65, 0x72, 0x2e, 0x61, 0x62, 0x00, // name
+    ]);
+
+    // The macOS fuse_getxattr_in (16 bytes) with position 4096 (the resource fork)
+    #[cfg(all(target_endian = "little", target_os = "macos"))]
+    const GETXATTR_REQUEST: AlignedData<[u8; 64]> = AlignedData([
+        0x40, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, // len, opcode
+        0x0d, 0xf0, 0xad, 0xba, 0xef, 0xbe, 0xad, 0xde, // unique
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // nodeid
+        0x0d, 0xd0, 0x01, 0xc0, 0xfe, 0xca, 0x01, 0xc0, // uid, gid
+        0x5e, 0xba, 0xde, 0xc0, 0x00, 0x00, 0x00, 0x00, // pid, padding
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size, padding
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // position, padding2
+        0x75, 0x73, 0x65, 0x72, 0x2e, 0x61, 0x62, 0x00, // name
+    ]);
+
+    /// The getxattr position reaches the filesystem: macOS sends it, other systems
+    /// have no such field and give 0 (local patch 4)
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn getxattr_size_and_position() {
+        let req = AnyRequest::try_from(&GETXATTR_REQUEST[..]).unwrap();
+        assert_eq!(req.header.opcode, 22);
+        match req.operation().unwrap() {
+            Operation::GetXAttr(x) => {
+                assert_eq!(x.name(), OsStr::new("user.ab"));
+                assert_eq!(x.size_u32(), 256);
+                #[cfg(target_os = "macos")]
+                assert_eq!(x.position(), 4096);
+                #[cfg(not(target_os = "macos"))]
+                assert_eq!(x.position(), 0);
             }
             _ => panic!("Unexpected request operation"),
         }
